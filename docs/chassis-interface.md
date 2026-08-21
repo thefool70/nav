@@ -13,6 +13,7 @@
 | 目标 | `TargetSearchGoal(target_text)`，`target_text` 为对目标的人类可读描述（如 "门口"） |
 | 感知快照 | `NavigationFrame(timestamp_s, pose, obstacle_map, ...)`，`timestamp_s` 单位为秒 |
 | 深度图 | `NavigationFrame.depth`，单位为米，`None` 表示无有效深度 |
+| 相机标定 | `CameraIntrinsics` 与 `camera_pose_in_robot`，RGB/深度必须对齐 |
 | 控制命令 | `RelativePoseCommand(forward_m, left_m, yaw_rad)`，机器人坐标系，向前 / 向左 / 逆时针为正 |
 | 状态 | `NavigationStatus`：OK / INVALID_INPUT / NO_SOLUTION / NOT_IMPLEMENTED |
 
@@ -21,6 +22,16 @@
 - `NavigationFrame.pose` 在进入 core 前必须已转换到
   `NavigationFrame.obstacle_map.frame_id` 坐标系，core 内部不做坐标转换；
   该转换由适配层负责。
+
+## 执行契约
+
+当前 `run_navigation_cycle` 采用同步命令语义：`send_relative_pose()` 返回时，
+该命令必须已经完成；执行失败则抛出明确异常。下一周期读取的位姿和图像必须
+是命令完成后的新状态。
+
+如果厂商 SDK 只提供异步接口，真机 Adapter 需要在内部等待完成反馈，不能在
+刚下发命令时就返回。以后若要支持连续速度控制，再统一扩展接口和状态机，
+不要只在真机实现中改变语义。
 
 ## 底盘到货前必须确认
 
@@ -46,9 +57,14 @@
 ### 图像标定
 - RGB 与深度图的尺寸、排列（行主序）与对齐关系（是否已配准）。
 - RGB 颜色空间（BGR/RGB）与取值范围。
+- 当前 core 只表达相机相对底座的平面位置和 yaw；若真机相机存在不可忽略的
+  pitch/roll，Adapter 需先校正深度，或在硬件参数确认后统一扩展标定契约。
 
 ### 命令覆盖与反馈语义
 - `send_relative_pose` 的位移/旋转覆盖范围、单位换算与限幅。
 - 相对位姿命令是纯运动执行还是自带路径规划 / 避障。
 - 命令是增量执行还是重置累计误差；执行期间是否返回反馈、如何表示完成或失败。
 - 底盘异常、未就绪、目标不可达时的行为如何映射到 `NavigationStatus`。
+
+只要上述数据、坐标、标定和同步执行契约全部归一化，仿真切换到真底盘时只需
+替换 `ChassisInterface` 的实现；`core` 与 `TargetObserver` 不应包含厂商分支。

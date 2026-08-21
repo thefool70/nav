@@ -1,50 +1,49 @@
 # 算法说明
 
-## 目标
+## 主流程
 
-给定对目标的人类可读描述（`TargetSearchGoal.target_text`，如 "门口"），机器人原地四向扫描感知环境、记录可探索方向并移动探索，直到定位目标或判定无法完成。
-
-## 流程
+阅读代码从 `core/navigator.py` 的 `navigate()` 开始。每次调用只推进一个周期，
+跨周期信息全部保存在 `SearchState`。
 
 ```text
-navigate(frame, goal, state)
- ├─ 校验输入 ──非法──► INVALID_INPUT（state 置 FAILED）
- └─ 合法
-     ├─ 无扫描朝向 ──► 以当前 yaw 初始化四向扫描
-     ├─ 四向扫描，每方向先转向、取得新观测、判断目标    （视觉观察，未迁入）
-     │    ├─ 可见 ──► 粗框/精框 ──► 深度定位 ──► 安全接近 ──► 到达后重新确认 ──► COMPLETE
-     │    │              （定位与接近闭环，未迁入）
-     │    └─ 不可见 ──► 记录方向评分
-     ├─ 四向都不可见后 ──► 提取并排序 Frontier          （Frontier 闭环，未迁入）
-     │    ├─ 选定候选，出发前才冻结观测历史节点
-     │    ├─ 移动到候选后以新地图判断新增 Frontier
-     │    └─ 无新增 ──► 回退历史                        （移动/回退闭环，未迁入）
-     └─ 输出新 state；合法输入返回 NOT_IMPLEMENTED、非法输入返回 INVALID_INPUT，均不发命令
+SCANNING
+  ├─ 目标可见 ──► LOCALIZING_TARGET ──► 接近并重新观察 ──► COMPLETE
+  └─ 四向均不可见
+         ↓
+     提取并排序可达 Frontier
+         ├─ 有候选 ──► 记录观测节点 ──► 移动 ──► SCANNING
+         └─ 无候选 ──► BACKTRACKING
+                              ├─ 找到历史待探索方向 ──► 移动 ──► SCANNING
+                              └─ 搜索空间耗尽 ──► FAILED
 ```
 
-## 模块到排错问题的映射
+## 各步骤输入输出
 
-| 问题现象 | 排查模块 |
-| --- | --- |
-| 输入被拒但理由不清 | `core/navigator.py` 的输入校验 |
-| 扫描朝向 / 最短转角不对 | `core/scan.py` |
-| 世界 / 机器人 / 栅格坐标换算错误 | `core/geometry.py` |
-| 观测顺序、方向状态错乱 | `core/history.py` |
-| 周期状态丢失或错位 | `core/models.py` 的 `SearchState` 与调用方状态传递 |
-| 周期不推进、不发命令 | `core/navigator.py`（视觉未迁入，合法输入返回 NOT_IMPLEMENTED） |
+| 步骤 | 输入 | 输出 | 代码位置 |
+| --- | --- | --- | --- |
+| 目标观察 | RGB 与目标描述 | 可见性、方向评分、目标框 | `adapters/perception.py`（接口） |
+| 四向扫描 | 当前 yaw 与逐帧观测 | 四个世界航向及其证据 | `core/navigator.py`、`core/scan.py` |
+| 目标定位 | 目标框、对齐深度、相机标定、位姿 | 目标的机器人系/世界系坐标 | `core/grounding.py` |
+| Frontier | 局部占用图、位姿、首选方向 | 已排序的可达候选 | `core/frontier.py` |
+| 回退 | 观测节点与方向状态 | 最近的待探索方向 | `core/history.py`、`core/navigator.py` |
 
-## 关键输入输出
+目标可见时，算法使用目标框中央区域的近端深度中值估计位置，并移动到距目标
+约 0.75 m 的观察位置；到达后必须用新帧重新观察。目标不可见时，四个方向的
+视觉评分只影响 Frontier 排序，不能绕过地图可达性判断。
 
-- 输入：`NavigationFrame`（时间戳、位姿、障碍图、可选深度与 RGB）、
-  `TargetSearchGoal`、上周期 `SearchState`。
-- 输出：`NavigationResult`（status、command、debug、显式 `SearchState`）；
-  下一周期把 `result.state` 作为 `navigate` 的输入。
-- 约定：长度单位米、角度弧度（逆时针为正）；yaw 与栅格映射的内部标准见
-  [chassis-interface.md](chassis-interface.md)。
+选择 Frontier 前会把当前位置及全部候选冻结为一个观测节点：本次选择标为
+`COMMITTED`，其余标为 `PENDING`。新位置没有可用 Frontier 时，本次方向变为
+`EXPLORED`，算法回到最近仍含 `PENDING` 方向的节点；新地图已判定为障碍的
+历史候选会变为 `INVALIDATED`。
 
-## 当前明确的未实现边界
+## 当前边界
 
-- 视觉观察、深度定位、Frontier 提取与排序、移动闭环均未迁入，`navigate`
-  合法输入返回 `NOT_IMPLEMENTED`、非法输入返回 `INVALID_INPUT`，两种情况均
-  `command=None`，不发送控制命令。
-- 控制命令不包含行走规划：相对位姿命令是否自带路径规划 / 避障由底盘决定。
+- 具体视觉/VLM 尚未选择，因此项目只定义 `TargetObserver` 契约。没有视觉
+  结果、目标框或可靠深度时，算法会停止并给出明确原因。
+- 控制输出是高层相对位姿，不包含速度控制和实时避障；路径规划、执行完成和
+  失败反馈由 Adapter 后面的仿真器或底盘负责。
+- 当前没有模型重试、超时、动态障碍预测和真实运动学。这些应在实际出现需求
+  后补充，不进入第一版算法主干。
+
+所有距离使用米，角度使用弧度且逆时针为正。坐标与地图契约见
+[chassis-interface.md](chassis-interface.md)。
