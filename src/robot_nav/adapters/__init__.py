@@ -1,0 +1,5 @@
+"""外部系统适配层：连接核心算法与底盘等外部设备。"""
+
+from .chassis import ChassisInterface
+
+__all__ = ["ChassisInterface"]
