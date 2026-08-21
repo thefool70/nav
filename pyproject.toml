@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "robot-nav"
 version = "0.1.0"
 description = "Minimal Python framework for robot navigation algorithms"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = []
 
 [tool.setuptools.packages.find]

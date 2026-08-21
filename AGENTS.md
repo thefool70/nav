@@ -11,6 +11,12 @@
 3. 能沿着数据流快速定位算法问题。
 4. 文档简洁、面向人类，并足以帮助理解和使用项目。
 
+## 开发设备
+
+- Arch Linux on WSL2；NVIDIA GeForce RTX 3060 12 GB。
+- NVIDIA 驱动可用且报告 CUDA 13.3，但 CUDA Toolkit/nvcc 尚未安装。
+- Codex 受限沙箱可能隐藏 /dev/dxg，不能据此判断无 GPU/CUDA。
+
 ## Agent 分工
 
 - GPT-5.6 Sol 负责澄清需求、规划算法、确定模块边界与统一规范，并在实现后检查改动。

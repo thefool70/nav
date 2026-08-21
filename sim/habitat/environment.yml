@@ -1,0 +1,11 @@
+name: robot-nav-habitat
+channels:
+  - https://conda.anaconda.org/aihabitat
+  - https://conda.anaconda.org/conda-forge
+dependencies:
+  - python=3.9
+  - habitat-sim=0.3.3
+  - withbullet
+  - git-lfs
+  - mesa-llvmpipe=26.2.1  # CPU 回退；WSL GPU 渲染依赖系统 Arch Mesa，不在 conda 环境中安装
+  - pip
