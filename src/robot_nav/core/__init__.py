@@ -3,23 +3,33 @@
 from .models import (
     NavigationDebug,
     NavigationFrame,
-    NavigationGoal,
     NavigationResult,
     NavigationStatus,
+    ObservationNode,
     ObstacleMap,
     Pose2D,
     RelativePoseCommand,
+    SearchDirection,
+    SearchDirectionState,
+    SearchPhase,
+    SearchState,
+    TargetSearchGoal,
 )
 from .navigator import navigate
 
 __all__ = [
     "NavigationDebug",
     "NavigationFrame",
-    "NavigationGoal",
     "NavigationResult",
     "NavigationStatus",
+    "ObservationNode",
     "ObstacleMap",
     "Pose2D",
     "RelativePoseCommand",
+    "SearchDirection",
+    "SearchDirectionState",
+    "SearchPhase",
+    "SearchState",
+    "TargetSearchGoal",
     "navigate",
 ]

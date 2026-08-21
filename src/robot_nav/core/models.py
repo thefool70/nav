@@ -31,10 +31,11 @@ class Pose2D:
 
 @dataclass(frozen=True, slots=True)
 class ObstacleMap:
-    """占用栅格。occupancy[y][x]，值 0.0 自由、1.0 占用、None 未知。
+    """占用栅格。occupancy[row][col]，值 0.0 自由、1.0 占用、None 未知。
 
-    resolution_m 为每格边长（米/格）；origin 为格 (0,0) 在世界坐标系中的位姿；
-    frame_id 为地图所在坐标系。
+    resolution_m 为每格边长（米/格）；origin 为格 (row=0, col=0) 中心在世界
+    坐标系中的位姿，列沿 origin 局部 +x 方向增长，行沿 origin 局部 +y 方向
+    增长；frame_id 为地图所在坐标系。
     """
 
     occupancy: Grid
@@ -48,8 +49,8 @@ class NavigationFrame:
     """单周期感知快照。timestamp_s 为采集时刻（秒）；pose 为机器人位姿；
     obstacle_map 为障碍图；depth 与 rgb 可选，depth 单位米。
 
-    契约：pose 与 NavigationGoal.target 在进入 core 前都必须已转换到
-    obstacle_map.frame_id 坐标系，core 内部不再做坐标转换。
+    契约：pose 在进入 core 前必须已转换到 obstacle_map.frame_id 坐标系，
+    core 内部不再做坐标转换。
     """
 
     timestamp_s: float
@@ -60,14 +61,10 @@ class NavigationFrame:
 
 
 @dataclass(frozen=True, slots=True)
-class NavigationGoal:
-    """导航目标，为地图坐标系下的目标位姿。
+class TargetSearchGoal:
+    """语义目标搜索目标，target_text 为对目标的人类可读描述（如 "门口"）。"""
 
-    契约：target 必须已转换到 NavigationFrame.obstacle_map.frame_id 坐标系，
-    core 内部不做坐标转换。
-    """
-
-    target: Pose2D
+    target_text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +74,58 @@ class RelativePoseCommand:
     forward_m: float = 0.0
     left_m: float = 0.0
     yaw_rad: float = 0.0
+
+
+class SearchPhase(Enum):
+    """语义目标搜索的阶段。"""
+
+    SCANNING = "scanning"
+    LOCALIZING_TARGET = "localizing_target"
+    EXPLORING = "exploring"
+    BACKTRACKING = "backtracking"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class SearchDirectionState(Enum):
+    """单个搜索方向的状态。"""
+
+    PENDING = "pending"
+    COMMITTED = "committed"
+    EXPLORED = "explored"
+    INVALIDATED = "invalidated"
+
+
+@dataclass(frozen=True, slots=True)
+class SearchDirection:
+    """一次已记录的搜索方向。heading_world_rad 为世界坐标系下的朝向（弧度），
+    candidate_world_xy 为可选的目标候选点（米），state 为方向状态。"""
+
+    direction_id: str
+    heading_world_rad: float
+    candidate_world_xy: Optional[Tuple[float, float]] = None
+    state: SearchDirectionState = SearchDirectionState.PENDING
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationNode:
+    """一次观测时机器人所在位置及其在该位置记录的方向序列。"""
+
+    node_id: str
+    position_world_xy: Tuple[float, float]
+    directions: Tuple[SearchDirection, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SearchState:
+    """语义目标搜索的周期状态。scan_headings_world_rad 为世界系扫描朝向
+    序列，next_scan_index 为下一个待扫描朝向的下标，observation_history
+    按时间顺序保存观测节点。"""
+
+    phase: SearchPhase = SearchPhase.SCANNING
+    scan_headings_world_rad: Tuple[float, ...] = ()
+    next_scan_index: int = 0
+    observation_history: Tuple[ObservationNode, ...] = ()
 
 
 class NavigationStatus(Enum):
@@ -100,8 +149,10 @@ class NavigationDebug:
 
 @dataclass(frozen=True, slots=True)
 class NavigationResult:
-    """导航单周期输出。command 仅在 status 为 OK 时有意义，否则为 None。"""
+    """导航单周期输出。command 仅在 status 为 OK 时有意义，否则为 None；
+    state 为周期结束后的显式搜索状态，调用方应将其作为下一周期的输入。"""
 
     status: NavigationStatus
     command: Optional[RelativePoseCommand]
     debug: NavigationDebug
+    state: SearchState
