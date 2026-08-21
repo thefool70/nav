@@ -8,19 +8,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Optional, Sequence, Tuple, TypeAlias
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 # 栅格数据：外层为行（y），内层为列（x），None 表示该格未知/无效。
-Grid: TypeAlias = Sequence[Sequence[Optional[float]]]
+Grid = Sequence[Sequence[Optional[float]]]
 # 深度图：单位为米，None 表示该像素无有效深度。
-DepthImage: TypeAlias = Sequence[Sequence[Optional[float]]]
+DepthImage = Sequence[Sequence[Optional[float]]]
 # 单像素 RGB 三元组，取值 0-255。
-RGB: TypeAlias = Tuple[int, int, int]
+RGB = Tuple[int, int, int]
 # RGB 图像：外层为行（y），内层为列（x）。
-RgbImage: TypeAlias = Sequence[Sequence[RGB]]
+RgbImage = Sequence[Sequence[RGB]]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Pose2D:
     """二维位姿。x_m、y_m 单位为米，yaw_rad 逆时针为正。坐标系由使用处声明。"""
 
@@ -29,7 +29,7 @@ class Pose2D:
     yaw_rad: float
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ObstacleMap:
     """占用栅格。occupancy[row][col]，值 0.0 自由、1.0 占用、None 未知。
 
@@ -44,10 +44,22 @@ class ObstacleMap:
     frame_id: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
+class CameraIntrinsics:
+    """针孔相机内参。fx、fy 单位为像素，cx、cy 为主点像素坐标。"""
+
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+
+
+@dataclass(frozen=True)
 class NavigationFrame:
     """单周期感知快照。timestamp_s 为采集时刻（秒）；pose 为机器人位姿；
-    obstacle_map 为障碍图；depth 与 rgb 可选，depth 单位米。
+    obstacle_map 为障碍图；depth 与 rgb 可选，depth 单位米；
+    camera_intrinsics 为可选相机内参；camera_pose_in_robot 为相机在机器人
+    局部 forward/left/yaw 二维坐标系中的外参（无相机时保持默认零位姿）。
 
     契约：pose 在进入 core 前必须已转换到 obstacle_map.frame_id 坐标系，
     core 内部不再做坐标转换。
@@ -58,16 +70,84 @@ class NavigationFrame:
     obstacle_map: ObstacleMap
     depth: Optional[DepthImage] = None
     rgb: Optional[RgbImage] = None
+    camera_intrinsics: Optional[CameraIntrinsics] = None
+    camera_pose_in_robot: Pose2D = field(
+        default_factory=lambda: Pose2D(0.0, 0.0, 0.0)
+    )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class TargetSearchGoal:
     """语义目标搜索目标，target_text 为对目标的人类可读描述（如 "门口"）。"""
 
     target_text: str
 
 
-@dataclass(frozen=True, slots=True)
+class TargetVisibility(Enum):
+    """视觉/VLM 对目标可见性的判定结果。"""
+
+    VISIBLE = "visible"
+    NOT_VISIBLE = "not_visible"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True)
+class TargetObservation:
+    """视觉/VLM 对单帧图像中语义目标的观测结果。direction_score 为当前
+    方向的探索价值（0-1，越大越值得优先探索）；bbox_norm 为归一化包围盒
+    (x_min, y_min, x_max, y_max)，取值 0-1；reason 为人类可读说明。"""
+
+    visibility: TargetVisibility
+    direction_score: Optional[float] = None
+    bbox_norm: Optional[Tuple[float, float, float, float]] = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ScanEvidence:
+    """一次扫描中单个方向的观测证据。heading_world_rad 为该方向在世界
+    坐标系下的朝向（弧度），direction_score 为该方向的探索价值。"""
+
+    heading_world_rad: float
+    visibility: TargetVisibility
+    direction_score: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class FrontierCandidate:
+    """一次扫描中发现的前沿候选点。row、col 为在障碍图中的栅格坐标，
+    world_xy 为世界坐标（米）；heading_world_rad 为朝向该候选点的世界
+    系方向（弧度）；frontier_cell_count 为该前沿的栅格数；path_distance_m
+    为沿路径到该点的距离（米）；score 为探索优先级。"""
+
+    candidate_id: str
+    row: int
+    col: int
+    world_xy: Tuple[float, float]
+    heading_world_rad: float
+    frontier_cell_count: int
+    path_distance_m: float
+    score: float
+
+
+@dataclass(frozen=True)
+class TargetEstimate:
+    """对目标位置的估计结果。target_base_xy 为目标在机器人 base 坐标系下
+    的坐标（米，前 x 左 y），target_world_xy 为世界坐标系坐标（米）；
+    distance_m 为距离（米），bearing_rad 为机器人局部系方位角（弧度）；
+    sample_count 为参与估计的观测样本数。失败时 target_base_xy、
+    target_world_xy、distance_m、bearing_rad 为 None。"""
+
+    success: bool
+    reason: str
+    target_base_xy: Optional[Tuple[float, float]] = None
+    target_world_xy: Optional[Tuple[float, float]] = None
+    distance_m: Optional[float] = None
+    bearing_rad: Optional[float] = None
+    sample_count: int = 0
+
+
+@dataclass(frozen=True)
 class RelativePoseCommand:
     """相对机器人当前位姿的移动量。forward_m 向前、left_m 向左、yaw_rad 逆时针为正。"""
 
@@ -96,7 +176,7 @@ class SearchDirectionState(Enum):
     INVALIDATED = "invalidated"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class SearchDirection:
     """一次已记录的搜索方向。heading_world_rad 为世界坐标系下的朝向（弧度），
     candidate_world_xy 为可选的目标候选点（米），state 为方向状态。"""
@@ -107,7 +187,7 @@ class SearchDirection:
     state: SearchDirectionState = SearchDirectionState.PENDING
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ObservationNode:
     """一次观测时机器人所在位置及其在该位置记录的方向序列。"""
 
@@ -116,16 +196,21 @@ class ObservationNode:
     directions: Tuple[SearchDirection, ...]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class SearchState:
     """语义目标搜索的周期状态。scan_headings_world_rad 为世界系扫描朝向
     序列，next_scan_index 为下一个待扫描朝向的下标，observation_history
-    按时间顺序保存观测节点。"""
+    按时间顺序保存观测节点，scan_evidence 保存最近一次扫描的逐方向观测
+    证据，active_node_id 为当前活跃观测节点，target_approach_attempts 为
+    已尝试接近目标的次数。"""
 
     phase: SearchPhase = SearchPhase.SCANNING
     scan_headings_world_rad: Tuple[float, ...] = ()
     next_scan_index: int = 0
     observation_history: Tuple[ObservationNode, ...] = ()
+    scan_evidence: Tuple[ScanEvidence, ...] = ()
+    active_node_id: Optional[str] = None
+    target_approach_attempts: int = 0
 
 
 class NavigationStatus(Enum):
@@ -137,7 +222,7 @@ class NavigationStatus(Enum):
     NOT_IMPLEMENTED = "not_implemented"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class NavigationDebug:
     """供排错使用的可读信息。stage 为当前算法步骤，message 为人类可读说明，
     details 为附加键值。"""
@@ -147,7 +232,7 @@ class NavigationDebug:
     details: Mapping[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class NavigationResult:
     """导航单周期输出。command 仅在 status 为 OK 时有意义，否则为 None；
     state 为周期结束后的显式搜索状态，调用方应将其作为下一周期的输入。"""

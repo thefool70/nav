@@ -1,6 +1,8 @@
 """核心导航算法与数据契约，不依赖 ROS、底盘 SDK、文件系统或 adapters。"""
 
 from .models import (
+    CameraIntrinsics,
+    FrontierCandidate,
     NavigationDebug,
     NavigationFrame,
     NavigationResult,
@@ -9,15 +11,21 @@ from .models import (
     ObstacleMap,
     Pose2D,
     RelativePoseCommand,
+    ScanEvidence,
     SearchDirection,
     SearchDirectionState,
     SearchPhase,
     SearchState,
+    TargetEstimate,
+    TargetObservation,
     TargetSearchGoal,
+    TargetVisibility,
 )
 from .navigator import navigate
 
 __all__ = [
+    "CameraIntrinsics",
+    "FrontierCandidate",
     "NavigationDebug",
     "NavigationFrame",
     "NavigationResult",
@@ -26,10 +34,14 @@ __all__ = [
     "ObstacleMap",
     "Pose2D",
     "RelativePoseCommand",
+    "ScanEvidence",
     "SearchDirection",
     "SearchDirectionState",
     "SearchPhase",
     "SearchState",
+    "TargetEstimate",
+    "TargetObservation",
     "TargetSearchGoal",
+    "TargetVisibility",
     "navigate",
 ]

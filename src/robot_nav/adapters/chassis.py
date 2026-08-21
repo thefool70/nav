@@ -8,7 +8,9 @@ from ..core.models import NavigationFrame, RelativePoseCommand
 class ChassisInterface(Protocol):
     """底盘最小接口：读取一帧感知，发送相对位姿控制命令。
 
-    厂商原始协议、单位换算与坐标转换由具体实现负责，不在此猜测。
+    厂商原始协议、单位换算与坐标转换由具体实现负责，不在此猜测。当前调用
+    模式是同步的：发送函数返回后，下一次 ``read_frame`` 必须能反映本次命令
+    已完成或已明确失败。
     """
 
     def read_frame(self) -> NavigationFrame:
@@ -16,5 +18,5 @@ class ChassisInterface(Protocol):
         ...
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
-        """向底盘发送相对当前位姿的控制命令。"""
+        """执行相对当前位姿的命令；完成后返回，失败时抛出明确异常。"""
         ...
