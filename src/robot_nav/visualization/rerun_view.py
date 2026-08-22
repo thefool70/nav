@@ -79,7 +79,7 @@ class RerunVisualizer:
         if self._status_font is None:
             _print_font_notice_once()
         rr.init("robot-nav")
-        rr.serve_web(open_browser=False, web_port=9090, ws_port=9877)
+        rr.serve_web(open_browser=True, web_port=9090, ws_port=9877)
         print(
             "Rerun Web Viewer 地址："
             "http://127.0.0.1:9090/?url=ws://127.0.0.1:9877"

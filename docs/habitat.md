@@ -59,8 +59,8 @@ sim/habitat/run.sh python -m robot_nav habitat \
 完整导航默认启动 Rerun Web Viewer 实时可视化（记录算法决策帧及 Habitat 每个
 动作后的 RGB、米制深度、三色占用图、机器人位姿与轨迹，同时保留最近的控制
 命令、历史候选点和算法状态），
-在 Windows 浏览器打开
-[Rerun Web Viewer](http://127.0.0.1:9090/?url=ws://127.0.0.1:9877) 查看；该地址
+默认自动打开浏览器，未自动打开时使用该链接
+[Rerun Web Viewer](http://127.0.0.1:9090/?url=ws://127.0.0.1:9877)；该地址
 显式连接 9877 数据端口，同时避免 Rerun 继承 Habitat 的无窗口 EGL 图形环境。
 不需要时加 `--no-rerun` 关闭。
 
