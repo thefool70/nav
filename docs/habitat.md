@@ -38,17 +38,52 @@ NVIDIA EGL 环境需要时，可给 demo 增加 `--gpu-device-id 0`；当前 WSL
 
 ## 接入算法
 
-Adapter 已实现 `ChassisInterface`，可直接传入 `run_navigation_cycle`：
+Adapter 已实现 `ChassisInterface`，直接传入同一个 `run_navigation_cycle`。
+OpenAI-compatible 观察器需要完整的 Chat Completions 地址、模型名和可选 Key；
+这些值由运行环境提供，不写入仓库：
 
 ```python
+import os
+
+from robot_nav.adapters.habitat import HabitatChassisAdapter, HabitatConfig
+from robot_nav.adapters.openai_compatible import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleTargetObserver,
+)
+from robot_nav.app import run_navigation_cycle
+from robot_nav.core.models import (
+    NavigationStatus,
+    SearchPhase,
+    TargetSearchGoal,
+)
+
+observer = OpenAICompatibleTargetObserver(
+    OpenAICompatibleConfig(
+        endpoint_url=os.environ["ROBOT_NAV_VLM_ENDPOINT"],
+        model=os.environ["ROBOT_NAV_VLM_MODEL"],
+        api_key=os.environ.get("ROBOT_NAV_VLM_API_KEY", ""),
+    )
+)
+goal = TargetSearchGoal("门口")
 state = None
-with HabitatChassisAdapter(config) as chassis:
-    result = run_navigation_cycle(chassis, goal, state, observer)
-    state = result.state
+with HabitatChassisAdapter(HabitatConfig(scene_path="场景.glb")) as chassis:
+    for _ in range(200):
+        result = run_navigation_cycle(chassis, goal, state, observer)
+        state = result.state
+        print(result.debug.stage, result.debug.message)
+        if (
+            result.status is not NavigationStatus.OK
+            or state.phase is SearchPhase.COMPLETE
+        ):
+            break
 ```
 
-这里的 `observer` 必须是具体的 `TargetObserver`。项目尚未绑定某个视觉/VLM，
-所以 adapter demo 只验证仿真输入边界，不会假造语义目标结果。
+`ROBOT_NAV_VLM_ENDPOINT` 应指向完整的 `.../v1/chat/completions` 接口。循环次数、
+停止条件和日志属于调用方策略；`run_navigation_cycle` 本身仍只推进一个周期。
+同一个观察器也可接收真底盘 Adapter 提供的 RGB，不包含 Habitat 分支。
+
+当前 adapter demo 仍只验证仿真输入边界，不调用外部模型，也不会假造语义
+目标结果。
 
 ## Adapter 约定
 

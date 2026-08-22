@@ -22,11 +22,11 @@ TargetObserver ────► TargetObservation ┘
 ## 当前能力
 
 - Habitat Adapter：RGB、深度、二维位姿、局部已知障碍图、相对位姿执行。
+- OpenAI-compatible 目标观察器：目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
   排序、观测历史和回退。
-- 尚未提供具体 `TargetObserver`。选择视觉/VLM 后只需实现该接口，完整语义
-  搜索才能运行；缺少视觉结果时算法会返回明确的 `NOT_IMPLEMENTED`，不会
-  假装已经找到目标。
+- API 地址、Key 和模型名不写入仓库，运行时配置后才能执行完整语义搜索。
+  未提供观察器时算法会返回明确的 `NOT_IMPLEMENTED`，不会假装已经找到目标。
 
 算法流程见 [docs/algorithm.md](docs/algorithm.md)，Habitat 使用方法见
 [docs/habitat.md](docs/habitat.md)。
@@ -38,11 +38,13 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/core/navigator.py` | 算法入口和阶段流转 |
 | `src/robot_nav/core/frontier.py` | 可达 Frontier 提取与排序 |
 | `src/robot_nav/core/grounding.py` | 目标框与深度的二维定位 |
+| `src/robot_nav/core/vision.py` | VLM 提示词和回答解析 |
 | `src/robot_nav/core/history.py` | 探索方向历史与回退依据 |
 | `src/robot_nav/core/models.py` | 全部输入、输出与状态契约 |
 | `src/robot_nav/adapters/chassis.py` | 仿真器/真底盘共同接口 |
 | `src/robot_nav/adapters/habitat.py` | Habitat-Sim Adapter |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
+| `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
 | `src/robot_nav/app.py` | 单周期串联入口 |
 
 ## Python 环境
