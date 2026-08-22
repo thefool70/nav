@@ -12,7 +12,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from ..core.models import (
     CameraIntrinsics,
@@ -21,6 +21,9 @@ from ..core.models import (
     Pose2D,
     RelativePoseCommand,
 )
+
+
+MotionFrameCallback = Callable[[NavigationFrame], None]
 
 
 @dataclass(frozen=True)
@@ -39,11 +42,16 @@ class HabitatConfig:
 
 
 class HabitatChassisAdapter:
-    """同步 Habitat 底盘实现：读取 RGB-D/位姿/地图并瞬时执行高层导航。"""
+    """同步 Habitat 底盘实现：读取感知并用原生动作执行高层导航。"""
 
-    def __init__(self, config: HabitatConfig) -> None:
+    def __init__(
+        self,
+        config: HabitatConfig,
+        on_motion_frame: Optional[MotionFrameCallback] = None,
+    ) -> None:
         self._validate_config(config)
         self.config = config
+        self._on_motion_frame = on_motion_frame
         self._habitat_sim = self._import_habitat_sim()
         self._sim = None
         self._agent = None
@@ -183,6 +191,14 @@ class HabitatChassisAdapter:
         observations = self._sim.get_sensor_observations()
         pose = self._pose_from_agent_state(self._agent.get_state())
         self._update_observed_cells(pose)
+        return self._build_navigation_frame(observations, pose)
+
+    def _build_navigation_frame(
+        self,
+        observations: Any,
+        pose: Pose2D,
+    ) -> NavigationFrame:
+        """把同一步的 Habitat 观测与位姿转换为统一导航帧。"""
         return NavigationFrame(
             timestamp_s=time.monotonic(),
             pose=pose,
@@ -313,7 +329,7 @@ class HabitatChassisAdapter:
         )
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
-        """沿 navmesh 瞬时移动到相对目标，并施加相对 yaw。"""
+        """沿 navmesh 逐步移动到相对目标，再转到命令指定朝向。"""
         self._require_open()
         if not isinstance(command, RelativePoseCommand) or not all(
             _is_finite(value)
@@ -322,25 +338,21 @@ class HabitatChassisAdapter:
             raise ValueError("command 必须为有限 RelativePoseCommand")
 
         state = self._agent.get_state()
-        pose = self._pose_from_agent_state(state)
+        start_pose = self._pose_from_agent_state(state)
+        target_yaw_world = start_pose.yaw_rad + command.yaw_rad
         translation_m = math.hypot(command.forward_m, command.left_m)
         if translation_m > 1.0e-9:
-            self._move_state_to_relative_target(state, pose, command)
+            target = self._plan_relative_target(state, start_pose, command)
+            self._follow_path(target)
+        self._turn_to_world_yaw(target_yaw_world)
 
-        half_yaw = command.yaw_rad * 0.5
-        delta_rotation = state.rotation.__class__(
-            math.cos(half_yaw), 0.0, math.sin(half_yaw), 0.0
-        )
-        state.rotation = delta_rotation * state.rotation
-        self._agent.set_state(state)
-
-    def _move_state_to_relative_target(
+    def _plan_relative_target(
         self,
         state: Any,
         pose: Pose2D,
         command: RelativePoseCommand,
-    ) -> None:
-        """规划到相对目标的 navmesh 路径，并把 state 放到路径终点。"""
+    ) -> Any:
+        """把相对平移投影到 navmesh，确认可达后返回目标点。"""
         cosine = math.cos(pose.yaw_rad)
         sine = math.sin(pose.yaw_rad)
         world_dx = command.forward_m * cosine - command.left_m * sine
@@ -366,7 +378,52 @@ class HabitatChassisAdapter:
         shortest_path.requested_end = snapped
         if not self._pathfinder.find_path(shortest_path) or not shortest_path.points:
             raise RuntimeError("Habitat 找不到相对位姿目标的可行路径")
-        state.position = shortest_path.points[-1]
+        return snapped
+
+    def _follow_path(self, target: Any) -> None:
+        """用 Habitat GreedyGeodesicFollower 执行到目标的离散动作。"""
+        follower = self._sim.make_greedy_follower(agent_id=0)
+        try:
+            actions = follower.find_path(target)
+        except self._habitat_sim.errors.GreedyFollowerError as exc:
+            raise RuntimeError("Habitat 无法把 navmesh 路径转换为动作") from exc
+
+        for action in actions:
+            if action is None:
+                break
+            self._step_action(action)
+
+    def _turn_to_world_yaw(self, target_yaw_world: float) -> None:
+        """用 Habitat 默认转向动作逼近世界系目标朝向。"""
+        action_space = self._agent.agent_config.action_space
+        left_step_rad = math.radians(
+            float(action_space["turn_left"].actuation.amount)
+        )
+        right_step_rad = math.radians(
+            float(action_space["turn_right"].actuation.amount)
+        )
+        turn_step_rad = min(left_step_rad, right_step_rad)
+        if not math.isfinite(turn_step_rad) or turn_step_rad <= 0.0:
+            raise RuntimeError("Habitat 转向动作步长无效")
+
+        tolerance_rad = turn_step_rad * 0.5
+        max_steps = int(math.ceil(2.0 * math.pi / turn_step_rad)) + 1
+        for _ in range(max_steps):
+            pose = self._pose_from_agent_state(self._agent.get_state())
+            difference = _angle_difference(target_yaw_world, pose.yaw_rad)
+            if abs(difference) <= tolerance_rad:
+                return
+            action = "turn_left" if difference > 0.0 else "turn_right"
+            self._step_action(action)
+        raise RuntimeError("Habitat 无法在有限动作内转到目标朝向")
+
+    def _step_action(self, action: Any) -> None:
+        """执行一个 Habitat 动作，更新地图并按需发布该步传感器帧。"""
+        observations = self._sim.step(action)
+        pose = self._pose_from_agent_state(self._agent.get_state())
+        self._update_observed_cells(pose)
+        if self._on_motion_frame is not None:
+            self._on_motion_frame(self._build_navigation_frame(observations, pose))
 
     def _require_open(self) -> None:
         """拒绝在 Adapter 关闭后继续读写仿真。"""

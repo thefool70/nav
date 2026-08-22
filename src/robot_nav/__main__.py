@@ -87,12 +87,18 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
     )
 
     on_cycle = None
+    on_motion_frame = None
     if not args.no_rerun:
         from .visualization import RerunVisualizer
 
-        on_cycle = RerunVisualizer(args.target).log_cycle
+        visualizer = RerunVisualizer(args.target)
+        on_cycle = visualizer.log_cycle
+        on_motion_frame = visualizer.log_motion_frame
 
-    with HabitatChassisAdapter(config) as chassis:
+    with HabitatChassisAdapter(
+        config,
+        on_motion_frame=on_motion_frame,
+    ) as chassis:
         for cycle_index in range(1, args.max_cycles + 1):
             result = run_navigation_cycle(
                 chassis, goal, state, observer, on_cycle=on_cycle

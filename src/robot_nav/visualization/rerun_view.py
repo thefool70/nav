@@ -1,4 +1,4 @@
-"""把同一导航周期的输入、观测和结果记录到 Rerun。"""
+"""把导航决策帧和 Adapter 运动帧记录到 Rerun。"""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ class RerunVisualizer:
 
         self._rr = rr
         self._target_text = target_text
-        self._cycle_index = 0
+        self._sample_index = 0
         self._trajectory_xy: List[Tuple[float, float]] = []
         self._status_font = _load_status_font()
         if self._status_font is None:
@@ -91,9 +91,8 @@ class RerunVisualizer:
         observation: Optional[TargetObservation],
         result: NavigationResult,
     ) -> None:
-        """记录单个周期；数据时间统一使用内部递增的 cycle 序号。"""
-        self._cycle_index += 1
-        self._rr.set_time_sequence("cycle", self._cycle_index)
+        """记录算法决策帧及其观测、命令和状态。"""
+        self._begin_sample()
         self._log_rgb(frame, observation)
         self._log_depth(frame)
         self._log_occupancy_map(frame)
@@ -101,6 +100,19 @@ class RerunVisualizer:
         self._log_command(frame, result)
         self._log_candidates(result)
         self._log_status(frame, observation, result)
+
+    def log_motion_frame(self, frame: NavigationFrame) -> None:
+        """记录 Adapter 执行动作后的传感器帧，不推进算法状态。"""
+        self._begin_sample()
+        self._log_rgb(frame, None)
+        self._log_depth(frame)
+        self._log_occupancy_map(frame)
+        self._log_robot_pose(frame)
+
+    def _begin_sample(self) -> None:
+        """让决策帧与运动帧共享同一条递增时间轴。"""
+        self._sample_index += 1
+        self._rr.set_time_sequence("frame", self._sample_index)
 
     def _log_rgb(
         self,
@@ -173,7 +185,8 @@ class RerunVisualizer:
             ),
         )
 
-        self._trajectory_xy.append(position)
+        if not self._trajectory_xy or position != self._trajectory_xy[-1]:
+            self._trajectory_xy.append(position)
         if len(self._trajectory_xy) >= 2:
             self._rr.log(
                 "world/trajectory",
