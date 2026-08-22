@@ -21,14 +21,15 @@ TargetObserver ────► TargetObservation ┘
 
 ## 当前能力
 
-- Habitat Adapter：RGB、深度、二维位姿、局部已知障碍图、相对位姿执行。
+- Habitat Adapter：RGB、深度、二维位姿、局部已知障碍图，以及基于 navmesh
+  的相对位姿规划与离散动作执行。
 - OpenAI-compatible 目标观察器：支持 Chat Completions 和 Responses API，输出
   目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
   排序、观测历史和回退。
-- Rerun 实时可视化：每个周期记录 RGB、米制深度、三色占用图、机器人位姿与
-  轨迹、相对控制命令箭头、历史候选点和状态文本；Habitat 入口默认启用，
-  用 `--no-rerun` 关闭。
+- Rerun 实时可视化：记录算法决策帧和 Habitat 动作中间帧，包括 RGB、米制
+  深度、三色占用图、机器人位姿与轨迹、控制命令、历史候选点和状态；Habitat
+  入口默认启用，用 `--no-rerun` 关闭。
 - 通用入口默认使用 OpenCode Zen 和 Muse Spark 1.2；Key 只在运行时读取，不写入
   仓库。未提供观察器时算法会返回明确的 `NEEDS_OBSERVATION`。
 

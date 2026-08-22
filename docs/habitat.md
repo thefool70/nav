@@ -56,8 +56,9 @@ sim/habitat/run.sh python -m robot_nav habitat \
 `run_navigation_cycle` 仍是环境无关的单周期入口。`sim/habitat/` 只保存 Habitat
 环境、渲染包装和 Adapter 验证脚本，不包含导航算法。
 
-完整导航默认启动 Rerun Web Viewer 实时可视化（每个周期记录 RGB、米制深度、
-三色占用图、机器人位姿与轨迹、相对控制命令箭头、历史候选点和状态文本），
+完整导航默认启动 Rerun Web Viewer 实时可视化（记录算法决策帧及 Habitat 每个
+动作后的 RGB、米制深度、三色占用图、机器人位姿与轨迹，同时保留最近的控制
+命令、历史候选点和算法状态），
 在 Windows 浏览器打开
 [Rerun Web Viewer](http://127.0.0.1:9090/?url=ws://127.0.0.1:9877) 查看；该地址
 显式连接 9877 数据端口，同时避免 Rerun 继承 Habitat 的无窗口 EGL 图形环境。
@@ -72,5 +73,8 @@ sim/habitat/run.sh python -m robot_nav habitat \
   map 的行方向在 Adapter 内翻转，core 不感知 Habitat 坐标。
 - 障碍图只公开机器人附近和相机视野内、未被 navmesh 障碍遮挡的已知区域；
   其他区域为 `None`，供 Frontier 算法探索。
-- 相对位姿命令先用 navmesh 检查路径和终点，再瞬时放置到路径终点。这适合
-  第一阶段算法迭代，但不是电机、惯性或碰撞过程的物理仿真。
+- 相对位姿命令先用 navmesh 检查路径和终点，再由 Habitat
+  `GreedyGeodesicFollower` 按默认 0.25 m 前进、10° 转向动作逐步执行；每步
+  更新已知地图并按需送入 Rerun。
+- 动作中间帧不额外调用 VLM 或推进算法状态；到达命令终点后才开始下一导航
+  周期。当前仍是 navmesh 约束的离散运动，不包含电机、惯性等真实动力学。
