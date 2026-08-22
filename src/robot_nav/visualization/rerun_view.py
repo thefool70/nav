@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -39,6 +40,25 @@ DIRECTION_COLORS = {
 HEADING_LENGTH_M = 0.6
 OCCUPANCY_THRESHOLD = 0.5
 
+STATUS_IMAGE_WIDTH = 560
+STATUS_FONT_SIZE = 16
+STATUS_LINE_SPACING_PX = 6
+STATUS_PADDING_PX = 12
+STATUS_BG_RGB = (24, 24, 24)
+STATUS_TEXT_RGB = (235, 235, 235)
+
+STATUS_FONT_CANDIDATES = (
+    "/mnt/c/Windows/Fonts/msyh.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+)
+
+_FONT_NOTICE_PRINTED = False
+
 
 class RerunVisualizer:
     """显示传感器、地图、轨迹和算法状态的实时调试界面。"""
@@ -55,6 +75,9 @@ class RerunVisualizer:
         self._target_text = target_text
         self._cycle_index = 0
         self._trajectory_xy: List[Tuple[float, float]] = []
+        self._status_font = _load_status_font()
+        if self._status_font is None:
+            _print_font_notice_once()
         rr.init("robot-nav")
         rr.serve_web(open_browser=False, web_port=9090, ws_port=9877)
         print(
@@ -106,7 +129,7 @@ class RerunVisualizer:
                 mins=[box_min],
                 sizes=[box_size],
                 colors=[BBOX_RGB],
-                labels=[self._target_text],
+                labels=["target"],
             ),
         )
 
@@ -228,14 +251,19 @@ class RerunVisualizer:
         observation: Optional[TargetObservation],
         result: NavigationResult,
     ) -> None:
-        """记录当前算法步骤与最关键的排错字段。"""
-        self._rr.log(
-            "navigation/status",
-            self._rr.TextDocument(
-                _status_text(self._target_text, frame, observation, result),
-                media_type="text/markdown",
-            ),
-        )
+        """记录状态面板；有 CJK 字体时渲染为图像，否则回退为 ASCII 文本。"""
+        lines = _status_lines(self._target_text, frame, observation, result)
+        if self._status_font is None:
+            self._rr.log(
+                "navigation/status",
+                self._rr.TextDocument(
+                    "\n".join(f"- {_ascii_only(line)}" for line in lines),
+                    media_type="text/markdown",
+                ),
+            )
+            return
+        image = _render_status_image(self._status_font, lines)
+        self._rr.log("navigation/status", self._rr.Image(image))
 
     def _clear(self, path: str) -> None:
         self._rr.log(path, self._rr.Clear(recursive=False))
@@ -296,33 +324,99 @@ def _command_world_vector(
     )
 
 
-def _status_text(
+def _load_status_font() -> Optional[object]:
+    """加载状态面板 CJK 字体；Pillow 缺失或所有候选加载失败时返回 None。"""
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        return None
+    for path in STATUS_FONT_CANDIDATES:
+        if not os.path.exists(path):
+            continue
+        try:
+            return ImageFont.truetype(path, size=STATUS_FONT_SIZE)
+        except OSError:
+            continue
+    return None
+
+
+def _print_font_notice_once() -> None:
+    """Pillow/CJK 字体缺失时最多打印一次提示，避免每个周期刷屏。"""
+    global _FONT_NOTICE_PRINTED
+    if _FONT_NOTICE_PRINTED:
+        return
+    _FONT_NOTICE_PRINTED = True
+    print("提示：Pillow 或 CJK 字体不可用，状态面板回退为 ASCII 文本")
+
+
+def _wrap_text(font: object, text: str, max_pixels: float) -> List[str]:
+    """按像素宽度把文本折成多行，不打断单个字符。"""
+    lines: List[str] = []
+    current = ""
+    for char in text:
+        if font.getlength(current + char) <= max_pixels:
+            current += char
+        else:
+            lines.append(current)
+            current = char
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _render_status_image(font: object, lines: List[str]) -> np.ndarray:
+    """把状态行渲染为深色背景 RGB 图像，供 rr.Image 记录。"""
+    from PIL import Image, ImageDraw
+
+    max_pixels = STATUS_IMAGE_WIDTH - 2 * STATUS_PADDING_PX
+    wrapped: List[str] = []
+    for line in lines:
+        wrapped.extend(_wrap_text(font, line, max_pixels))
+
+    line_height = STATUS_FONT_SIZE + STATUS_LINE_SPACING_PX
+    height = 2 * STATUS_PADDING_PX + len(wrapped) * line_height
+    image = Image.new("RGB", (STATUS_IMAGE_WIDTH, height), STATUS_BG_RGB)
+    draw = ImageDraw.Draw(image)
+    y = STATUS_PADDING_PX
+    for line in wrapped:
+        draw.text((STATUS_PADDING_PX, y), line, font=font, fill=STATUS_TEXT_RGB)
+        y += line_height
+    return np.asarray(image)
+
+
+def _ascii_only(text: str) -> str:
+    """把非 ASCII 字符替换为 '?'，供无字体时生成纯 ASCII 回退文本。"""
+    return "".join(char if ord(char) < 128 else "?" for char in text)
+
+
+def _status_lines(
     target_text: str,
     frame: NavigationFrame,
     observation: Optional[TargetObservation],
     result: NavigationResult,
-) -> str:
+) -> List[str]:
+    """构造状态面板文本行，覆盖目标、状态、阶段、步骤、位姿与观测细节。"""
     lines = [
-        f"# 搜索目标：{target_text}",
-        f"- status: `{result.status.value}`",
-        f"- phase: `{result.state.phase.value}`",
-        f"- stage: `{result.debug.stage}`",
-        f"- message: {result.debug.message}",
+        f"target: {target_text}",
+        f"status: {result.status.value}",
+        f"phase: {result.state.phase.value}",
+        f"stage: {result.debug.stage}",
+        f"message: {result.debug.message}",
         (
-            "- pose: "
+            "pose: "
             f"x={frame.pose.x_m:.2f} m, y={frame.pose.y_m:.2f} m, "
             f"yaw={frame.pose.yaw_rad:.2f} rad"
         ),
     ]
     if observation is not None:
-        lines.append(f"- visibility: `{observation.visibility.value}`")
+        lines.append(f"visibility: {observation.visibility.value}")
         if observation.direction_score is not None:
-            lines.append(f"- direction score: {observation.direction_score:.3f}")
+            lines.append(f"direction score: {observation.direction_score:.3f}")
         if observation.reason:
-            lines.append(f"- observation: {observation.reason}")
+            lines.append(f"observation: {observation.reason}")
     if result.debug.details:
-        lines.append(f"- details: `{dict(result.debug.details)}`")
-    return "\n".join(lines)
+        lines.append(f"details: {dict(result.debug.details)}")
+    return lines
 
 
 __all__ = ["RerunVisualizer"]
