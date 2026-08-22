@@ -5,7 +5,12 @@ channels:
 dependencies:
   - python=3.9
   - habitat-sim=0.3.3
+  - numpy=1.26.4
+  - pillow=10.4.0
   - withbullet
   - git-lfs
   - mesa-llvmpipe=26.2.1  # CPU 回退；WSL GPU 渲染依赖系统 Arch Mesa，不在 conda 环境中安装
   - pip
+  - pip:
+      - imageio-ffmpeg==0.6.0
+      - rerun-sdk==0.22.1

@@ -59,6 +59,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=-1,
         help="Habitat 渲染设备；Mesa/llvmpipe 使用 -1",
     )
+    habitat.add_argument(
+        "--no-rerun",
+        action="store_true",
+        help="不启动 Rerun 实时可视化",
+    )
     return parser
 
 
@@ -81,9 +86,17 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
         gpu_device_id=args.gpu_device_id,
     )
 
+    on_cycle = None
+    if not args.no_rerun:
+        from .visualization import RerunVisualizer
+
+        on_cycle = RerunVisualizer(args.target).log_cycle
+
     with HabitatChassisAdapter(config) as chassis:
         for cycle_index in range(1, args.max_cycles + 1):
-            result = run_navigation_cycle(chassis, goal, state, observer)
+            result = run_navigation_cycle(
+                chassis, goal, state, observer, on_cycle=on_cycle
+            )
             state = result.state
             _print_cycle(cycle_index, result)
 

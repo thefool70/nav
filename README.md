@@ -26,6 +26,9 @@ TargetObserver ────► TargetObservation ┘
   目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
   排序、观测历史和回退。
+- Rerun 实时可视化：每个周期记录 RGB、米制深度、三色占用图、机器人位姿与
+  轨迹、相对控制命令箭头、历史候选点和状态文本；Habitat 入口默认启用，
+  用 `--no-rerun` 关闭。
 - 通用入口默认使用 OpenCode Zen 和 Muse Spark 1.2；Key 只在运行时读取，不写入
   仓库。未提供观察器时算法会返回明确的 `NEEDS_OBSERVATION`。
 
@@ -46,6 +49,7 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/adapters/habitat.py` | Habitat-Sim Adapter |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
 | `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
+| `src/robot_nav/visualization/rerun_view.py` | Rerun 导航调试界面 |
 | `src/robot_nav/app.py` | 单周期串联入口 |
 | `src/robot_nav/__main__.py` | Adapter 选择、循环和终端输出 |
 
@@ -57,6 +61,12 @@ TargetObserver ────► TargetObservation ┘
 micromamba env create -f environment.yml
 micromamba activate robot-nav
 python -m pip install -e .
+```
+
+Rerun 可视化是可选依赖，核心环境按需安装：
+
+```bash
+python -m pip install -e '.[visualization]'
 ```
 
 Habitat 使用独立环境，避免其 Python 与图形依赖污染核心环境。安装和启动命令

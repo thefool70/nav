@@ -21,6 +21,9 @@ micromamba env update -n robot-nav-habitat \
   -f sim/habitat/environment.yml --prune
 ```
 
+`environment.yml` 固定使用 `rerun-sdk==0.22.1`、NumPy 1.26.4 和 Pillow
+10.4.0，以兼容 Habitat-Sim 0.3.3 的 Python 3.9 环境。
+
 ## 启动 Adapter
 
 先读取一帧，确认 Habitat 能向统一接口提供位姿、RGB、深度和障碍图：
@@ -52,6 +55,10 @@ sim/habitat/run.sh python -m robot_nav habitat \
 `muse-spark-1.2-contributor-free`。它负责组装 Adapter、目标观察器和周期循环；
 `run_navigation_cycle` 仍是环境无关的单周期入口。`sim/habitat/` 只保存 Habitat
 环境、渲染包装和 Adapter 验证脚本，不包含导航算法。
+
+完整导航默认启动 Rerun 实时可视化（每个周期记录 RGB、米制深度、三色占用图、
+机器人位姿与轨迹、相对控制命令箭头、历史候选点和状态文本），不需要时加
+`--no-rerun` 关闭。
 
 当前 adapter demo 仍只验证仿真输入边界，不调用外部模型，也不会假造语义
 目标结果。
