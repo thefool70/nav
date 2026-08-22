@@ -1,4 +1,4 @@
-"""通过 OpenAI-compatible Chat Completions API 观察语义目标。"""
+"""通过 OpenAI-compatible API 观察语义目标。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import math
 import struct
 import zlib
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -30,14 +31,23 @@ from ..core.vision import (
 )
 
 
+class OpenAIApiFormat(str, Enum):
+    """观察器支持的 OpenAI-compatible 请求格式。"""
+
+    CHAT_COMPLETIONS = "chat_completions"
+    RESPONSES = "responses"
+
+
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
-    """Chat Completions 连接参数；endpoint_url 必须是完整接口地址。"""
+    """API 连接参数；endpoint_url 必须是完整接口地址。"""
 
     endpoint_url: str
     model: str
     api_key: str = field(default="", repr=False)
     timeout_s: float = 60.0
+    api_format: OpenAIApiFormat = OpenAIApiFormat.CHAT_COMPLETIONS
+    max_output_tokens: int = 2048
 
 
 class OpenAICompatibleTargetObserver:
@@ -125,23 +135,24 @@ class OpenAICompatibleTargetObserver:
         )
 
     def _ask(self, prompt: str, image_url: str) -> str:
-        """发送一次带图问题，并返回首个 assistant 文本。"""
-        payload = {
-            "model": self._config.model.strip(),
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": image_url},
-                        },
-                    ],
-                }
-            ],
+        """按配置的 API 格式发送一次带图问题。"""
+        if self._config.api_format is OpenAIApiFormat.CHAT_COMPLETIONS:
+            payload = _chat_completions_payload(self._config, prompt, image_url)
+        else:
+            payload = _responses_payload(self._config, prompt, image_url)
+
+        response_payload = self._post_json(payload)
+        if self._config.api_format is OpenAIApiFormat.CHAT_COMPLETIONS:
+            return _chat_completions_text(response_payload)
+        return _responses_text(response_payload)
+
+    def _post_json(self, payload: Mapping[str, Any]) -> Any:
+        """发送 JSON 请求并解析 JSON 回应。"""
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "robot-nav/0.1 OpenAI-compatible client",
         }
-        headers = {"Content-Type": "application/json"}
         if self._config.api_key.strip():
             headers["Authorization"] = f"Bearer {self._config.api_key.strip()}"
         request = Request(
@@ -157,7 +168,51 @@ class OpenAICompatibleTargetObserver:
             raise RuntimeError(f"API 返回 HTTP {exc.code}") from exc
         except URLError as exc:
             raise RuntimeError(f"API 连接失败：{exc.reason}") from exc
-        return _assistant_text(response_payload)
+        return response_payload
+
+
+def _chat_completions_payload(
+    config: OpenAICompatibleConfig,
+    prompt: str,
+    image_url: str,
+) -> Mapping[str, Any]:
+    """构造 Chat Completions 多模态请求。"""
+    return {
+        "model": config.model.strip(),
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def _responses_payload(
+    config: OpenAICompatibleConfig,
+    prompt: str,
+    image_url: str,
+) -> Mapping[str, Any]:
+    """构造 Responses API 多模态请求。"""
+    return {
+        "model": config.model.strip(),
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            }
+        ],
+        "max_output_tokens": config.max_output_tokens,
+    }
 
 
 def _validate_config(config: OpenAICompatibleConfig) -> None:
@@ -172,6 +227,14 @@ def _validate_config(config: OpenAICompatibleConfig) -> None:
         raise ValueError("model 不能为空")
     if not isinstance(config.api_key, str):
         raise ValueError("api_key 必须是字符串")
+    if not isinstance(config.api_format, OpenAIApiFormat):
+        raise ValueError("api_format 必须是 OpenAIApiFormat")
+    if (
+        isinstance(config.max_output_tokens, bool)
+        or not isinstance(config.max_output_tokens, int)
+        or config.max_output_tokens <= 0
+    ):
+        raise ValueError("max_output_tokens 必须是正整数")
     try:
         timeout_s = float(config.timeout_s)
     except (TypeError, ValueError) as exc:
@@ -184,7 +247,7 @@ def _validate_config(config: OpenAICompatibleConfig) -> None:
         raise ValueError("timeout_s 必须是正有限数")
 
 
-def _assistant_text(payload: Any) -> str:
+def _chat_completions_text(payload: Any) -> str:
     """读取 Chat Completions 首个 choice 的文本内容。"""
     if not isinstance(payload, Mapping):
         raise ValueError("API 回应必须是 JSON 对象")
@@ -206,6 +269,41 @@ def _assistant_text(payload: Any) -> str:
         if parts:
             return "\n".join(parts)
     raise ValueError("API 回应没有 assistant 文本")
+
+
+def _responses_text(payload: Any) -> str:
+    """读取 Responses API 输出中的文本内容。"""
+    if not isinstance(payload, Mapping):
+        raise ValueError("Responses API 回应必须是 JSON 对象")
+
+    output = payload.get("output")
+    if isinstance(output, list):
+        parts = []
+        for item in output:
+            if not isinstance(item, Mapping):
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    not isinstance(block, Mapping)
+                    or block.get("type") != "output_text"
+                ):
+                    continue
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        if parts:
+            return "\n".join(parts)
+
+    if payload.get("status") == "incomplete":
+        details = payload.get("incomplete_details")
+        reason = details.get("reason") if isinstance(details, Mapping) else None
+        if isinstance(reason, str) and reason.strip():
+            raise ValueError(f"Responses API 回应未完成：{reason.strip()}")
+        raise ValueError("Responses API 回应未完成且没有 output_text")
+    raise ValueError("Responses API 回应没有 output_text")
 
 
 def _rgb_to_png_data_url(image: RgbImage) -> str:
@@ -271,4 +369,8 @@ def _uncertain(reason: str) -> TargetObservation:
     )
 
 
-__all__ = ["OpenAICompatibleConfig", "OpenAICompatibleTargetObserver"]
+__all__ = [
+    "OpenAIApiFormat",
+    "OpenAICompatibleConfig",
+    "OpenAICompatibleTargetObserver",
+]

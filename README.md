@@ -22,7 +22,8 @@ TargetObserver ────► TargetObservation ┘
 ## 当前能力
 
 - Habitat Adapter：RGB、深度、二维位姿、局部已知障碍图、相对位姿执行。
-- OpenAI-compatible 目标观察器：目标可见性、不可见方向评分和可见目标框。
+- OpenAI-compatible 目标观察器：支持 Chat Completions 和 Responses API，输出
+  目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
   排序、观测历史和回退。
 - API 地址、Key 和模型名不写入仓库，运行时配置后才能执行完整语义搜索。

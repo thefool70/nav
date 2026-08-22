@@ -2,6 +2,7 @@
 
 from .chassis import ChassisInterface
 from .openai_compatible import (
+    OpenAIApiFormat,
     OpenAICompatibleConfig,
     OpenAICompatibleTargetObserver,
 )
@@ -9,6 +10,7 @@ from .perception import TargetObserver
 
 __all__ = [
     "ChassisInterface",
+    "OpenAIApiFormat",
     "OpenAICompatibleConfig",
     "OpenAICompatibleTargetObserver",
     "TargetObserver",
