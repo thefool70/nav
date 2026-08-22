@@ -55,7 +55,9 @@ class RerunVisualizer:
         self._target_text = target_text
         self._cycle_index = 0
         self._trajectory_xy: List[Tuple[float, float]] = []
-        rr.init("robot-nav", spawn=True)
+        rr.init("robot-nav")
+        rr.serve_web(open_browser=False, web_port=9090)
+        print("Rerun Web Viewer 地址：http://localhost:9090")
 
     def log_cycle(
         self,
