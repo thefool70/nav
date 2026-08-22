@@ -17,7 +17,7 @@ TargetObserver ────► TargetObservation ┘
 - `core` 只处理算法，不依赖 Habitat、底盘 SDK 或具体视觉模型。
 
 `run_navigation_cycle` 串联一个周期：读取帧、调用目标观察器、推进算法、在有
-有效命令时发送给底盘。调用方把 `result.state` 传入下一周期。
+有效命令时发送给底盘。通用命令行入口负责选择 Adapter 并重复执行周期。
 
 ## 当前能力
 
@@ -26,8 +26,8 @@ TargetObserver ────► TargetObservation ┘
   目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
   排序、观测历史和回退。
-- API 地址、Key 和模型名不写入仓库，运行时配置后才能执行完整语义搜索。
-  未提供观察器时算法会返回明确的 `NOT_IMPLEMENTED`，不会假装已经找到目标。
+- 通用入口默认使用 OpenCode Zen 和 Muse Spark 1.2；Key 只在运行时读取，不写入
+  仓库。未提供观察器时算法会返回明确的 `NEEDS_OBSERVATION`。
 
 算法流程见 [docs/algorithm.md](docs/algorithm.md)，Habitat 使用方法见
 [docs/habitat.md](docs/habitat.md)。
@@ -47,6 +47,7 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
 | `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
 | `src/robot_nav/app.py` | 单周期串联入口 |
+| `src/robot_nav/__main__.py` | Adapter 选择、循环和终端输出 |
 
 ## Python 环境
 

@@ -112,7 +112,7 @@ def _advance_scan(
 
     if observation is None:
         return _result(
-            NavigationStatus.NOT_IMPLEMENTED,
+            NavigationStatus.NEEDS_OBSERVATION,
             state,
             "scan.observe",
             "当前扫描方向需要 TargetObserver 的视觉结果。",
@@ -165,7 +165,7 @@ def _continue_target_approach(
     """移动后重新观察目标，直到到达目标或目标丢失。"""
     if observation is None:
         return _result(
-            NavigationStatus.NOT_IMPLEMENTED,
+            NavigationStatus.NEEDS_OBSERVATION,
             state,
             "target.observe",
             "接近目标后需要 TargetObserver 重新观测。",
@@ -197,7 +197,7 @@ def _approach_visible_target(
         or frame.camera_intrinsics is None
     ):
         return _result(
-            NavigationStatus.NOT_IMPLEMENTED,
+            NavigationStatus.MISSING_DATA,
             replace(state, phase=SearchPhase.LOCALIZING_TARGET),
             "target.ground",
             "目标可见，但缺少目标框、深度图或相机内参。",

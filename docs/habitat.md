@@ -36,57 +36,22 @@ sim/habitat/run.sh python sim/habitat/adapter_demo.py \
 NVIDIA EGL 环境需要时，可给 demo 增加 `--gpu-device-id 0`；当前 WSL Mesa
 路径默认使用 `-1`。
 
-## 接入算法
+## 运行完整导航
 
-Adapter 已实现 `ChassisInterface`，直接传入同一个 `run_navigation_cycle`。
-下面使用 OpenCode Zen 的 Responses API 和 Muse Spark 1.2 Contributor Free；
-Key 只从运行环境读取，不写入仓库：
+先把现有 Key 放入 `ROBOT_NAV_VLM_API_KEY` 环境变量，不要写进代码或提交到
+Git。然后通过通用项目入口选择 Habitat Adapter：
 
-```python
-import os
-
-from robot_nav.adapters.habitat import HabitatChassisAdapter, HabitatConfig
-from robot_nav.adapters.openai_compatible import (
-    OpenAIApiFormat,
-    OpenAICompatibleConfig,
-    OpenAICompatibleTargetObserver,
-)
-from robot_nav.app import run_navigation_cycle
-from robot_nav.core.models import (
-    NavigationStatus,
-    SearchPhase,
-    TargetSearchGoal,
-)
-
-observer = OpenAICompatibleTargetObserver(
-    OpenAICompatibleConfig(
-        endpoint_url="https://opencode.ai/zen/v1/responses",
-        model="muse-spark-1.2-contributor-free",
-        api_key=os.environ["ROBOT_NAV_VLM_API_KEY"],
-        api_format=OpenAIApiFormat.RESPONSES,
-        max_output_tokens=2048,
-        timeout_s=90.0,
-    )
-)
-goal = TargetSearchGoal("门口")
-state = None
-with HabitatChassisAdapter(HabitatConfig(scene_path="场景.glb")) as chassis:
-    for _ in range(200):
-        result = run_navigation_cycle(chassis, goal, state, observer)
-        state = result.state
-        print(result.debug.stage, result.debug.message)
-        if (
-            result.status is not NavigationStatus.OK
-            or state.phase is SearchPhase.COMPLETE
-        ):
-            break
+```bash
+sim/habitat/run.sh python -m robot_nav habitat \
+  --scene data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb \
+  --target "门口" \
+  --max-cycles 200
 ```
 
-运行前把现有 Key 放入 `ROBOT_NAV_VLM_API_KEY` 环境变量，不要写进代码或提交到
-Git。其他服务若使用 Chat Completions，可使用对应完整接口地址并保留默认的
-`OpenAIApiFormat.CHAT_COMPLETIONS`。循环次数、停止条件和日志属于调用方策略；
-`run_navigation_cycle` 本身仍只推进一个周期。同一个观察器也可接收真底盘
-Adapter 提供的 RGB，不包含 Habitat 分支。
+入口默认使用 OpenCode Zen Responses API 和
+`muse-spark-1.2-contributor-free`。它负责组装 Adapter、目标观察器和周期循环；
+`run_navigation_cycle` 仍是环境无关的单周期入口。`sim/habitat/` 只保存 Habitat
+环境、渲染包装和 Adapter 验证脚本，不包含导航算法。
 
 当前 adapter demo 仍只验证仿真输入边界，不调用外部模型，也不会假造语义
 目标结果。

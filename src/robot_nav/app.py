@@ -29,8 +29,7 @@ def run_navigation_cycle(
     result = navigate(frame, goal, state)
     if (
         observer is not None
-        and result.status is NavigationStatus.NOT_IMPLEMENTED
-        and result.debug.stage in {"scan.observe", "target.observe"}
+        and result.status is NavigationStatus.NEEDS_OBSERVATION
     ):
         result = navigate(frame, goal, state, observer.observe(frame, goal))
     if result.status is NavigationStatus.OK and result.command is not None:

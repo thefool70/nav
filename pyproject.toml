@@ -9,5 +9,8 @@ description = "Minimal Python framework for robot navigation algorithms"
 requires-python = ">=3.9"
 dependencies = []
 
+[project.scripts]
+robot-nav = "robot_nav.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]

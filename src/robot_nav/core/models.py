@@ -219,7 +219,8 @@ class NavigationStatus(Enum):
     OK = "ok"
     INVALID_INPUT = "invalid_input"
     NO_SOLUTION = "no_solution"
-    NOT_IMPLEMENTED = "not_implemented"
+    NEEDS_OBSERVATION = "needs_observation"
+    MISSING_DATA = "missing_data"
 
 
 @dataclass(frozen=True)

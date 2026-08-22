@@ -35,6 +35,10 @@ SCANNING
 评分；评分失败不会阻塞基于地图的 Frontier 探索。目标可见时再请求千分制目标
 框并转换为归一化坐标；没有可靠目标框时返回 `UNCERTAIN`，算法不会移动。
 
+`navigate()` 需要视觉输入时返回 `NEEDS_OBSERVATION`；`run_navigation_cycle()`
+调用 `TargetObserver` 后用同一帧再次推进算法。目标可见但缺少目标框、深度或
+相机内参时返回 `MISSING_DATA`。这些状态描述所缺输入，不代表算法尚未实现。
+
 选择 Frontier 前会把当前位置及全部候选冻结为一个观测节点：本次选择标为
 `COMMITTED`，其余标为 `PENDING`。新位置没有可用 Frontier 时，本次方向变为
 `EXPLORED`，算法回到最近仍含 `PENDING` 方向的节点；新地图已判定为障碍的

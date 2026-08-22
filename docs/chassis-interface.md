@@ -15,7 +15,7 @@
 | 深度图 | `NavigationFrame.depth`，单位为米，`None` 表示无有效深度 |
 | 相机标定 | `CameraIntrinsics` 与 `camera_pose_in_robot`，RGB/深度必须对齐 |
 | 控制命令 | `RelativePoseCommand(forward_m, left_m, yaw_rad)`，机器人坐标系，向前 / 向左 / 逆时针为正 |
-| 状态 | `NavigationStatus`：OK / INVALID_INPUT / NO_SOLUTION / NOT_IMPLEMENTED |
+| 状态 | `NavigationStatus`：OK / INVALID_INPUT / NO_SOLUTION / NEEDS_OBSERVATION / MISSING_DATA |
 
 ## 坐标系契约
 
