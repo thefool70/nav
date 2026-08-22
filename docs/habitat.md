@@ -56,6 +56,20 @@ sim/habitat/run.sh python -m robot_nav habitat \
 `run_navigation_cycle` 仍是环境无关的单周期入口。`sim/habitat/` 只保存 Habitat
 环境、渲染包装和 Adapter 验证脚本，不包含导航算法。
 
+没有 Key 时可用调试随机感知模式启动（不要求 `ROBOT_NAV_VLM_API_KEY`，也不会
+创建或调用任何 OpenAI-compatible 观察器）：
+
+```bash
+sim/habitat/run.sh python -m robot_nav habitat \
+  --scene data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb \
+  --target "门口" \
+  --max-cycles 200 \
+  --debug-random-score
+```
+
+该模式下观察器每次观测都返回 `NOT_VISIBLE` 和 0 到 1 的随机 `direction_score`，
+只用于调试扫描、Frontier、移动和回退流程；它无法识别或到达语义目标。
+
 完整导航默认启动 Rerun Web Viewer 实时可视化（记录算法决策帧及 Habitat 每个
 动作后的 RGB、米制深度、三色占用图、机器人位姿与轨迹，同时保留最近的控制
 命令、历史候选点和算法状态），

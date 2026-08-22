@@ -7,11 +7,13 @@ from .openai_compatible import (
     OpenAICompatibleTargetObserver,
 )
 from .perception import TargetObserver
+from .random_observer import RandomScoreTargetObserver
 
 __all__ = [
     "ChassisInterface",
     "OpenAIApiFormat",
     "OpenAICompatibleConfig",
     "OpenAICompatibleTargetObserver",
+    "RandomScoreTargetObserver",
     "TargetObserver",
 ]

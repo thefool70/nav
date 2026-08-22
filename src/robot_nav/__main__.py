@@ -12,6 +12,7 @@ from .adapters.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleTargetObserver,
 )
+from .adapters.random_observer import RandomScoreTargetObserver
 from .app import run_navigation_cycle
 from .core.models import (
     NavigationResult,
@@ -30,7 +31,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     api_key = os.environ.get("ROBOT_NAV_VLM_API_KEY", "").strip()
-    if not api_key:
+    if (
+        args.adapter == "habitat"
+        and not args.debug_random_score
+        and not api_key
+    ):
         parser.error("缺少环境变量 ROBOT_NAV_VLM_API_KEY")
 
     if args.adapter == "habitat":
@@ -64,21 +69,33 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="不启动 Rerun 实时可视化",
     )
+    habitat.add_argument(
+        "--debug-random-score",
+        action="store_true",
+        help="调试随机感知：不调用 VLM，观察器只返回随机方向评分",
+    )
     return parser
 
 
 def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
     """组装 Habitat Adapter 与通用导航周期。"""
-    observer = OpenAICompatibleTargetObserver(
-        OpenAICompatibleConfig(
-            endpoint_url=OPENCODE_ZEN_ENDPOINT,
-            model=MUSE_MODEL,
-            api_key=api_key,
-            timeout_s=90.0,
-            api_format=OpenAIApiFormat.RESPONSES,
-            max_output_tokens=2048,
+    if args.debug_random_score:
+        print(
+            "调试随机感知模式：不调用视觉模型，观察器只返回随机方向评分；"
+            "此模式无法识别或到达语义目标，仅用于调试扫描、Frontier、移动和回退。"
         )
-    )
+        observer = RandomScoreTargetObserver()
+    else:
+        observer = OpenAICompatibleTargetObserver(
+            OpenAICompatibleConfig(
+                endpoint_url=OPENCODE_ZEN_ENDPOINT,
+                model=MUSE_MODEL,
+                api_key=api_key,
+                timeout_s=90.0,
+                api_format=OpenAIApiFormat.RESPONSES,
+                max_output_tokens=2048,
+            )
+        )
     goal = TargetSearchGoal(args.target)
     state = None
     config = HabitatConfig(

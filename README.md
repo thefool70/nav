@@ -32,6 +32,9 @@ TargetObserver ────► TargetObservation ┘
   入口默认启用，用 `--no-rerun` 关闭。
 - 通用入口默认使用 OpenCode Zen 和 Muse Spark 1.2；Key 只在运行时读取，不写入
   仓库。未提供观察器时算法会返回明确的 `NEEDS_OBSERVATION`。
+- Habitat 入口支持 `--debug-random-score`：不创建也不调用任何视觉模型，观察器
+  每次只返回 `NOT_VISIBLE` 和随机方向评分，用于调试扫描、Frontier、移动和回退；
+  此模式无法识别或到达语义目标，也不要求 `ROBOT_NAV_VLM_API_KEY`。
 
 算法流程见 [docs/algorithm.md](docs/algorithm.md)，Habitat 使用方法见
 [docs/habitat.md](docs/habitat.md)。
@@ -50,6 +53,7 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/adapters/habitat.py` | Habitat-Sim Adapter |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
 | `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
+| `src/robot_nav/adapters/random_observer.py` | 调试随机方向评分观察器 |
 | `src/robot_nav/visualization/rerun_view.py` | Rerun 导航调试界面 |
 | `src/robot_nav/app.py` | 单周期串联入口 |
 | `src/robot_nav/__main__.py` | Adapter 选择、循环和终端输出 |
