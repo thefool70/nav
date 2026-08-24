@@ -17,34 +17,17 @@
 - NVIDIA 驱动可用且报告 CUDA 13.3，但 CUDA Toolkit/nvcc 尚未安装。
 - Codex 受限沙箱可能隐藏 /dev/dxg，不能据此判断无 GPU/CUDA。
 
-## Agent 分工
+## Agent 工作方式
 
-- GPT-5.6 Sol 负责澄清需求、规划算法、确定模块边界与统一规范，并在实现后检查改动。
-- 规划保持简短，只需说明目标、涉及模块、输入输出、算法约束和完成标准；除非用户要求，不为每次任务新建设计文档。
-- 代码实现默认交给 DeepSeek V4 Flash，通过 OpenCode Go 使用 `opencode-go/deepseek-v4-flash` 和 `max` 推理档位。
-- 实现 Agent 只完成任务单指定的改动，不自行扩大需求，不额外增加抽象层、兼容层、文档或测试。
-- 遇到接口或算法歧义时先反馈，不凭空补全关键设计。
-- 实现完成后由 GPT-5.6 Sol 检查 diff、架构边界和算法流程；发现问题时优先下发局部修正任务，避免无依据地整体重写。
-
-### 使用 OpenCode 实现
-
-- 从项目根目录调用 OpenCode，统一使用 OpenCode Go，不切换到其他模型提供商：
-
-  ```bash
-  opencode run -m opencode-go/deepseek-v4-flash --variant max "实现任务单"
-  ```
-
-- 由 Codex 调用 `opencode run` 时，第一次执行就申请沙箱外权限，不先在受限
-  沙箱中试跑。OpenCode 会写入 `~/.local/share/opencode/` 下的日志、认证和会话
-  数据，而 Codex 项目沙箱默认不能写这些路径。
-- 权限批准前缀只使用 `["opencode", "run"]`，不要为 shell 或整个 `opencode`
-  命令申请更宽泛的持久权限。
-- 如果受限执行返回
-  `Unknown: FileSystem.open (~/.local/share/opencode/log/opencode.log)`，将其判定为
-  Codex 沙箱权限错误，直接改为沙箱外执行；不要据此判断 OpenCode Go、账号或
-  模型不可用。
-- 任务单应简要包含目标、允许修改的模块或文件、输入输出、算法约束和完成标准，并明确不要编写或运行测试。
-- OpenCode 完成后，由 GPT-5.6 Sol 查看改动并审查算法与架构；需要修正时，下发只针对具体问题的后续任务。
+- 当前暂停由 DeepSeek V4 Flash / OpenCode 负责代码实现的分工；除非用户明确
+  重新启用，否则不要调用 OpenCode。
+- 当前 Agent 直接负责澄清需求、规划、实现和检查改动。
+- 规划保持简短，只需说明目标、涉及模块、输入输出、算法约束和完成标准；除非
+  用户要求，不为每次任务新建设计文档。
+- 实现只完成当前任务所需改动，不自行扩大需求，不额外增加抽象层、兼容层、
+  文档或测试。
+- 遇到接口或算法歧义时先反馈，不凭空补全关键设计；实现后检查 diff、架构边界
+  和算法流程。
 
 ## 编码前流程
 
