@@ -11,6 +11,7 @@ robot_nav_slam_pids=()
 robot_nav_command=("$@")
 
 prepare_windows_usb() {
+    local s100_bus_id
     local windows_script_path
 
     if [[ "${ROBOT_NAV_SKIP_USB_PREPARE:-0}" == "1" ]]; then
@@ -27,10 +28,15 @@ prepare_windows_usb() {
     fi
 
     windows_script_path="$(wslpath -w "$robot_nav_slam_dir/prepare_usb.ps1")"
+    s100_bus_id="${ROBOT_NAV_S100_BUSID:-}"
+    if [[ -n "$s100_bus_id" ]]; then
+        echo "选择 S100 UART4 的 Windows USB BUSID：$s100_bus_id"
+    fi
     powershell.exe \
         -NoProfile \
         -ExecutionPolicy Bypass \
-        -File "$windows_script_path"
+        -File "$windows_script_path" \
+        -S100BusId "$s100_bus_id"
 }
 
 find_s100_serial_port() {

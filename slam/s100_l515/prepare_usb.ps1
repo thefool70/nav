@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$BindBusIds = ""
+    [string]$BindBusIds = "",
+    [string]$S100BusId = ""
 )
 
 Set-StrictMode -Version Latest
@@ -76,14 +77,15 @@ function Show-ConnectedUsbDevices {
 }
 
 
-function Get-SingleConnectedDevice {
+function Get-ConnectedDevice {
     param(
         [Parameter(Mandatory = $true)]
         [object[]]$Devices,
         [Parameter(Mandatory = $true)]
         [string]$Label,
         [Parameter(Mandatory = $true)]
-        [string]$DescriptionPattern
+        [string]$DescriptionPattern,
+        [string]$BusId = ""
     )
 
     $matches = @(
@@ -92,12 +94,22 @@ function Get-SingleConnectedDevice {
             ([string]$_.Description -match $DescriptionPattern)
         }
     )
+    if (-not [string]::IsNullOrWhiteSpace($BusId)) {
+        if ($BusId -notmatch "^[0-9]+-[0-9]+(?:\.[0-9]+)*$") {
+            throw "Invalid USB bus ID '$BusId'."
+        }
+        $matches = @($matches | Where-Object { $_.BusId -eq $BusId })
+    }
     if ($matches.Count -ne 1) {
         Show-ConnectedUsbDevices -Devices $Devices
-        throw (
-            "Expected exactly one connected $Label matching " +
-            "'$DescriptionPattern', found $($matches.Count)."
-        )
+        if ([string]::IsNullOrWhiteSpace($BusId)) {
+            throw (
+                "Expected exactly one connected $Label matching " +
+                "'$DescriptionPattern', found $($matches.Count). " +
+                "An explicit bus ID is required when multiple devices match."
+            )
+        }
+        throw "USB bus ID '$BusId' is not a connected $Label."
     }
     return $matches[0]
 }
@@ -170,14 +182,15 @@ if (-not [string]::IsNullOrWhiteSpace($BindBusIds)) {
 }
 
 $state = Get-UsbipdState
-$l515 = Get-SingleConnectedDevice `
+$l515 = Get-ConnectedDevice `
     -Devices $state.Devices `
     -Label "RealSense L515" `
     -DescriptionPattern $L515DescriptionPattern
-$s100 = Get-SingleConnectedDevice `
+$s100 = Get-ConnectedDevice `
     -Devices $state.Devices `
     -Label "S100 CH9102 serial adapter" `
-    -DescriptionPattern $S100DescriptionPattern
+    -DescriptionPattern $S100DescriptionPattern `
+    -BusId $S100BusId
 
 $targets = @(
     [PSCustomObject]@{ Label = "L515"; InstanceId = $l515.InstanceId },
