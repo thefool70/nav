@@ -1,0 +1,21 @@
+name: robot-nav-slam
+channels:
+  - https://conda.anaconda.org/robostack-jazzy
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - setuptools>=61
+  - numpy>=1.25,<3
+  - pyserial>=3.5
+  - ros-jazzy-ros-base=0.11.0
+  - ros-jazzy-rclpy
+  - ros-jazzy-nav-msgs
+  - ros-jazzy-sensor-msgs
+  - ros-jazzy-geometry-msgs
+  - ros-jazzy-tf2-ros
+  - ros-jazzy-cv-bridge=4.1.0
+  - ros-jazzy-realsense2-camera=4.57.7
+  - ros-jazzy-pointcloud-to-laserscan=2.0.2
+  - ros-jazzy-slam-toolbox=2.8.5
+  - ceres-solver=2.2.0=cpu*
