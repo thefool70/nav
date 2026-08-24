@@ -88,7 +88,7 @@ function Get-ConnectedDevice {
         [string]$BusId = ""
     )
 
-    $matches = @(
+    $candidateDevices = @(
         $Devices | Where-Object {
             ($null -ne $_.BusId) -and
             ([string]$_.Description -match $DescriptionPattern)
@@ -98,20 +98,22 @@ function Get-ConnectedDevice {
         if ($BusId -notmatch "^[0-9]+-[0-9]+(?:\.[0-9]+)*$") {
             throw "Invalid USB bus ID '$BusId'."
         }
-        $matches = @($matches | Where-Object { $_.BusId -eq $BusId })
+        $candidateDevices = @(
+            $candidateDevices | Where-Object { $_.BusId -eq $BusId }
+        )
     }
-    if ($matches.Count -ne 1) {
+    if ($candidateDevices.Count -ne 1) {
         Show-ConnectedUsbDevices -Devices $Devices
         if ([string]::IsNullOrWhiteSpace($BusId)) {
             throw (
                 "Expected exactly one connected $Label matching " +
-                "'$DescriptionPattern', found $($matches.Count). " +
+                "'$DescriptionPattern', found $($candidateDevices.Count). " +
                 "An explicit bus ID is required when multiple devices match."
             )
         }
         throw "USB bus ID '$BusId' is not a connected $Label."
     }
-    return $matches[0]
+    return $candidateDevices[0]
 }
 
 
@@ -123,15 +125,15 @@ function Get-ConnectedDeviceByInstanceId {
         [string]$InstanceId
     )
 
-    $matches = @(
+    $candidateDevices = @(
         $Devices | Where-Object {
             ($null -ne $_.BusId) -and ($_.InstanceId -eq $InstanceId)
         }
     )
-    if ($matches.Count -ne 1) {
+    if ($candidateDevices.Count -ne 1) {
         throw "USB device '$InstanceId' disappeared while preparing it."
     }
-    return $matches[0]
+    return $candidateDevices[0]
 }
 
 
