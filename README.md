@@ -50,7 +50,7 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/core/history.py` | 探索方向历史与回退依据 |
 | `src/robot_nav/core/models.py` | 全部输入、输出与状态契约 |
 | `src/robot_nav/adapters/chassis.py` | 仿真器/真底盘共同接口 |
-| `src/robot_nav/adapters/habitat.py` | Habitat-Sim Adapter |
+| `src/robot_nav/adapters/habitat/adapter.py` | Habitat-Sim Adapter |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
 | `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
 | `src/robot_nav/adapters/random_observer.py` | 调试随机方向评分观察器 |

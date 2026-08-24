@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..core.models import (
+from ...core.models import (
     CameraIntrinsics,
     NavigationFrame,
     ObstacleMap,
