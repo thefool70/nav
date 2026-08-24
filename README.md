@@ -23,8 +23,9 @@ TargetObserver ────► TargetObservation ┘
 
 - Habitat Adapter：RGB、深度、二维位姿、局部已知障碍图，以及基于 navmesh
   的相对位姿规划与离散动作执行。
-- S100 + L515 Adapter：串口反馈里程计、对齐 RGB-D、深度占用图、已知自由区
-  A*，以及面向差速底盘的低速分段执行。
+- S100 + L515 Adapter：推荐用 S100 轮速里程计、L515 点云和
+  `slam_toolbox` 生成统一位姿/占用图；保留直接深度累计模式用于局部排错，并
+  通过已知自由区 A* 低速分段执行。
 - OpenAI-compatible 目标观察器：支持 Chat Completions 和 Responses API，输出
   目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
@@ -54,12 +55,14 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/adapters/chassis.py` | 仿真器/真底盘共同接口 |
 | `src/robot_nav/adapters/habitat/adapter.py` | Habitat-Sim Adapter |
 | `src/robot_nav/adapters/s100_l515/adapter.py` | S100 + L515 真机 Adapter |
+| `src/robot_nav/adapters/s100_l515/ros_slam.py` | ROS SLAM 与统一导航帧的边界 |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
 | `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
 | `src/robot_nav/adapters/random_observer.py` | 调试随机方向评分观察器 |
 | `src/robot_nav/visualization/rerun_view.py` | Rerun 导航调试界面 |
 | `src/robot_nav/app.py` | 单周期串联入口 |
 | `src/robot_nav/__main__.py` | Adapter 选择、循环和终端输出 |
+| `slam/s100_l515/` | S100 + L515 的 ROS 环境、启动与 SLAM 参数 |
 
 ## Python 环境
 
@@ -79,6 +82,9 @@ python -m pip install -e '.[visualization]'
 
 Habitat 使用独立环境，避免其 Python 与图形依赖污染核心环境。安装和启动命令
 见 [docs/habitat.md](docs/habitat.md)。
+
+S100 + L515 的 ROS SLAM 同样使用独立的 `robot-nav-slam` 环境，安装、USB
+转发和启动命令见 [docs/s100-l515.md](docs/s100-l515.md)。
 
 ## 接入真底盘
 
