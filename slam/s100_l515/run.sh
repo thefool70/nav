@@ -39,6 +39,52 @@ prepare_windows_usb() {
         -S100BusId "$s100_bus_id"
 }
 
+check_l515_usb() {
+    local bus_number
+    local candidate
+    local device=""
+    local device_number
+    local failed=0
+    local speed_mbps
+    local speed_whole
+    local usb_node
+
+    for candidate in /sys/bus/usb/devices/*; do
+        [[ -f "$candidate/idVendor" && -f "$candidate/idProduct" ]] || continue
+        if [[ "$(<"$candidate/idVendor")" == "8086" && \
+              "$(<"$candidate/idProduct")" == "0b64" ]]; then
+            device="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$device" ]]; then
+        echo "USB 转发完成后仍未发现 L515（8086:0b64）。" >&2
+        return 1
+    fi
+
+    bus_number="$(<"$device/busnum")"
+    device_number="$(<"$device/devnum")"
+    printf -v usb_node "/dev/bus/usb/%03d/%03d" \
+        "$bus_number" "$device_number"
+    if [[ ! -r "$usb_node" || ! -w "$usb_node" ]]; then
+        echo "当前用户无 L515 USB 读写权限：$usb_node" >&2
+        echo "请先运行：slam/s100_l515/setup_usb_permissions.sh" >&2
+        failed=1
+    fi
+
+    speed_mbps="$(<"$device/speed")"
+    if [[ "$speed_mbps" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        speed_whole="${speed_mbps%%.*}"
+        if ((speed_whole < 5000)); then
+            echo "L515 当前只有 ${speed_mbps} Mbit/s，需要 USB 3 SuperSpeed。" >&2
+            echo "请将 L515 直连 USB 3 端口并检查数据线后重新转发。" >&2
+            failed=1
+        fi
+    fi
+
+    return "$failed"
+}
+
 find_s100_serial_port() {
     local path
     local path_name
@@ -130,18 +176,23 @@ configure_s100_serial_port() {
 
     if [[ -n "$serial_port" && "$serial_port" != "auto" ]]; then
         echo "使用指定的 S100 串口：$serial_port"
-        return
+    else
+        serial_port="$(wait_for_s100_serial_port)"
+        if ((serial_argument_index < 0)); then
+            robot_nav_command+=("--serial-port" "$serial_port")
+        elif [[ "${robot_nav_command[serial_argument_index]}" == --serial-port=* ]]; then
+            robot_nav_command[serial_argument_index]="--serial-port=$serial_port"
+        else
+            robot_nav_command[serial_argument_index]="$serial_port"
+        fi
+        echo "自动选择 S100 串口：$serial_port"
     fi
 
-    serial_port="$(wait_for_s100_serial_port)"
-    if ((serial_argument_index < 0)); then
-        robot_nav_command+=("--serial-port" "$serial_port")
-    elif [[ "${robot_nav_command[serial_argument_index]}" == --serial-port=* ]]; then
-        robot_nav_command[serial_argument_index]="--serial-port=$serial_port"
-    else
-        robot_nav_command[serial_argument_index]="$serial_port"
+    if [[ ! -r "$serial_port" || ! -w "$serial_port" ]]; then
+        echo "当前用户无 S100 串口读写权限：$serial_port" >&2
+        echo "请先运行：slam/s100_l515/setup_usb_permissions.sh" >&2
+        exit 1
     fi
-    echo "自动选择 S100 串口：$serial_port"
 }
 
 is_calibration_command() {
@@ -166,6 +217,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 prepare_windows_usb
+check_l515_usb
 configure_s100_serial_port
 
 if is_calibration_command; then

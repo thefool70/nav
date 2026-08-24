@@ -1,0 +1,6 @@
+# L515 的 USB 数据与 Motion Module HID 访问权限。
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="8086", ATTR{idProduct}=="0b64", MODE:="0666"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b64", MODE:="0666"
+
+# S100 使用的 CH9102 串口。
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", MODE:="0666"
