@@ -13,10 +13,10 @@ from ...core.models import CameraIntrinsics
 
 @dataclass(frozen=True)
 class L515Config:
-    """L515 流配置；RGB 与深度必须使用相同宽高和帧率。"""
+    """L515 流配置；默认 QVGA 以适配 USB 2 链路。"""
 
-    width: int = 640
-    height: int = 480
+    width: int = 320
+    height: int = 240
     fps: int = 30
     wait_timeout_s: float = 2.0
     serial_number: Optional[str] = None

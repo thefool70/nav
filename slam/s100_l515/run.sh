@@ -46,7 +46,6 @@ check_l515_usb() {
     local device_number
     local failed=0
     local speed_mbps
-    local speed_whole
     local usb_node
 
     for candidate in /sys/bus/usb/devices/*; do
@@ -74,11 +73,8 @@ check_l515_usb() {
 
     speed_mbps="$(<"$device/speed")"
     if [[ "$speed_mbps" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        speed_whole="${speed_mbps%%.*}"
-        if ((speed_whole < 5000)); then
-            echo "L515 当前只有 ${speed_mbps} Mbit/s，需要 USB 3 SuperSpeed。" >&2
-            echo "请将 L515 直连 USB 3 端口并检查数据线后重新转发。" >&2
-            failed=1
+        if ((10#${speed_mbps%%.*} < 5000)); then
+            echo "L515 使用 USB 2（${speed_mbps} Mbit/s），相机流采用 320×240@30。" >&2
         fi
     fi
 
@@ -231,8 +227,8 @@ camera_arguments=(
     enable_sync:=true
     align_depth.enable:=true
     publish_tf:=false
-    rgb_camera.profile:=640x480x30
-    depth_module.profile:=640x480x30
+    rgb_camera.profile:=320x240x30
+    depth_module.profile:=320x240x30
 )
 camera_serial="${ROBOT_NAV_L515_SERIAL:-}"
 previous_argument=""
