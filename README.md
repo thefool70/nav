@@ -23,9 +23,9 @@ TargetObserver ────► TargetObservation ┘
 
 - Habitat Adapter：RGB、深度、二维位姿、局部已知障碍图，以及基于 navmesh
   的相对位姿规划与离散动作执行。
-- S100 + L515 Adapter：推荐用 S100 轮速里程计、L515 点云和
-  `slam_toolbox` 生成统一位姿/占用图；保留直接深度累计模式用于局部排错，并
-  通过已知自由区 A* 低速分段执行。
+- S100 + L515 Adapter：用 S100 轮速里程计、L515 深度扫描和
+  `slam_toolbox` 生成统一位姿/占用图；支持借助 L515 Motion Module 与 RGB-D
+  自动估计安装外参，并保留直接深度累计模式用于局部排错。
 - OpenAI-compatible 目标观察器：支持 Chat Completions 和 Responses API，输出
   目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
@@ -55,6 +55,7 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/adapters/chassis.py` | 仿真器/真底盘共同接口 |
 | `src/robot_nav/adapters/habitat/adapter.py` | Habitat-Sim Adapter |
 | `src/robot_nav/adapters/s100_l515/adapter.py` | S100 + L515 真机 Adapter |
+| `src/robot_nav/adapters/s100_l515/calibration/` | 一次性相机安装外参标定 |
 | `src/robot_nav/adapters/s100_l515/ros_slam.py` | ROS SLAM 与统一导航帧的边界 |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
 | `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
