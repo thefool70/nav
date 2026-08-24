@@ -81,6 +81,34 @@ check_l515_usb() {
     return "$failed"
 }
 
+check_l515_video_access() {
+    local found=0
+    local properties
+    local video_node
+
+    shopt -s nullglob
+    for video_node in /dev/video*; do
+        properties="$(
+            udevadm info --query=property --name="$video_node" 2>/dev/null
+        )" || continue
+        if [[ "$properties" != *"ID_VENDOR_ID=8086"* || \
+              "$properties" != *"ID_MODEL_ID=0b64"* ]]; then
+            continue
+        fi
+        found=1
+        if [[ ! -r "$video_node" || ! -w "$video_node" ]]; then
+            echo "当前用户无 L515 视频节点读写权限：$video_node" >&2
+            echo "请重新运行：slam/s100_l515/setup_usb_permissions.sh" >&2
+            return 1
+        fi
+    done
+
+    if ((found == 0)); then
+        echo "未发现 L515 的 Video4Linux 节点，请检查 WSL uvcvideo 驱动。" >&2
+        return 1
+    fi
+}
+
 find_s100_serial_port() {
     local path
     local path_name
@@ -214,6 +242,7 @@ trap 'exit 143' TERM
 
 prepare_windows_usb
 check_l515_usb
+check_l515_video_access
 configure_s100_serial_port
 
 if is_calibration_command; then
