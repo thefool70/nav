@@ -157,10 +157,9 @@ camera_arguments=(
     enable_depth:=true
     enable_sync:=true
     align_depth.enable:=true
-    pointcloud.enable:=true
-    pointcloud.allow_no_texture_points:=true
-    rgb_camera.color_profile:=640x480x30
-    depth_module.depth_profile:=640x480x30
+    publish_tf:=false
+    rgb_camera.profile:=640x480x30
+    depth_module.profile:=640x480x30
 )
 camera_serial="${ROBOT_NAV_L515_SERIAL:-}"
 previous_argument=""
@@ -183,10 +182,11 @@ fi
 ros2 launch realsense2_camera rs_launch.py "${camera_arguments[@]}" &
 robot_nav_slam_pids+=("$!")
 
-ros2 run pointcloud_to_laserscan pointcloud_to_laserscan_node \
+ros2 run depthimage_to_laserscan depthimage_to_laserscan_node \
     --ros-args \
-    --params-file "$robot_nav_slam_dir/pointcloud_to_laserscan.yaml" \
-    --remap cloud_in:=/camera/camera/depth/color/points \
+    --params-file "$robot_nav_slam_dir/depthimage_to_laserscan.yaml" \
+    --remap depth:=/camera/camera/aligned_depth_to_color/image_raw \
+    --remap depth_camera_info:=/camera/camera/color/camera_info \
     --remap scan:=/scan &
 robot_nav_slam_pids+=("$!")
 

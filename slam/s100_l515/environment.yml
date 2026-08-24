@@ -1,21 +1,23 @@
 name: robot-nav-slam
 channels:
-  - https://conda.anaconda.org/robostack-jazzy
+  - https://conda.anaconda.org/robostack-staging
   - conda-forge
 dependencies:
-  - python=3.12
+  - python=3.11
   - pip
   - setuptools>=61
-  - numpy>=1.25,<3
+  - numpy>=1.24,<2
   - pyserial>=3.5
-  - ros-jazzy-ros-base=0.11.0
-  - ros-jazzy-rclpy
-  - ros-jazzy-nav-msgs
-  - ros-jazzy-sensor-msgs
-  - ros-jazzy-geometry-msgs
-  - ros-jazzy-tf2-ros
-  - ros-jazzy-cv-bridge=4.1.0
-  - ros-jazzy-realsense2-camera=4.57.7
-  - ros-jazzy-pointcloud-to-laserscan=2.0.2
-  - ros-jazzy-slam-toolbox=2.8.5
+  - ros2-distro-mutex=0.5
+  - ros-humble-ros-base
+  - ros-humble-rclpy
+  - ros-humble-nav-msgs
+  - ros-humble-sensor-msgs
+  - ros-humble-geometry-msgs
+  - ros-humble-tf2-ros
+  - ros-humble-cv-bridge
+  - ros-humble-librealsense2=2.54.1
+  - ros-humble-realsense2-camera=4.54.1
+  - ros-humble-depthimage-to-laserscan=2.5.1=py311h5fd4792_6
+  - ros-humble-slam-toolbox
   - ceres-solver=2.2.0=cpu*

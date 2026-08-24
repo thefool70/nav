@@ -30,7 +30,7 @@ class RosSlamConfig:
     map_frame: str = "map"
     odom_frame: str = "odom"
     base_frame: str = "base_link"
-    camera_link_frame: str = "camera_link"
+    camera_frame: str = "camera_color_frame"
     frame_timeout_s: float = 15.0
     stale_after_s: float = 5.0
     map_stale_after_s: float = 10.0
@@ -305,7 +305,7 @@ class RosSlamSource:
         transform = self._TransformStamped()
         transform.header.stamp = self._node.get_clock().now().to_msg()
         transform.header.frame_id = self.config.base_frame
-        transform.child_frame_id = self.config.camera_link_frame
+        transform.child_frame_id = self.config.camera_frame
         transform.transform.translation.x = self._camera_mount.forward_m
         transform.transform.translation.y = self._camera_mount.left_m
         transform.transform.translation.z = self._camera_mount.height_m
@@ -516,7 +516,7 @@ def _validate_config(config: RosSlamConfig) -> None:
         "map_frame",
         "odom_frame",
         "base_frame",
-        "camera_link_frame",
+        "camera_frame",
     ):
         value = getattr(config, name)
         if not isinstance(value, str) or not value.strip():
