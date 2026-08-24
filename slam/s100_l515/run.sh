@@ -10,6 +10,21 @@ robot_nav_slam_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 robot_nav_slam_pids=()
 robot_nav_command=("$@")
 
+configure_realsense_backend() {
+    local rsusb_prefix="$robot_nav_slam_dir/.rsusb"
+
+    if [[ ! -f "$rsusb_prefix/lib/librealsense2.so.2.54.1" ]] || \
+       ! compgen -G "$rsusb_prefix/python/pyrealsense2*.so" >/dev/null; then
+        echo "缺少 WSL 所需的 librealsense RSUSB 后端。请先运行：" >&2
+        echo "  slam/s100_l515/build_rsusb.sh" >&2
+        exit 1
+    fi
+
+    export LD_LIBRARY_PATH="$rsusb_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export PYTHONPATH="$rsusb_prefix/python${PYTHONPATH:+:$PYTHONPATH}"
+    echo "使用项目本地 librealsense RSUSB 后端。"
+}
+
 prepare_windows_usb() {
     local s100_bus_id
     local windows_script_path
@@ -74,7 +89,7 @@ check_l515_usb() {
     speed_mbps="$(<"$device/speed")"
     if [[ "$speed_mbps" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         if ((10#${speed_mbps%%.*} < 5000)); then
-            echo "L515 使用 USB 2（${speed_mbps} Mbit/s），相机流采用 320×240@30。" >&2
+            echo "L515 使用 USB 2（${speed_mbps} Mbit/s）：彩色 640×480@30，深度 320×240@30。" >&2
         fi
     fi
 
@@ -240,6 +255,7 @@ trap stop_slam_processes EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+configure_realsense_backend
 prepare_windows_usb
 check_l515_usb
 check_l515_video_access
@@ -256,7 +272,7 @@ camera_arguments=(
     enable_sync:=true
     align_depth.enable:=true
     publish_tf:=false
-    rgb_camera.profile:=320x240x30
+    rgb_camera.profile:=640x480x30
     depth_module.profile:=320x240x30
 )
 camera_serial="${ROBOT_NAV_L515_SERIAL:-}"

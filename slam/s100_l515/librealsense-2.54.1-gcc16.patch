@@ -1,0 +1,7 @@
+diff --git a/third-party/rsutils/include/rsutils/version.h b/third-party/rsutils/include/rsutils/version.h
+index fbc36fa..6d7cadb 100644
+--- a/third-party/rsutils/include/rsutils/version.h
++++ b/third-party/rsutils/include/rsutils/version.h
+@@ -6,1 +6,2 @@
++#include <cstdint>
+ #include <string>

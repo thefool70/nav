@@ -13,10 +13,12 @@ from ...core.models import CameraIntrinsics
 
 @dataclass(frozen=True)
 class L515Config:
-    """L515 流配置；默认 QVGA 以适配 USB 2 链路。"""
+    """L515 流配置；默认值来自 USB 2 链路实际公布的 profile。"""
 
-    width: int = 320
-    height: int = 240
+    color_width: int = 640
+    color_height: int = 480
+    depth_width: int = 320
+    depth_height: int = 240
     fps: int = 30
     wait_timeout_s: float = 2.0
     serial_number: Optional[str] = None
@@ -58,7 +60,7 @@ class L515Camera:
             raise
 
     def _start(self) -> None:
-        """配置并启动一组同尺寸的 RGB8 与 Z16 数据流。"""
+        """启动 RGB8 与 Z16 数据流；对齐后输出尺寸跟随彩色图。"""
         rs = self._rs
         pipeline = rs.pipeline()
         stream_config = rs.config()
@@ -66,15 +68,15 @@ class L515Camera:
             stream_config.enable_device(self.config.serial_number.strip())
         stream_config.enable_stream(
             rs.stream.color,
-            self.config.width,
-            self.config.height,
+            self.config.color_width,
+            self.config.color_height,
             rs.format.rgb8,
             self.config.fps,
         )
         stream_config.enable_stream(
             rs.stream.depth,
-            self.config.width,
-            self.config.height,
+            self.config.depth_width,
+            self.config.depth_height,
             rs.format.z16,
             self.config.fps,
         )
@@ -174,7 +176,13 @@ def _validate_config(config: L515Config) -> None:
     """在占用相机前校验流参数。"""
     if not isinstance(config, L515Config):
         raise ValueError("config 必须为 L515Config")
-    for name in ("width", "height", "fps"):
+    for name in (
+        "color_width",
+        "color_height",
+        "depth_width",
+        "depth_height",
+        "fps",
+    ):
         value = getattr(config, name)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} 必须为正整数")

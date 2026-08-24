@@ -8,3 +8,4 @@ dist/
 *.egg-info/
 .eggs/
 data/
+slam/s100_l515/.rsusb/
