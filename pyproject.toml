@@ -11,6 +11,11 @@ dependencies = []
 
 [project.optional-dependencies]
 visualization = ["rerun-sdk==0.22.1"]
+s100-l515 = [
+    "numpy>=1.24,<2",
+    "pyrealsense2>=2.50",
+    "pyserial>=3.5",
+]
 
 [project.scripts]
 robot-nav = "robot_nav.__main__:main"
