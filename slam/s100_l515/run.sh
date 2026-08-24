@@ -8,6 +8,135 @@ fi
 
 robot_nav_slam_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 robot_nav_slam_pids=()
+robot_nav_command=("$@")
+
+prepare_windows_usb() {
+    local windows_script_path
+
+    if [[ "${ROBOT_NAV_SKIP_USB_PREPARE:-0}" == "1" ]]; then
+        echo "已跳过 Windows USB 自动转发。"
+        return
+    fi
+    if ! command -v powershell.exe >/dev/null 2>&1; then
+        echo "未找到 powershell.exe；请在 WSL 中运行，或设置 ROBOT_NAV_SKIP_USB_PREPARE=1 后手动连接设备。" >&2
+        exit 1
+    fi
+    if ! command -v wslpath >/dev/null 2>&1; then
+        echo "未找到 wslpath，无法定位 Windows USB 准备脚本。" >&2
+        exit 1
+    fi
+
+    windows_script_path="$(wslpath -w "$robot_nav_slam_dir/prepare_usb.ps1")"
+    powershell.exe \
+        -NoProfile \
+        -ExecutionPolicy Bypass \
+        -File "$windows_script_path"
+}
+
+find_s100_serial_port() {
+    local path
+    local path_name
+    local -a stable_paths=()
+    local -a fallback_paths=()
+
+    shopt -s nullglob
+    for path in /dev/serial/by-id/*; do
+        path_name="${path##*/}"
+        path_name="${path_name,,}"
+        if [[ "$path_name" =~ ch910|usb[-_]?enhanced[-_]?serial|wch|1a86 ]]; then
+            stable_paths+=("$path")
+        fi
+    done
+
+    if ((${#stable_paths[@]} == 1)); then
+        printf '%s\n' "${stable_paths[0]}"
+        return 0
+    fi
+    if ((${#stable_paths[@]} > 1)); then
+        echo "检测到多个可能的 S100 稳定串口，请用 --serial-port 明确指定：" >&2
+        printf '  %s\n' "${stable_paths[@]}" >&2
+        return 2
+    fi
+
+    fallback_paths=(/dev/ttyUSB* /dev/ttyACM*)
+    if ((${#fallback_paths[@]} == 1)); then
+        printf '%s\n' "${fallback_paths[0]}"
+        return 0
+    fi
+    if ((${#fallback_paths[@]} > 1)); then
+        echo "无法从多个串口中确定 S100，请用 --serial-port 明确指定：" >&2
+        printf '  %s\n' "${fallback_paths[@]}" >&2
+        return 2
+    fi
+    return 1
+}
+
+wait_for_s100_serial_port() {
+    local attempt
+    local serial_port
+    local status
+
+    for ((attempt = 1; attempt <= 40; attempt++)); do
+        if serial_port="$(find_s100_serial_port)"; then
+            printf '%s\n' "$serial_port"
+            return 0
+        else
+            status=$?
+        fi
+        if ((status == 2)); then
+            return 2
+        fi
+        sleep 0.25
+    done
+
+    echo "USB 转发完成后仍未发现 S100 串口。请检查 usbipd 输出和 /dev/serial/by-id。" >&2
+    return 1
+}
+
+configure_s100_serial_port() {
+    local argument
+    local index
+    local serial_argument_index=-1
+    local serial_port=""
+
+    for ((index = 0; index < ${#robot_nav_command[@]}; index++)); do
+        argument="${robot_nav_command[index]}"
+        if [[ "$argument" == "--serial-port" ]]; then
+            if ((serial_argument_index >= 0)); then
+                echo "--serial-port 只能指定一次。" >&2
+                exit 2
+            fi
+            if ((index + 1 >= ${#robot_nav_command[@]})); then
+                echo "--serial-port 缺少路径。" >&2
+                exit 2
+            fi
+            serial_argument_index=$((index + 1))
+            serial_port="${robot_nav_command[index + 1]}"
+        elif [[ "$argument" == --serial-port=* ]]; then
+            if ((serial_argument_index >= 0)); then
+                echo "--serial-port 只能指定一次。" >&2
+                exit 2
+            fi
+            serial_argument_index=$index
+            serial_port="${argument#*=}"
+        fi
+    done
+
+    if [[ -n "$serial_port" && "$serial_port" != "auto" ]]; then
+        echo "使用指定的 S100 串口：$serial_port"
+        return
+    fi
+
+    serial_port="$(wait_for_s100_serial_port)"
+    if ((serial_argument_index < 0)); then
+        robot_nav_command+=("--serial-port" "$serial_port")
+    elif [[ "${robot_nav_command[serial_argument_index]}" == --serial-port=* ]]; then
+        robot_nav_command[serial_argument_index]="--serial-port=$serial_port"
+    else
+        robot_nav_command[serial_argument_index]="$serial_port"
+    fi
+    echo "自动选择 S100 串口：$serial_port"
+}
 
 stop_slam_processes() {
     local process_id
@@ -19,6 +148,9 @@ stop_slam_processes() {
 trap stop_slam_processes EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+prepare_windows_usb
+configure_s100_serial_port
 
 camera_arguments=(
     enable_color:=true
@@ -32,7 +164,7 @@ camera_arguments=(
 )
 camera_serial="${ROBOT_NAV_L515_SERIAL:-}"
 previous_argument=""
-for argument in "$@"; do
+for argument in "${robot_nav_command[@]}"; do
     if [[ "$previous_argument" == "--camera-serial" ]]; then
         camera_serial="$argument"
         break
@@ -63,4 +195,4 @@ ros2 launch slam_toolbox online_async_launch.py \
     slam_params_file:="$robot_nav_slam_dir/slam_toolbox.yaml" &
 robot_nav_slam_pids+=("$!")
 
-"$@"
+"${robot_nav_command[@]}"
