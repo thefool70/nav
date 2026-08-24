@@ -34,6 +34,15 @@
   opencode run -m opencode-go/deepseek-v4-flash --variant max "实现任务单"
   ```
 
+- 由 Codex 调用 `opencode run` 时，第一次执行就申请沙箱外权限，不先在受限
+  沙箱中试跑。OpenCode 会写入 `~/.local/share/opencode/` 下的日志、认证和会话
+  数据，而 Codex 项目沙箱默认不能写这些路径。
+- 权限批准前缀只使用 `["opencode", "run"]`，不要为 shell 或整个 `opencode`
+  命令申请更宽泛的持久权限。
+- 如果受限执行返回
+  `Unknown: FileSystem.open (~/.local/share/opencode/log/opencode.log)`，将其判定为
+  Codex 沙箱权限错误，直接改为沙箱外执行；不要据此判断 OpenCode Go、账号或
+  模型不可用。
 - 任务单应简要包含目标、允许修改的模块或文件、输入输出、算法约束和完成标准，并明确不要编写或运行测试。
 - OpenCode 完成后，由 GPT-5.6 Sol 查看改动并审查算法与架构；需要修正时，下发只针对具体问题的后续任务。
 
