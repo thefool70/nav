@@ -19,6 +19,7 @@ from .adapters.random_observer import RandomScoreTargetObserver
 from .adapters.s100_l515 import (
     CameraMount,
     L515Config,
+    RosSlamConfig,
     S100L515Adapter,
     S100L515Config,
     S100SerialConfig,
@@ -123,6 +124,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="相机光轴向地面俯视的角度（度）",
     )
     hardware.add_argument(
+        "--slam",
+        action="store_true",
+        help="使用 ROS 2 slam_toolbox 提供位姿与占用图",
+    )
+    hardware.add_argument(
+        "--ros-depth-unit-m",
+        type=_positive_float,
+        default=0.00025,
+        help="ROS Z16 深度每单位的米数；L515 默认 0.00025",
+    )
+    hardware.add_argument(
         "--preflight-only",
         action="store_true",
         help="只检查 S100 反馈、静止状态和 L515 帧，不执行导航",
@@ -196,6 +208,11 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
             yaw_rad=math.radians(args.camera_yaw_deg),
             pitch_down_rad=math.radians(args.camera_pitch_down_deg),
         ),
+        slam=(
+            RosSlamConfig(depth_unit_m=args.ros_depth_unit_m)
+            if args.slam
+            else None
+        ),
     )
     with S100L515Adapter(
         config,
@@ -206,7 +223,8 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
             print(
                 "S100/L515 预检通过："
                 f"pose=({frame.pose.x_m:.2f}, {frame.pose.y_m:.2f}, "
-                f"{frame.pose.yaw_rad:.2f})，RGB-D 与占用图已生成。"
+                f"{frame.pose.yaw_rad:.2f})，"
+                f"{'SLAM' if args.slam else '本地'} RGB-D 与占用图已生成。"
             )
             return 0
 

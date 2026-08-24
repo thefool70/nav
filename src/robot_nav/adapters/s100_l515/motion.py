@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -50,12 +51,14 @@ class S100MotionController:
         self._last_integrated_at = time.monotonic()
         self._last_feedback_at = 0.0
         self._latest_status: Optional[S100Status] = None
+        self._state_lock = threading.RLock()
 
     @property
     def pose(self) -> Pose2D:
         """返回最近一次反馈积分得到的 S100 里程计位姿。"""
-        self._integrate_to(time.monotonic())
-        return self._pose
+        with self._state_lock:
+            self._integrate_to(time.monotonic())
+            return self._pose
 
     def preflight(self) -> None:
         """重复发送停止并确认底盘已使能、反馈充足且处于静止状态。"""
@@ -86,10 +89,11 @@ class S100MotionController:
             )
 
         now = time.monotonic()
-        self._x_mps = 0.0
-        self._z_radps = 0.0
-        self._last_integrated_at = now
-        self._last_feedback_at = now
+        with self._state_lock:
+            self._x_mps = 0.0
+            self._z_radps = 0.0
+            self._last_integrated_at = now
+            self._last_feedback_at = now
 
     def read_pose(self) -> Pose2D:
         """等待一个控制周期的反馈，然后返回当前里程计位姿。"""
@@ -99,10 +103,11 @@ class S100MotionController:
         now = time.monotonic()
         if status is not None:
             self._accept_status(status, now)
-        else:
-            self._integrate_to(now)
-        self._require_healthy_feedback(now)
-        return self._pose
+        with self._state_lock:
+            if status is None:
+                self._integrate_to(now)
+            self._require_healthy_feedback(now)
+            return self._pose
 
     def turn_to_world_yaw(self, target_yaw_rad: float) -> None:
         """原地旋转到指定世界系 yaw，完成并确认静止后返回。"""
@@ -179,8 +184,9 @@ class S100MotionController:
                     stable_frames + 1 if _is_stationary(status) else 0
                 )
                 if stable_frames >= _STOP_STABLE_FRAMES:
-                    self._x_mps = 0.0
-                    self._z_radps = 0.0
+                    with self._state_lock:
+                        self._x_mps = 0.0
+                        self._z_radps = 0.0
                     return
             self._wait_until_cycle_end(cycle_started)
         raise RuntimeError("S100 停止后未收到连续静止反馈")
@@ -199,14 +205,16 @@ class S100MotionController:
                 cycle_started = time.monotonic()
                 self._ingest_available_statuses()
                 now = time.monotonic()
-                self._integrate_to(now)
-                self._require_healthy_feedback(now)
-                if is_complete(self._pose):
+                with self._state_lock:
+                    self._integrate_to(now)
+                    self._require_healthy_feedback(now)
+                    pose = self._pose
+                if is_complete(pose):
                     break
                 if now >= deadline:
                     raise RuntimeError(f"S100 {action_name}超时")
 
-                x_mps, z_radps = command_for(self._pose)
+                x_mps, z_radps = command_for(pose)
                 self._connection.send_velocity(x_mps, z_radps)
                 status = self._connection.wait_for_status(
                     self.config.command_period_s
@@ -225,11 +233,12 @@ class S100MotionController:
             self._accept_status(statuses[-1], time.monotonic())
 
     def _accept_status(self, status: S100Status, received_at: float) -> None:
-        self._integrate_to(received_at)
-        self._latest_status = status
-        self._x_mps = status.x_mps
-        self._z_radps = status.z_radps
-        self._last_feedback_at = received_at
+        with self._state_lock:
+            self._integrate_to(received_at)
+            self._latest_status = status
+            self._x_mps = status.x_mps
+            self._z_radps = status.z_radps
+            self._last_feedback_at = received_at
 
     def _integrate_to(self, now: float) -> None:
         elapsed = max(0.0, now - self._last_integrated_at)

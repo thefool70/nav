@@ -11,6 +11,7 @@ from .l515_camera import L515Camera, L515Capture, L515Config
 from .mapping import CameraMount, DepthOccupancyMap, DepthOccupancyMapConfig
 from .motion import S100MotionConfig, S100MotionController
 from .planner import plan_known_free_path
+from .ros_slam import RosSlamConfig, RosSlamSource
 from .s100_serial import S100SerialConfig, S100SerialConnection
 
 
@@ -28,6 +29,7 @@ class S100L515Config:
         default_factory=DepthOccupancyMapConfig
     )
     motion: S100MotionConfig = field(default_factory=S100MotionConfig)
+    slam: Optional[RosSlamConfig] = None
     robot_radius_m: float = 0.25
     max_translation_step_m: float = 0.20
     max_translation_steps: int = 100
@@ -47,25 +49,41 @@ class S100L515Adapter:
         self._camera: Optional[L515Camera] = None
         self._connection: Optional[S100SerialConnection] = None
         self._motion: Optional[S100MotionController] = None
-        self._map = DepthOccupancyMap(config.obstacle_map)
+        self._map: Optional[DepthOccupancyMap] = None
+        self._slam: Optional[RosSlamSource] = None
+        self._last_frame: Optional[NavigationFrame] = None
 
         try:
-            self._camera = L515Camera(config.camera)
             self._connection = S100SerialConnection(config.serial)
             self._motion = S100MotionController(
                 self._connection, config.motion
             )
             self._motion.preflight()
+            if config.slam is None:
+                self._camera = L515Camera(config.camera)
+                self._map = DepthOccupancyMap(config.obstacle_map)
+            else:
+                self._slam = RosSlamSource(
+                    config.slam,
+                    config.camera_mount,
+                    lambda: self._require_motion().pose,
+                )
         except Exception:
             self.close()
             raise
 
     def read_frame(self) -> NavigationFrame:
         """读取里程计与对齐 RGB-D，更新占用图并返回统一导航帧。"""
-        motion, camera = self._require_open()
+        motion = self._require_motion()
         pose = motion.read_pose()
+        if self._slam is not None:
+            frame = self._slam.read_frame()
+            self._last_frame = frame
+            return frame
+
+        camera, obstacle_map = self._require_direct_sensors()
         capture = camera.capture()
-        self._map.update(
+        obstacle_map.update(
             capture.depth_m,
             capture.camera_intrinsics,
             pose,
@@ -74,30 +92,48 @@ class S100L515Adapter:
         frame = _build_navigation_frame(
             capture,
             pose,
-            self._map,
+            obstacle_map,
             self.config.camera_mount,
         )
+        self._last_frame = frame
         return frame
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
         """规划已知自由区路径，分段驱动差速底盘，最后恢复命令目标朝向。"""
         _validate_command(command)
-        motion, _ = self._require_open()
-        start_pose = motion.read_pose()
+        motion = self._require_motion()
+        start_pose = (
+            self._last_frame.pose
+            if self._last_frame is not None
+            else self.read_frame().pose
+        )
         target_world_xy = _relative_target_world(start_pose, command)
         target_yaw = _wrap_angle(start_pose.yaw_rad + command.yaw_rad)
 
         if math.hypot(command.forward_m, command.left_m) > 1.0e-9:
             self._move_to_world_xy(target_world_xy)
-        motion.turn_to_world_yaw(target_yaw)
+        current_world_pose = (
+            self._last_frame.pose
+            if self._last_frame is not None
+            else self.read_frame().pose
+        )
+        odometry_pose = motion.read_pose()
+        motion.turn_to_world_yaw(
+            odometry_pose.yaw_rad
+            + _angle_difference(target_yaw, current_world_pose.yaw_rad)
+        )
         self._publish_stopped_frame()
 
     def _move_to_world_xy(self, target_world_xy: Tuple[float, float]) -> None:
         """每前进一小段重新采集深度和规划，直到到达相对位姿目标。"""
-        motion, _ = self._require_open()
-        frame = self.read_frame()
+        motion = self._require_motion()
+        frame = (
+            self._last_frame
+            if self._last_frame is not None
+            else self.read_frame()
+        )
         for _ in range(self.config.max_translation_steps):
-            pose = motion.pose
+            pose = frame.pose
             remaining = math.hypot(
                 target_world_xy[0] - pose.x_m,
                 target_world_xy[1] - pose.y_m,
@@ -116,10 +152,33 @@ class S100L515Adapter:
                 path[0],
                 self.config.max_translation_step_m,
             )
-            motion.drive_to_world_xy(next_world_xy)
+            self._drive_map_step(motion, pose, next_world_xy)
             frame = self._publish_stopped_frame()
 
         raise RuntimeError("S100 分段规划次数已用尽，仍未到达相对位姿目标")
+
+    def _drive_map_step(
+        self,
+        motion: S100MotionController,
+        map_pose: Pose2D,
+        target_map_xy: Tuple[float, float],
+    ) -> None:
+        """把地图系下一小段路径转换为轮速里程计中的局部执行目标。"""
+        delta_x = target_map_xy[0] - map_pose.x_m
+        delta_y = target_map_xy[1] - map_pose.y_m
+        distance = math.hypot(delta_x, delta_y)
+        if distance <= 1.0e-9:
+            return
+        heading_map = math.atan2(delta_y, delta_x)
+        relative_heading = _angle_difference(heading_map, map_pose.yaw_rad)
+        odometry_pose = motion.read_pose()
+        heading_odometry = odometry_pose.yaw_rad + relative_heading
+        motion.drive_to_world_xy(
+            (
+                odometry_pose.x_m + distance * math.cos(heading_odometry),
+                odometry_pose.y_m + distance * math.sin(heading_odometry),
+            )
+        )
 
     def _publish_stopped_frame(self) -> NavigationFrame:
         """动作停止后采集新帧，并按需发送给可视化界面。"""
@@ -129,12 +188,18 @@ class S100L515Adapter:
         return frame
 
     def close(self) -> None:
-        """先重复停止并关闭底盘串口，再释放 L515。"""
+        """停止 ROS 数据源，再关闭底盘串口与本地 L515 数据源。"""
+        slam = self._slam
         connection = self._connection
         camera = self._camera
+        self._slam = None
+        if slam is not None:
+            slam.close()
         self._motion = None
         self._connection = None
         self._camera = None
+        self._map = None
+        self._last_frame = None
         if connection is not None:
             connection.close()
         if camera is not None:
@@ -146,10 +211,17 @@ class S100L515Adapter:
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         self.close()
 
-    def _require_open(self) -> Tuple[S100MotionController, L515Camera]:
-        if self._motion is None or self._camera is None:
+    def _require_motion(self) -> S100MotionController:
+        if self._motion is None:
             raise RuntimeError("S100L515Adapter 已关闭")
-        return self._motion, self._camera
+        return self._motion
+
+    def _require_direct_sensors(
+        self,
+    ) -> Tuple[L515Camera, DepthOccupancyMap]:
+        if self._camera is None or self._map is None:
+            raise RuntimeError("本地 L515 数据源未启用")
+        return self._camera, self._map
 
 
 def _build_navigation_frame(
@@ -256,6 +328,8 @@ def _validate_config(config: S100L515Config) -> None:
         raise ValueError("obstacle_map 必须为 DepthOccupancyMapConfig")
     if not isinstance(config.motion, S100MotionConfig):
         raise ValueError("motion 必须为 S100MotionConfig")
+    if config.slam is not None and not isinstance(config.slam, RosSlamConfig):
+        raise ValueError("slam 必须为 RosSlamConfig 或 None")
     if (
         not _is_finite(config.robot_radius_m)
         or float(config.robot_radius_m) <= 0.0
@@ -276,6 +350,10 @@ def _validate_config(config: S100L515Config) -> None:
 
 def _wrap_angle(value: float) -> float:
     return (value + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _angle_difference(target_rad: float, current_rad: float) -> float:
+    return _wrap_angle(target_rad - current_rad)
 
 
 def _is_finite(value: Any) -> bool:
