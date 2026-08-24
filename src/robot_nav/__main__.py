@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+from pathlib import Path
 from typing import Optional, Sequence
 
 from .adapters.chassis import ChassisInterface
@@ -18,11 +19,14 @@ from .adapters.perception import TargetObserver
 from .adapters.random_observer import RandomScoreTargetObserver
 from .adapters.s100_l515 import (
     CameraMount,
+    DEFAULT_CAMERA_MOUNT_PATH,
     L515Config,
     RosSlamConfig,
     S100L515Adapter,
     S100L515Config,
+    S100MotionConfig,
     S100SerialConfig,
+    load_camera_mount,
 )
 from .app import run_navigation_cycle
 from .core.models import (
@@ -48,7 +52,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("缺少环境变量 ROBOT_NAV_VLM_API_KEY")
         return _run_habitat(args, api_key)
 
+    if args.adapter == "calibrate-s100-l515":
+        if not args.enable_motion:
+            parser.error("外参标定会移动真机，必须显式提供 --enable-motion")
+        return _run_s100_l515_calibration(args)
+
     if args.adapter == "s100-l515":
+        calibration_path = Path(args.camera_calibration)
+        if args.camera_height_m is None and not calibration_path.is_file():
+            parser.error(
+                "缺少相机高度：先运行 calibrate-s100-l515，"
+                "或提供 --camera-height-m"
+            )
         if not args.preflight_only and not args.target:
             parser.error("s100-l515 导航模式必须提供 --target")
         if not args.preflight_only and not args.enable_motion:
@@ -84,44 +99,36 @@ def _build_parser() -> argparse.ArgumentParser:
         "s100-l515", help="使用 WHEELTEC S100 与 RealSense L515"
     )
     _add_navigation_arguments(hardware, target_required=False)
+    _add_s100_device_arguments(hardware)
     hardware.add_argument(
-        "--serial-port",
-        default="COM3",
-        help="S100 UART4 串口，Windows 实测默认 COM3",
-    )
-    hardware.add_argument(
-        "--camera-serial",
-        help="有多台 RealSense 时指定 L515 序列号",
+        "--camera-calibration",
+        default=str(DEFAULT_CAMERA_MOUNT_PATH),
+        help="相机外参 JSON；存在时自动读取，手动参数可覆盖",
     )
     hardware.add_argument(
         "--camera-height-m",
-        required=True,
         type=_positive_float,
-        help="L515 光心相对底盘原点的实测高度（米）",
+        help="覆盖标定文件中的 L515 光心高度（米）",
     )
     hardware.add_argument(
         "--camera-forward-m",
         type=_finite_float,
-        default=0.0,
-        help="L515 光心相对底盘原点的前向偏移（米）",
+        help="覆盖标定文件中的前向偏移（米）",
     )
     hardware.add_argument(
         "--camera-left-m",
         type=_finite_float,
-        default=0.0,
-        help="L515 光心相对底盘原点的左向偏移（米）",
+        help="覆盖标定文件中的左向偏移（米）",
     )
     hardware.add_argument(
         "--camera-yaw-deg",
         type=_finite_float,
-        default=0.0,
-        help="相机相对底盘向左偏转的角度（度）",
+        help="覆盖标定文件中的左偏 yaw（度）",
     )
     hardware.add_argument(
         "--camera-pitch-down-deg",
         type=_finite_float,
-        default=0.0,
-        help="相机光轴向地面俯视的角度（度）",
+        help="覆盖标定文件中的向下俯仰角（度）",
     )
     hardware.add_argument(
         "--slam",
@@ -144,7 +151,48 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="明确允许真机发送非零运动命令",
     )
+
+    calibration = adapters.add_parser(
+        "calibrate-s100-l515",
+        help="利用 L515 IMU、RGB-D 和 S100 里程计标定安装外参",
+    )
+    _add_s100_device_arguments(calibration)
+    calibration.add_argument(
+        "--output",
+        default=str(DEFAULT_CAMERA_MOUNT_PATH),
+        help="标定结果 JSON 路径",
+    )
+    calibration.add_argument(
+        "--turn-angle-deg",
+        type=_positive_float,
+        default=30.0,
+        help="左右标定转角，默认 30°",
+    )
+    calibration.add_argument(
+        "--drive-distance-m",
+        type=_positive_float,
+        default=0.20,
+        help="标定直行距离，默认 0.20 m",
+    )
+    calibration.add_argument(
+        "--enable-motion",
+        action="store_true",
+        help="确认场地清空并允许标定程序移动真机",
+    )
     return parser
+
+
+def _add_s100_device_arguments(parser: argparse.ArgumentParser) -> None:
+    """添加 S100 串口和 L515 设备选择参数。"""
+    parser.add_argument(
+        "--serial-port",
+        default="COM3",
+        help="S100 UART4 串口；WSL 启动脚本会自动填入",
+    )
+    parser.add_argument(
+        "--camera-serial",
+        help="有多台 RealSense 时指定 L515 序列号",
+    )
 
 
 def _add_navigation_arguments(
@@ -201,13 +249,7 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
     config = S100L515Config(
         serial=S100SerialConfig(port=args.serial_port),
         camera=L515Config(serial_number=args.camera_serial),
-        camera_mount=CameraMount(
-            height_m=args.camera_height_m,
-            forward_m=args.camera_forward_m,
-            left_m=args.camera_left_m,
-            yaw_rad=math.radians(args.camera_yaw_deg),
-            pitch_down_rad=math.radians(args.camera_pitch_down_deg),
-        ),
+        camera_mount=_camera_mount_from_args(args),
         slam=(
             RosSlamConfig(depth_unit_m=args.ros_depth_unit_m)
             if args.slam
@@ -236,6 +278,89 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
             observer,
             on_cycle,
         )
+
+
+def _run_s100_l515_calibration(args: argparse.Namespace) -> int:
+    """执行独立真机外参标定；不启动导航、SLAM 或视觉模型。"""
+    from .adapters.s100_l515.calibration import (
+        CameraCalibrationConfig,
+        calibrate_s100_l515,
+    )
+
+    print(
+        "外参标定将原地左右转动并向前移动。请清空周围至少 0.5 m，"
+        "准备好独立断电手段，标定期间不要触碰机器人。"
+    )
+    try:
+        result = calibrate_s100_l515(
+            serial_config=S100SerialConfig(port=args.serial_port),
+            camera_config=L515Config(serial_number=args.camera_serial),
+            motion_config=S100MotionConfig(),
+            calibration_config=CameraCalibrationConfig(
+                turn_angle_rad=math.radians(args.turn_angle_deg),
+                drive_distance_m=args.drive_distance_m,
+            ),
+            output_path=Path(args.output),
+            progress=print,
+        )
+    except (ImportError, RuntimeError, ValueError) as exc:
+        print(f"S100/L515 外参标定失败：{exc}")
+        return 1
+
+    mount = result.camera_mount
+    print(
+        "标定结果："
+        f"height={mount.height_m:.3f} m, "
+        f"forward={mount.forward_m:.3f} m, "
+        f"left={mount.left_m:.3f} m, "
+        f"yaw={math.degrees(mount.yaw_rad):.2f}°, "
+        f"pitch-down={math.degrees(mount.pitch_down_rad):.2f}°, "
+        f"residual={result.extrinsic_residual_m:.3f} m"
+    )
+    return 0
+
+
+def _camera_mount_from_args(args: argparse.Namespace) -> CameraMount:
+    """读取默认标定文件，并用显式命令行参数覆盖对应字段。"""
+    calibration_path = Path(args.camera_calibration)
+    calibrated = (
+        load_camera_mount(calibration_path)
+        if calibration_path.is_file()
+        else None
+    )
+    if args.camera_height_m is not None:
+        height_m = args.camera_height_m
+    elif calibrated is not None:
+        height_m = calibrated.height_m
+    else:
+        raise ValueError("缺少相机高度或有效标定文件")
+    return CameraMount(
+        height_m=height_m,
+        forward_m=_mount_value(
+            args.camera_forward_m,
+            calibrated,
+            "forward_m",
+        ),
+        left_m=_mount_value(args.camera_left_m, calibrated, "left_m"),
+        yaw_rad=math.radians(args.camera_yaw_deg)
+        if args.camera_yaw_deg is not None
+        else _mount_value(None, calibrated, "yaw_rad"),
+        pitch_down_rad=math.radians(args.camera_pitch_down_deg)
+        if args.camera_pitch_down_deg is not None
+        else _mount_value(None, calibrated, "pitch_down_rad"),
+    )
+
+
+def _mount_value(
+    override: Optional[float],
+    calibrated: Optional[CameraMount],
+    attribute: str,
+) -> float:
+    if override is not None:
+        return override
+    if calibrated is not None:
+        return float(getattr(calibrated, attribute))
+    return 0.0
 
 
 def _run_navigation(

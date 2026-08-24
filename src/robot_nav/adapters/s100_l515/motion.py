@@ -222,7 +222,7 @@ class S100MotionController:
                 if status is not None:
                     self._accept_status(status, time.monotonic())
                 self._wait_until_cycle_end(cycle_started)
-        except Exception:
+        except BaseException:
             self._stop_best_effort()
             raise
         self.stop()

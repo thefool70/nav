@@ -7,6 +7,7 @@ dependencies:
   - pip
   - setuptools>=61
   - numpy>=1.24,<2
+  - opencv=4.9
   - pyserial>=3.5
   - ros2-distro-mutex=0.5
   - ros-humble-ros-base
@@ -21,3 +22,5 @@ dependencies:
   - ros-humble-depthimage-to-laserscan=2.5.1=py311h5fd4792_6
   - ros-humble-slam-toolbox
   - ceres-solver=2.2.0=cpu*
+  - pip:
+      - pyrealsense2==2.54.1.5217

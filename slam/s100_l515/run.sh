@@ -138,6 +138,16 @@ configure_s100_serial_port() {
     echo "自动选择 S100 串口：$serial_port"
 }
 
+is_calibration_command() {
+    local argument
+    for argument in "${robot_nav_command[@]}"; do
+        if [[ "$argument" == "calibrate-s100-l515" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 stop_slam_processes() {
     local process_id
     for process_id in "${robot_nav_slam_pids[@]}"; do
@@ -151,6 +161,11 @@ trap 'exit 143' TERM
 
 prepare_windows_usb
 configure_s100_serial_port
+
+if is_calibration_command; then
+    "${robot_nav_command[@]}"
+    exit $?
+fi
 
 camera_arguments=(
     enable_color:=true

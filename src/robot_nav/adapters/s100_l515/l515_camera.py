@@ -6,7 +6,7 @@ import importlib
 import math
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from ...core.models import CameraIntrinsics
 
@@ -49,6 +49,7 @@ class L515Camera:
         self._pipeline: Optional[Any] = None
         self._align: Optional[Any] = None
         self._depth_scale_m = 0.0
+        self._depth_to_color_rotation: Optional[Tuple[float, ...]] = None
         self._started = False
         try:
             self._start()
@@ -87,7 +88,24 @@ class L515Camera:
         if not math.isfinite(depth_scale) or depth_scale <= 0.0:
             raise RuntimeError("L515 返回了无效的 depth_scale")
         self._depth_scale_m = depth_scale
+        depth_profile = profile.get_stream(rs.stream.depth)
+        color_profile = profile.get_stream(rs.stream.color)
+        extrinsics = depth_profile.get_extrinsics_to(color_profile)
+        column_major = tuple(float(value) for value in extrinsics.rotation)
+        self._depth_to_color_rotation = tuple(
+            column_major[column * 3 + row]
+            for row in range(3)
+            for column in range(3)
+        )
         self._align = rs.align(rs.stream.color)
+
+    @property
+    def depth_to_color_rotation(self) -> Tuple[float, ...]:
+        """返回把深度/IMU方向转到彩色光学坐标系的按行展开矩阵。"""
+        rotation = self._depth_to_color_rotation
+        if rotation is None:
+            raise RuntimeError("L515Camera 已关闭")
+        return rotation
 
     def capture(self) -> L515Capture:
         """等待并返回一帧对齐 RGB-D；原始深度 0 保持为 0.0 无效值。"""
@@ -132,6 +150,7 @@ class L515Camera:
         started = self._started
         self._pipeline = None
         self._align = None
+        self._depth_to_color_rotation = None
         self._started = False
         if pipeline is not None and started:
             try:
