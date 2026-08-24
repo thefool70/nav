@@ -23,6 +23,8 @@ TargetObserver ────► TargetObservation ┘
 
 - Habitat Adapter：RGB、深度、二维位姿、局部已知障碍图，以及基于 navmesh
   的相对位姿规划与离散动作执行。
+- S100 + L515 Adapter：串口反馈里程计、对齐 RGB-D、深度占用图、已知自由区
+  A*，以及面向差速底盘的低速分段执行。
 - OpenAI-compatible 目标观察器：支持 Chat Completions 和 Responses API，输出
   目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
@@ -36,8 +38,8 @@ TargetObserver ────► TargetObservation ┘
   每次只返回 `NOT_VISIBLE` 和随机方向评分，用于调试扫描、Frontier、移动和回退；
   此模式无法识别或到达语义目标，也不要求 `ROBOT_NAV_VLM_API_KEY`。
 
-算法流程见 [docs/algorithm.md](docs/algorithm.md)，Habitat 使用方法见
-[docs/habitat.md](docs/habitat.md)。
+算法流程见 [docs/algorithm.md](docs/algorithm.md)，环境接入见
+[Habitat](docs/habitat.md) 和 [S100 + L515](docs/s100-l515.md)。
 
 ## 目录
 
@@ -51,6 +53,7 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/core/models.py` | 全部输入、输出与状态契约 |
 | `src/robot_nav/adapters/chassis.py` | 仿真器/真底盘共同接口 |
 | `src/robot_nav/adapters/habitat/adapter.py` | Habitat-Sim Adapter |
+| `src/robot_nav/adapters/s100_l515/adapter.py` | S100 + L515 真机 Adapter |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
 | `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
 | `src/robot_nav/adapters/random_observer.py` | 调试随机方向评分观察器 |
@@ -79,6 +82,6 @@ Habitat 使用独立环境，避免其 Python 与图形依赖污染核心环境�
 
 ## 接入真底盘
 
-真底盘到货后，实现另一个 `ChassisInterface`，把厂商数据转换为当前坐标、
-单位和同步语义即可；算法与 `TargetObserver` 不应改动。必须确认的硬件契约见
-[docs/chassis-interface.md](docs/chassis-interface.md)。
+S100 + L515 的安装、预检和启动方法见 [docs/s100-l515.md](docs/s100-l515.md)。
+其他设备只需实现同一个 `ChassisInterface`，算法与 `TargetObserver` 不应改动；
+统一坐标、单位和同步语义见 [docs/chassis-interface.md](docs/chassis-interface.md)。
