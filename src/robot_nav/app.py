@@ -2,8 +2,12 @@
 
 from typing import Callable, Optional
 
-from .adapters.chassis import ChassisInterface
-from .adapters.perception import TargetObserver
+from .adapters.chassis import (
+    ChassisInterface,
+    MotionStalledError,
+    RecoverableMotionError,
+)
+from .adapters.perception import ScanObservationContext, TargetObserver
 from .core.models import (
     NavigationFrame,
     NavigationResult,
@@ -12,7 +16,11 @@ from .core.models import (
     TargetObservation,
     TargetSearchGoal,
 )
-from .core.navigator import navigate
+from .core.navigator import (
+    continue_after_motion_stall,
+    navigate,
+    recover_from_motion_failure,
+)
 
 
 NavigationCycleCallback = Callable[
@@ -43,10 +51,57 @@ def run_navigation_cycle(
         observer is not None
         and result.status is NavigationStatus.NEEDS_OBSERVATION
     ):
-        used_observation = observer.observe(frame, goal)
+        used_observation = observer.observe(
+            frame,
+            goal,
+            _scan_observation_context(result),
+        )
         result = navigate(frame, goal, state, used_observation)
+    if (
+        observer is not None
+        and result.status is NavigationStatus.NEEDS_FRONTIER_SCORES
+        and result.frontier_score_request is not None
+    ):
+        frontier_scores = observer.score_frontiers(
+            result.frontier_score_request,
+            goal,
+        )
+        result = navigate(
+            frame,
+            goal,
+            result.state,
+            frontier_scores=frontier_scores,
+        )
     if on_cycle is not None:
         on_cycle(frame, used_observation, result)
     if result.status is NavigationStatus.OK and result.command is not None:
-        chassis.send_relative_pose(result.command)
+        try:
+            chassis.send_relative_pose(result.command)
+        except MotionStalledError as exc:
+            continued = continue_after_motion_stall(result, str(exc))
+            if continued is None:
+                raise
+            return continued
+        except RecoverableMotionError as exc:
+            recovered = recover_from_motion_failure(result, str(exc))
+            if recovered is None:
+                raise
+            return recovered
     return result
+
+
+def _scan_observation_context(
+    result: NavigationResult,
+) -> Optional[ScanObservationContext]:
+    """仅扫描观测帧需要被保留，供本轮 Frontier 批量评分。"""
+    if result.debug.stage != "scan.observe":
+        return None
+    details = result.debug.details
+    count = details.get("scan_heading_count")
+    if not isinstance(count, int):
+        return None
+    # 动态计划可能删除尚未执行的朝向；图片按实际完成次数连续编号。
+    index = len(result.state.scan_evidence)
+    if count < 1 or not 0 <= index < count:
+        return None
+    return ScanObservationContext(index=index, count=count)

@@ -3,6 +3,7 @@
 from .core.models import (
     CameraIntrinsics,
     FrontierCandidate,
+    FrontierScoreRequest,
     NavigationDebug,
     NavigationFrame,
     NavigationResult,
@@ -26,6 +27,7 @@ from .core.navigator import navigate
 __all__ = [
     "CameraIntrinsics",
     "FrontierCandidate",
+    "FrontierScoreRequest",
     "NavigationDebug",
     "NavigationFrame",
     "NavigationResult",

@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import math
-from typing import Tuple
+from bisect import bisect_right
+from typing import Sequence, Tuple
 
 from .geometry import wrap_angle
 
@@ -40,6 +41,138 @@ def build_uniform_scan_headings(
     return tuple(
         wrap_angle(start_heading + i * step_rad) for i in range(view_count)
     )
+
+
+def build_covering_scan_headings(
+    point_headings_world_rad: Sequence[float],
+    current_robot_heading_rad: float,
+    camera_center_offset_rad: float,
+    horizontal_fov_rad: float,
+) -> Tuple[float, ...]:
+    """返回能覆盖全部目标方向的机器人扫描朝向。
+
+    ``point_headings_world_rad`` 是待观察点相对机器人的世界系方位角；
+    ``camera_center_offset_rad`` 是相机水平视场中心相对机器人正前方的偏角。
+    点已经全部位于当前视野时只返回当前朝向，否则尝试每个圆周切点，并选择
+    视角数量最少、连续转角较短的覆盖方案，避免固定扫描无关区域。
+    """
+    current_heading = _require_finite_angle(
+        current_robot_heading_rad, "current_robot_heading_rad"
+    )
+    camera_offset = _require_finite_angle(
+        camera_center_offset_rad, "camera_center_offset_rad"
+    )
+    field_of_view = _require_finite_angle(
+        horizontal_fov_rad, "horizontal_fov_rad"
+    )
+    if not 0.0 < field_of_view <= 2.0 * math.pi:
+        raise ValueError("horizontal_fov_rad must be in (0, 2π]")
+
+    point_headings = tuple(
+        _require_finite_angle(value, "point_headings_world_rad item")
+        for value in point_headings_world_rad
+    )
+    if not point_headings:
+        return ()
+
+    current_camera_heading = wrap_angle(current_heading + camera_offset)
+    half_fov = field_of_view / 2.0
+    if all(
+        abs(wrap_angle(point_heading - current_camera_heading)) <= half_fov
+        for point_heading in point_headings
+    ):
+        return (wrap_angle(current_heading),)
+
+    circular_headings = sorted(
+        {point_heading % (2.0 * math.pi) for point_heading in point_headings}
+    )
+    return _fewest_covering_robot_headings(
+        circular_headings,
+        current_heading,
+        camera_offset,
+        field_of_view,
+    )
+
+
+def _fewest_covering_robot_headings(
+    circular_headings: Sequence[float],
+    current_heading: float,
+    camera_offset: float,
+    field_of_view: float,
+) -> Tuple[float, ...]:
+    """尝试从每个目标方向切开圆周，保留视角最少的覆盖方案。"""
+    full_turn = 2.0 * math.pi
+    doubled_headings = tuple(circular_headings) + tuple(
+        heading + full_turn for heading in circular_headings
+    )
+    best_headings = ()
+    best_key = None
+    point_count = len(circular_headings)
+    for first_index in range(point_count):
+        stop_index = first_index + point_count
+        group_start = first_index
+        camera_headings = []
+        while group_start < stop_index:
+            group_end = bisect_right(
+                doubled_headings,
+                doubled_headings[group_start] + field_of_view + 1e-12,
+                group_start + 1,
+                stop_index,
+            ) - 1
+            camera_headings.append(
+                (doubled_headings[group_start] + doubled_headings[group_end])
+                / 2.0
+            )
+            group_start = group_end + 1
+
+        robot_headings = tuple(
+            wrap_angle(camera_heading - camera_offset)
+            for camera_heading in camera_headings
+        )
+        ordered_headings = _order_by_nearest_turn(
+            robot_headings, current_heading
+        )
+        plan_key = (
+            len(ordered_headings),
+            _total_turn_distance(ordered_headings, current_heading),
+            ordered_headings,
+        )
+        if best_key is None or plan_key < best_key:
+            best_key = plan_key
+            best_headings = ordered_headings
+    return best_headings
+
+
+def _order_by_nearest_turn(
+    headings: Tuple[float, ...], current_heading: float
+) -> Tuple[float, ...]:
+    """每次优先选择转角最小的剩余朝向，减少无关往返旋转。"""
+    remaining = list(headings)
+    ordered = []
+    reference_heading = current_heading
+    while remaining:
+        nearest_index = min(
+            range(len(remaining)),
+            key=lambda index: (
+                abs(shortest_turn_to_heading(reference_heading, remaining[index])),
+                remaining[index],
+            ),
+        )
+        reference_heading = remaining.pop(nearest_index)
+        ordered.append(reference_heading)
+    return tuple(ordered)
+
+
+def _total_turn_distance(
+    headings: Tuple[float, ...], current_heading: float
+) -> float:
+    """返回依次执行扫描朝向时的累计绝对转角。"""
+    total_turn = 0.0
+    reference_heading = current_heading
+    for heading in headings:
+        total_turn += abs(shortest_turn_to_heading(reference_heading, heading))
+        reference_heading = heading
+    return total_turn
 
 
 def shortest_turn_to_heading(

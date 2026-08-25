@@ -5,6 +5,14 @@ from typing import Protocol
 from ..core.models import NavigationFrame, RelativePoseCommand
 
 
+class RecoverableMotionError(RuntimeError):
+    """目标点被规划器拒绝或无法到达，算法可淘汰该候选后继续。"""
+
+
+class MotionStalledError(RuntimeError):
+    """移动已停止但当前位置仍可用，算法应从下一帧继续探索。"""
+
+
 class ChassisInterface(Protocol):
     """底盘最小接口：读取一帧感知，发送相对位姿控制命令。
 
@@ -18,5 +26,5 @@ class ChassisInterface(Protocol):
         ...
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
-        """执行相对当前位姿的命令；完成后返回，失败时抛出明确异常。"""
+        """同步执行命令；可恢复的不可达或停滞使用对应显式异常。"""
         ...
