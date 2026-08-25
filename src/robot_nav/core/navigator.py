@@ -11,7 +11,11 @@ import math
 from dataclasses import replace
 from typing import Any, Mapping, Optional, Tuple
 
-from .frontier import find_frontier_candidates
+from .frontier import (
+    PATH_DISTANCE_SCORE_WEIGHT,
+    PREFERRED_HEADING_SCORE_WEIGHT,
+    find_frontier_candidates,
+)
 from .geometry import world_point_to_robot, world_to_nearest_grid_cell
 from .grounding import ground_target_bbox
 from .history import (
@@ -20,6 +24,7 @@ from .history import (
     set_observation_direction_state,
 )
 from .models import (
+    FrontierCandidate,
     NavigationDebug,
     NavigationFrame,
     NavigationResult,
@@ -267,11 +272,12 @@ def _select_exploration_target(
 ) -> NavigationResult:
     """从可达 Frontier 中选择下一探索点，并保存其余方向供回退。"""
     explored_state = _mark_latest_committed_explored(state)
+    preferred_heading = _preferred_heading(state.scan_evidence)
     try:
         candidates = find_frontier_candidates(
             frame.obstacle_map,
             frame.pose,
-            preferred_heading_world_rad=_preferred_heading(state.scan_evidence),
+            preferred_heading_world_rad=preferred_heading,
             excluded_world_xy=_excluded_candidate_points(
                 explored_state.observation_history
             ),
@@ -312,8 +318,41 @@ def _select_exploration_target(
             "candidate_id": candidates[0].candidate_id,
             "candidate_count": len(candidates),
             "candidate_score": candidates[0].score,
+            "preferred_heading_world_rad": preferred_heading,
+            "frontier_path_distance_weight": PATH_DISTANCE_SCORE_WEIGHT,
+            "frontier_preferred_heading_weight": PREFERRED_HEADING_SCORE_WEIGHT,
+            "frontier_candidates": tuple(
+                _frontier_candidate_debug(
+                    candidate,
+                    frame.obstacle_map.resolution_m,
+                )
+                for candidate in candidates
+            ),
         },
     )
+
+
+def _frontier_candidate_debug(
+    candidate: FrontierCandidate,
+    resolution_m: float,
+) -> Mapping[str, Any]:
+    """拆开候选分数，供命令发送前的可选终端诊断使用。"""
+    frontier_length_m = candidate.frontier_cell_count * resolution_m
+    distance_penalty = PATH_DISTANCE_SCORE_WEIGHT * candidate.path_distance_m
+    return {
+        "candidate_id": candidate.candidate_id,
+        "row": candidate.row,
+        "col": candidate.col,
+        "world_x_m": candidate.world_xy[0],
+        "world_y_m": candidate.world_xy[1],
+        "heading_world_rad": candidate.heading_world_rad,
+        "frontier_cell_count": candidate.frontier_cell_count,
+        "frontier_length_m": frontier_length_m,
+        "path_distance_m": candidate.path_distance_m,
+        "distance_penalty": distance_penalty,
+        "direction_bonus": candidate.score - frontier_length_m + distance_penalty,
+        "score": candidate.score,
+    }
 
 
 def _begin_backtracking(

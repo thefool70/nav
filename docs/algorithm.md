@@ -44,6 +44,11 @@ SCANNING
 `EXPLORED`，算法回到最近仍含 `PENDING` 方向的节点；新地图已判定为障碍的
 历史候选会变为 `INVALIDATED`。
 
+Rerun 会同时显示全部历史观测节点中的候选，因此运行越久，画面中的候选点可能
+越多；它们不等于当前一轮新生成的候选。启动时增加 `--debug-frontier`，可在
+发送移动命令前打印当前一轮候选的栅格坐标、世界坐标、前沿长度、路径距离、
+方向奖励和最终分数。
+
 ## 当前边界
 
 - 已提供 OpenAI-compatible Chat Completions / Responses 观察器，但 API 地址、

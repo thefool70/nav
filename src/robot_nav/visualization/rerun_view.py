@@ -428,7 +428,9 @@ def _status_lines(
         if observation.reason:
             lines.append(f"observation: {observation.reason}")
     if result.debug.details:
-        lines.append(f"details: {dict(result.debug.details)}")
+        details = dict(result.debug.details)
+        details.pop("frontier_candidates", None)
+        lines.append(f"details: {details}")
     return lines
 
 

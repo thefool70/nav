@@ -93,6 +93,7 @@ hardware/slamtec_l515/run.sh \
   python -m robot_nav slamtec-l515 \
   --target "门口" \
   --debug-random-score \
+  --debug-frontier \
   --enable-motion
 ```
 
@@ -113,6 +114,8 @@ Action。该计时只覆盖已经创建的 Hermes Action；VLM 推理发生在 A
 - `--action-timeout-s`：单个 Action 超时，默认 120 秒。
 - `--action-stall-timeout-s`：活跃 Action 连续静止终止时间，默认 30 秒；不会
   计算模型推理时间。
+- `--debug-frontier`：在下发移动命令前打印当前一轮 Frontier 候选及评分组成；
+  用于区分本轮候选和 Rerun 中累积显示的历史候选。
 - `--min-localization-quality`：仅定位模式使用的最低质量，默认 1。
 - `--camera-serial`：连接多台 RealSense 时选择 L515。
 - `--camera-calibration`：指定另一份外参 JSON。

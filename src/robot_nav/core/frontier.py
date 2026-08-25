@@ -13,6 +13,9 @@ from .models import FrontierCandidate, ObstacleMap, Pose2D
 Cell = Tuple[int, int]
 GridValues = Tuple[Tuple[Optional[float], ...], ...]
 
+PATH_DISTANCE_SCORE_WEIGHT = 0.05
+PREFERRED_HEADING_SCORE_WEIGHT = 0.75
+
 
 def find_frontier_candidates(
     obstacle_map: ObstacleMap,
@@ -67,9 +70,11 @@ def find_frontier_candidates(
             continue
         heading = math.atan2(world_xy[1] - pose.y_m, world_xy[0] - pose.x_m)
         frontier_length = len(component) * resolution
-        score = frontier_length - 0.05 * path_distance
+        score = frontier_length - PATH_DISTANCE_SCORE_WEIGHT * path_distance
         if preferred_heading is not None:
-            score += 0.75 * math.cos(_angle_difference(heading, preferred_heading))
+            score += PREFERRED_HEADING_SCORE_WEIGHT * math.cos(
+                _angle_difference(heading, preferred_heading)
+            )
         candidates.append(
             FrontierCandidate(
                 candidate_id=f"frontier:{row}:{col}",
@@ -276,4 +281,8 @@ def _angle_difference(target_rad: float, current_rad: float) -> float:
     return (target_rad - current_rad + math.pi) % (2.0 * math.pi) - math.pi
 
 
-__all__ = ["find_frontier_candidates"]
+__all__ = [
+    "PATH_DISTANCE_SCORE_WEIGHT",
+    "PREFERRED_HEADING_SCORE_WEIGHT",
+    "find_frontier_candidates",
+]

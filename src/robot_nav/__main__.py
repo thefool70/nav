@@ -393,6 +393,11 @@ def _add_navigation_arguments(
         action="store_true",
         help="不调用 VLM，观察器只返回随机方向评分",
     )
+    parser.add_argument(
+        "--debug-frontier",
+        action="store_true",
+        help="在发送移动命令前打印本轮 Frontier 候选及评分计算",
+    )
 
 
 def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
@@ -413,6 +418,7 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
             args.max_cycles,
             observer,
             on_cycle,
+            args.debug_frontier,
         )
 
 
@@ -450,6 +456,7 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
             args.max_cycles,
             observer,
             on_cycle,
+            args.debug_frontier,
         )
 
 
@@ -502,6 +509,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
                 args.max_cycles,
                 observer,
                 on_cycle,
+                args.debug_frontier,
             )
         except RuntimeError as exc:
             print(f"Hermes 导航停止：{exc}")
@@ -703,17 +711,19 @@ def _run_navigation(
     max_cycles: int,
     observer: TargetObserver,
     on_cycle,
+    debug_frontier: bool,
 ) -> int:
     """重复执行环境无关的单周期入口，直到完成、失败或达到上限。"""
     goal = TargetSearchGoal(target_text)
     state = None
+    cycle_callback = _with_frontier_debug(on_cycle, debug_frontier)
     for cycle_index in range(1, max_cycles + 1):
         result = run_navigation_cycle(
             chassis,
             goal,
             state,
             observer,
-            on_cycle=on_cycle,
+            on_cycle=cycle_callback,
         )
         state = result.state
         _print_cycle(cycle_index, result)
@@ -728,6 +738,61 @@ def _run_navigation(
 
     print(f"达到最大导航周期数 {max_cycles}，搜索尚未结束。")
     return 1
+
+
+def _with_frontier_debug(on_cycle, enabled: bool):
+    """把可选 Frontier 终端输出接到发送命令前的周期回调。"""
+    if not enabled:
+        return on_cycle
+
+    def callback(frame, observation, result) -> None:
+        if on_cycle is not None:
+            on_cycle(frame, observation, result)
+        _print_frontier_debug(frame, result)
+
+    return callback
+
+
+def _print_frontier_debug(frame, result: NavigationResult) -> None:
+    """逐项打印本轮 Frontier 候选的评分组成。"""
+    if result.debug.stage != "explore.select":
+        return
+    candidates = result.debug.details.get("frontier_candidates")
+    if not candidates:
+        return
+
+    preferred_heading = result.debug.details.get("preferred_heading_world_rad")
+    preferred_text = (
+        "none" if preferred_heading is None else f"{preferred_heading:.3f} rad"
+    )
+    path_weight = result.debug.details["frontier_path_distance_weight"]
+    heading_weight = result.debug.details["frontier_preferred_heading_weight"]
+    print(
+        "[Frontier] "
+        f"本轮候选={len(candidates)}，"
+        f"robot=({frame.pose.x_m:.3f}, {frame.pose.y_m:.3f}) m，"
+        f"preferred_heading={preferred_text}"
+    )
+    print(
+        "[Frontier] score = 前沿长度 "
+        f"- {path_weight:.2f}×路径距离 + 方向奖励；"
+        f"方向奖励 = {heading_weight:.2f}×cos(候选方向-首选方向)"
+    )
+    for rank, candidate in enumerate(candidates, start=1):
+        selected = " selected" if rank == 1 else ""
+        print(
+            f"[Frontier #{rank:02d}{selected}] "
+            f"id={candidate['candidate_id']} "
+            f"grid=({candidate['row']}, {candidate['col']}) "
+            f"world=({candidate['world_x_m']:.3f}, "
+            f"{candidate['world_y_m']:.3f}) m "
+            f"cells={candidate['frontier_cell_count']} "
+            f"length={candidate['frontier_length_m']:.3f} m "
+            f"path={candidate['path_distance_m']:.3f} m "
+            f"distance_penalty={candidate['distance_penalty']:.3f} "
+            f"direction_bonus={candidate['direction_bonus']:+.3f} "
+            f"score={candidate['score']:.3f}"
+        )
 
 
 def _build_observer(
