@@ -111,11 +111,11 @@ class SlamtecRestClient:
     def get_slam_state(self) -> SlamtecSlamState:
         """读取建图/定位开关和质量，明确区分两种工作模式。"""
         mapping_enabled = self._request_boolean(
-            "/api/core/slam/v1/mapping/enabled",
+            "/api/core/slam/v1/mapping/:enable",
             "建图开关",
         )
         localization_enabled = self._request_boolean(
-            "/api/core/slam/v1/localization/enabled",
+            "/api/core/slam/v1/localization/:enable",
             "定位开关",
         )
         return SlamtecSlamState(
@@ -133,9 +133,9 @@ class SlamtecRestClient:
             "机器人健康状态",
         )
         return SlamtecRobotHealth(
-            has_warning=_boolean_field(payload, "has_warning"),
-            has_error=_boolean_field(payload, "has_error"),
-            has_fatal=_boolean_field(payload, "has_fatal"),
+            has_warning=_boolean_field(payload, "hasWarning"),
+            has_error=_boolean_field(payload, "hasError"),
+            has_fatal=_boolean_field(payload, "hasFatal"),
         )
 
     def get_action_names(self) -> Tuple[str, ...]:
