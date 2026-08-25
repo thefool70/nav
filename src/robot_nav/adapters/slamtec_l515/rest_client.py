@@ -32,6 +32,32 @@ class SlamtecExploreMap:
     cells: bytes
 
 
+@dataclass(frozen=True)
+class SlamtecSlamState:
+    """运动安全检查所需的 SLAM 工作状态。"""
+
+    mapping_enabled: bool
+    localization_enabled: bool
+    localization_quality: int
+
+    @property
+    def mode(self) -> str:
+        if self.mapping_enabled:
+            return "mapping"
+        if self.localization_enabled:
+            return "localization"
+        return "odometry"
+
+
+@dataclass(frozen=True)
+class SlamtecRobotHealth:
+    """底盘健康摘要；warning 可继续，error 和 fatal 拒绝运动。"""
+
+    has_warning: bool
+    has_error: bool
+    has_fatal: bool
+
+
 class SlamtecRestClient:
     """通过 Robot Agent HTTP API 读取 SLAM 数据并管理运动 Action。"""
 
@@ -81,6 +107,36 @@ class SlamtecRestClient:
             "GET", "/api/core/slam/v1/maps/explore"
         )
         return parse_explore_map(payload)
+
+    def get_slam_state(self) -> SlamtecSlamState:
+        """读取建图/定位开关和质量，明确区分两种工作模式。"""
+        mapping_enabled = self._request_boolean(
+            "/api/core/slam/v1/mapping/enabled",
+            "建图开关",
+        )
+        localization_enabled = self._request_boolean(
+            "/api/core/slam/v1/localization/enabled",
+            "定位开关",
+        )
+        return SlamtecSlamState(
+            mapping_enabled=mapping_enabled,
+            localization_enabled=localization_enabled,
+            localization_quality=self.get_localization_quality(),
+        )
+
+    def get_robot_health(self) -> SlamtecRobotHealth:
+        """读取会影响运动安全的 warning/error/fatal 摘要。"""
+        payload = _require_mapping(
+            self._request_json(
+                "GET", "/api/core/system/v1/robot/health"
+            ),
+            "机器人健康状态",
+        )
+        return SlamtecRobotHealth(
+            has_warning=_boolean_field(payload, "has_warning"),
+            has_error=_boolean_field(payload, "has_error"),
+            has_fatal=_boolean_field(payload, "has_fatal"),
+        )
 
     def get_action_names(self) -> Tuple[str, ...]:
         """读取本机固件实际支持的运动 Action 名称。"""
@@ -168,6 +224,12 @@ class SlamtecRestClient:
         self._request_bytes(
             "DELETE", "/api/core/motion/v1/actions/:current"
         )
+
+    def _request_boolean(self, path: str, description: str) -> bool:
+        value = self._request_json("GET", path)
+        if not isinstance(value, bool):
+            raise RuntimeError(f"Hermes 返回的{description}不是布尔值")
+        return value
 
     def _request_json(
         self,
@@ -276,6 +338,13 @@ def _require_mapping(value: Any, description: str) -> Mapping[str, Any]:
     return value
 
 
+def _boolean_field(payload: Mapping[str, Any], name: str) -> bool:
+    value = payload.get(name)
+    if not isinstance(value, bool):
+        raise RuntimeError(f"Hermes 健康字段 {name} 不是布尔值")
+    return value
+
+
 def _finite_number(payload: Mapping[str, Any], name: str) -> float:
     value = payload.get(name)
     if (
@@ -299,6 +368,8 @@ def _is_positive_finite(value: Any) -> bool:
 __all__ = [
     "SlamtecExploreMap",
     "SlamtecRestClient",
+    "SlamtecRobotHealth",
+    "SlamtecSlamState",
     "parse_explore_map",
     "resolve_action_name",
 ]

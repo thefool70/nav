@@ -29,14 +29,17 @@ from .adapters.s100_l515 import (
     load_camera_mount,
 )
 from .adapters.slamtec_l515 import (
+    DEFAULT_CAMERA_EXTRINSICS_PATH,
     SlamtecL515Adapter,
     SlamtecL515Config,
+    SlamtecRobotHealth,
+    load_camera_extrinsics,
 )
 from .app import run_navigation_cycle
 from .core.models import (
+    CameraExtrinsics,
     NavigationResult,
     NavigationStatus,
-    Pose2D,
     SearchPhase,
     TargetSearchGoal,
 )
@@ -62,6 +65,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("外参标定会移动真机，必须显式提供 --enable-motion")
         return _run_s100_l515_calibration(args)
 
+    if args.adapter == "calibrate-slamtec-l515":
+        if not args.enable_motion:
+            parser.error("外参标定会移动真机，必须显式提供 --enable-motion")
+        return _run_slamtec_l515_calibration(args)
+
     if args.adapter == "s100-l515":
         calibration_path = Path(args.camera_calibration)
         if args.camera_height_m is None and not calibration_path.is_file():
@@ -84,6 +92,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.adapter == "slamtec-l515":
         if args.base_only and not args.preflight_only:
             parser.error("--base-only 只用于 --preflight-only，不可启动导航")
+        calibration_path = Path(args.camera_calibration)
+        if (
+            not args.preflight_only
+            and args.camera_height_m is None
+            and not calibration_path.is_file()
+        ):
+            parser.error(
+                "缺少相机外参：先运行 calibrate-slamtec-l515，"
+                "或至少提供 --camera-height-m"
+            )
         if not args.preflight_only and not args.target:
             parser.error("slamtec-l515 导航模式必须提供 --target")
         if not args.preflight_only and not args.enable_motion:
@@ -151,6 +169,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="覆盖标定文件中的向下俯仰角（度）",
     )
     hardware.add_argument(
+        "--camera-roll-deg",
+        type=_finite_float,
+        help="覆盖标定文件中的图像顺时针侧倾角（度）",
+    )
+    hardware.add_argument(
         "--slam",
         action="store_true",
         help="使用 ROS 2 slam_toolbox 提供位姿与占用图",
@@ -186,22 +209,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="有多台 RealSense 时指定 L515 序列号",
     )
     slamtec.add_argument(
+        "--camera-calibration",
+        default=str(DEFAULT_CAMERA_EXTRINSICS_PATH),
+        help="完整相机外参 JSON；存在时自动读取，手动参数可覆盖",
+    )
+    slamtec.add_argument(
+        "--camera-height-m",
+        type=_positive_float,
+        help="覆盖标定文件中的 L515 光心高度（米）",
+    )
+    slamtec.add_argument(
         "--camera-forward-m",
         type=_finite_float,
-        default=0.0,
-        help="L515 光心相对底盘中心的前向偏移（米）",
+        help="覆盖标定文件中的前向偏移（米）",
     )
     slamtec.add_argument(
         "--camera-left-m",
         type=_finite_float,
-        default=0.0,
-        help="L515 光心相对底盘中心的左向偏移（米）",
+        help="覆盖标定文件中的左向偏移（米）",
     )
     slamtec.add_argument(
         "--camera-yaw-deg",
         type=_finite_float,
-        default=0.0,
-        help="L515 相对底盘正前方的左偏角（度）",
+        help="覆盖标定文件中的左偏 yaw（度）",
+    )
+    slamtec.add_argument(
+        "--camera-pitch-down-deg",
+        type=_finite_float,
+        help="覆盖标定文件中的向下俯仰角（度）",
+    )
+    slamtec.add_argument(
+        "--camera-roll-deg",
+        type=_finite_float,
+        help="覆盖标定文件中的图像顺时针侧倾角（度）",
     )
     slamtec.add_argument(
         "--action-timeout-s",
@@ -254,6 +294,54 @@ def _build_parser() -> argparse.ArgumentParser:
         help="标定直行距离，默认 0.20 m",
     )
     calibration.add_argument(
+        "--enable-motion",
+        action="store_true",
+        help="确认场地清空并允许标定程序移动真机",
+    )
+
+    slamtec_calibration = adapters.add_parser(
+        "calibrate-slamtec-l515",
+        help="利用 L515 IMU/RGB-D 和 Hermes 位姿标定安装外参",
+    )
+    slamtec_calibration.add_argument(
+        "--base-url",
+        default="http://192.168.11.1:1448",
+        help="Hermes Robot Agent 地址",
+    )
+    slamtec_calibration.add_argument(
+        "--camera-serial",
+        help="有多台 RealSense 时指定 L515 序列号",
+    )
+    slamtec_calibration.add_argument(
+        "--output",
+        default=str(DEFAULT_CAMERA_EXTRINSICS_PATH),
+        help="标定结果 JSON 路径",
+    )
+    slamtec_calibration.add_argument(
+        "--turn-angle-deg",
+        type=_positive_float,
+        default=30.0,
+        help="左右标定转角，默认 30°",
+    )
+    slamtec_calibration.add_argument(
+        "--drive-distance-m",
+        type=_positive_float,
+        default=0.20,
+        help="标定直行距离，默认 0.20 m",
+    )
+    slamtec_calibration.add_argument(
+        "--action-timeout-s",
+        type=_positive_float,
+        default=120.0,
+        help="单个 Hermes 标定 Action 的超时秒数",
+    )
+    slamtec_calibration.add_argument(
+        "--min-localization-quality",
+        type=_localization_quality,
+        default=1,
+        help="定位模式的最低质量；建图模式不应用该阈值",
+    )
+    slamtec_calibration.add_argument(
         "--enable-motion",
         action="store_true",
         help="确认场地清空并允许标定程序移动真机",
@@ -369,11 +457,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             if args.base_only
             else L515Config(serial_number=args.camera_serial)
         ),
-        camera_pose_in_robot=Pose2D(
-            x_m=args.camera_forward_m,
-            y_m=args.camera_left_m,
-            yaw_rad=math.radians(args.camera_yaw_deg),
-        ),
+        camera_extrinsics_in_robot=_slamtec_extrinsics_from_args(args),
         action_timeout_s=args.action_timeout_s,
         minimum_localization_quality=args.min_localization_quality,
     )
@@ -383,7 +467,8 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
     ) as chassis:
         if args.preflight_only:
             info = chassis.get_robot_info()
-            quality = chassis.get_localization_quality()
+            slam_state = chassis.get_slam_state()
+            health = chassis.get_robot_health()
             frame = chassis.read_frame()
             height = len(frame.obstacle_map.occupancy)
             width = len(frame.obstacle_map.occupancy[0]) if height else 0
@@ -392,7 +477,10 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
                 f"model={info.get('modelName', 'unknown')}，"
                 f"firmware={info.get('softwareVersion', 'unknown')}，"
                 f"pose=({frame.pose.x_m:.2f}, {frame.pose.y_m:.2f}, "
-                f"{frame.pose.yaw_rad:.2f})，quality={quality}，"
+                f"{frame.pose.yaw_rad:.2f})，"
+                f"mode={slam_state.mode}，"
+                f"quality={slam_state.localization_quality}，"
+                f"health={_slamtec_health_text(health)}，"
                 f"map={width}×{height}，"
                 f"L515={'已启用' if chassis.has_camera else '未启用'}。"
             )
@@ -443,6 +531,49 @@ def _run_s100_l515_calibration(args: argparse.Namespace) -> int:
         f"left={mount.left_m:.3f} m, "
         f"yaw={math.degrees(mount.yaw_rad):.2f}°, "
         f"pitch-down={math.degrees(mount.pitch_down_rad):.2f}°, "
+        f"roll={math.degrees(mount.roll_rad):.2f}°, "
+        f"residual={result.extrinsic_residual_m:.3f} m"
+    )
+    return 0
+
+
+def _run_slamtec_l515_calibration(args: argparse.Namespace) -> int:
+    """执行 Hermes Action 与 L515 的独立外参标定。"""
+    from .adapters.slamtec_l515.calibration import (
+        CameraCalibrationConfig,
+        calibrate_slamtec_l515,
+    )
+
+    print(
+        "外参标定将原地左右转动并向前移动。请清空周围至少 0.5 m，"
+        "准备好急停或独立断电手段，标定期间不要触碰机器人。"
+    )
+    try:
+        result = calibrate_slamtec_l515(
+            base_url=args.base_url,
+            camera_config=L515Config(serial_number=args.camera_serial),
+            calibration_config=CameraCalibrationConfig(
+                turn_angle_rad=math.radians(args.turn_angle_deg),
+                drive_distance_m=args.drive_distance_m,
+            ),
+            output_path=Path(args.output),
+            action_timeout_s=args.action_timeout_s,
+            minimum_localization_quality=args.min_localization_quality,
+            progress=print,
+        )
+        extrinsics = load_camera_extrinsics(result.output_path)
+    except (ImportError, RuntimeError, ValueError) as exc:
+        print(f"Hermes/L515 外参标定失败：{exc}")
+        return 1
+
+    print(
+        "标定结果："
+        f"height={extrinsics.height_m:.3f} m, "
+        f"forward={extrinsics.forward_m:.3f} m, "
+        f"left={extrinsics.left_m:.3f} m, "
+        f"yaw={math.degrees(extrinsics.yaw_rad):.2f}°, "
+        f"pitch-down={math.degrees(extrinsics.pitch_down_rad):.2f}°, "
+        f"roll={math.degrees(extrinsics.roll_rad):.2f}°, "
         f"residual={result.extrinsic_residual_m:.3f} m"
     )
     return 0
@@ -476,7 +607,70 @@ def _camera_mount_from_args(args: argparse.Namespace) -> CameraMount:
         pitch_down_rad=math.radians(args.camera_pitch_down_deg)
         if args.camera_pitch_down_deg is not None
         else _mount_value(None, calibrated, "pitch_down_rad"),
+        roll_rad=math.radians(args.camera_roll_deg)
+        if args.camera_roll_deg is not None
+        else _mount_value(None, calibrated, "roll_rad"),
     )
+
+
+def _slamtec_extrinsics_from_args(
+    args: argparse.Namespace,
+) -> CameraExtrinsics:
+    """读取 Hermes 标定文件，并用显式命令行参数逐项覆盖。"""
+    calibration_path = Path(args.camera_calibration)
+    calibrated = (
+        load_camera_extrinsics(calibration_path)
+        if calibration_path.is_file()
+        else None
+    )
+    return CameraExtrinsics(
+        height_m=_extrinsic_value(
+            args.camera_height_m,
+            calibrated,
+            "height_m",
+        ),
+        forward_m=_extrinsic_value(
+            args.camera_forward_m,
+            calibrated,
+            "forward_m",
+        ),
+        left_m=_extrinsic_value(
+            args.camera_left_m,
+            calibrated,
+            "left_m",
+        ),
+        yaw_rad=math.radians(args.camera_yaw_deg)
+        if args.camera_yaw_deg is not None
+        else _extrinsic_value(None, calibrated, "yaw_rad"),
+        pitch_down_rad=math.radians(args.camera_pitch_down_deg)
+        if args.camera_pitch_down_deg is not None
+        else _extrinsic_value(None, calibrated, "pitch_down_rad"),
+        roll_rad=math.radians(args.camera_roll_deg)
+        if args.camera_roll_deg is not None
+        else _extrinsic_value(None, calibrated, "roll_rad"),
+    )
+
+
+def _extrinsic_value(
+    override: Optional[float],
+    calibrated: Optional[CameraExtrinsics],
+    attribute: str,
+) -> float:
+    if override is not None:
+        return override
+    if calibrated is not None:
+        return float(getattr(calibrated, attribute))
+    return 0.0
+
+
+def _slamtec_health_text(health: SlamtecRobotHealth) -> str:
+    if health.has_fatal:
+        return "fatal"
+    if health.has_error:
+        return "error"
+    if health.has_warning:
+        return "warning"
+    return "ok"
 
 
 def _mount_value(

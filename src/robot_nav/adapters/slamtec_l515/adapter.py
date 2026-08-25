@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Tuple
 
 from ...core.models import (
+    CameraExtrinsics,
     NavigationFrame,
     ObstacleMap,
     Pose2D,
@@ -17,6 +18,8 @@ from ..realsense import L515Camera, L515Capture, L515Config
 from .rest_client import (
     SlamtecExploreMap,
     SlamtecRestClient,
+    SlamtecRobotHealth,
+    SlamtecSlamState,
     resolve_action_name,
 )
 
@@ -30,8 +33,8 @@ class SlamtecL515Config:
 
     base_url: str = "http://192.168.11.1:1448"
     camera: Optional[L515Config] = field(default_factory=L515Config)
-    camera_pose_in_robot: Pose2D = field(
-        default_factory=lambda: Pose2D(0.0, 0.0, 0.0)
+    camera_extrinsics_in_robot: CameraExtrinsics = field(
+        default_factory=CameraExtrinsics
     )
     request_timeout_s: float = 5.0
     action_timeout_s: float = 120.0
@@ -92,6 +95,18 @@ class SlamtecL515Adapter:
         """读取当前 0-100 定位质量，供预检与运动前检查。"""
         return self._client.get_localization_quality()
 
+    def get_slam_state(self) -> SlamtecSlamState:
+        """读取建图/定位模式及其质量。"""
+        return self._client.get_slam_state()
+
+    def get_robot_health(self) -> SlamtecRobotHealth:
+        """读取底盘健康摘要。"""
+        return self._client.get_robot_health()
+
+    def read_pose(self) -> Pose2D:
+        """读取 Hermes 当前地图位姿，供标定控制复用。"""
+        return self._client.get_pose()
+
     def read_frame(self) -> NavigationFrame:
         """组合 Hermes 地图/位姿与同机 L515 对齐 RGB-D。"""
         capture = self._camera.capture() if self._camera is not None else None
@@ -102,18 +117,13 @@ class SlamtecL515Adapter:
             pose=pose,
             slamtec_map=slamtec_map,
             capture=capture,
-            camera_pose=self.config.camera_pose_in_robot,
+            camera_extrinsics=self.config.camera_extrinsics_in_robot,
         )
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
         """把机器人局部相对位姿转换为 Hermes 的全局规划与原地转向。"""
         _validate_command(command)
-        quality = self._client.get_localization_quality()
-        if quality < self.config.minimum_localization_quality:
-            raise RuntimeError(
-                "Hermes 定位质量不足，拒绝运动："
-                f"{quality} < {self.config.minimum_localization_quality}"
-            )
+        self._require_motion_ready()
 
         start_pose = self._client.get_pose()
         target_xy = _relative_target_world(start_pose, command)
@@ -141,6 +151,28 @@ class SlamtecL515Adapter:
                     {"angle": target_yaw},
                 )
         self._publish_motion_frame(force=True)
+
+    def _require_motion_ready(self) -> None:
+        """建图时接受 quality=0；纯定位时才应用质量阈值。"""
+        health = self._client.get_robot_health()
+        if health.has_fatal or health.has_error:
+            level = "fatal" if health.has_fatal else "error"
+            raise RuntimeError(f"Hermes 健康状态为 {level}，拒绝运动")
+
+        state = self._client.get_slam_state()
+        if state.mapping_enabled:
+            return
+        if not state.localization_enabled:
+            raise RuntimeError("Hermes 未启用建图或定位，拒绝运动")
+        if (
+            state.localization_quality
+            < self.config.minimum_localization_quality
+        ):
+            raise RuntimeError(
+                "Hermes 定位质量不足，拒绝运动："
+                f"{state.localization_quality} < "
+                f"{self.config.minimum_localization_quality}"
+            )
 
     def _execute_action(
         self, action_name: str, options: Mapping[str, Any]
@@ -191,7 +223,7 @@ def _build_navigation_frame(
     pose: Pose2D,
     slamtec_map: SlamtecExploreMap,
     capture: Optional[L515Capture],
-    camera_pose: Pose2D,
+    camera_extrinsics: CameraExtrinsics,
 ) -> NavigationFrame:
     """把两类设备数据冻结为 core 只读的同一地图坐标帧。"""
     obstacle_map = _to_obstacle_map(slamtec_map)
@@ -200,7 +232,7 @@ def _build_navigation_frame(
             timestamp_s=timestamp_s,
             pose=pose,
             obstacle_map=obstacle_map,
-            camera_pose_in_robot=camera_pose,
+            camera_extrinsics_in_robot=camera_extrinsics,
         )
     return NavigationFrame(
         timestamp_s=timestamp_s,
@@ -209,7 +241,7 @@ def _build_navigation_frame(
         depth=_convert_depth(capture.depth_m),
         rgb=_convert_rgb(capture.rgb),
         camera_intrinsics=capture.camera_intrinsics,
-        camera_pose_in_robot=camera_pose,
+        camera_extrinsics_in_robot=camera_extrinsics,
     )
 
 
@@ -287,15 +319,22 @@ def _validate_config(config: SlamtecL515Config) -> None:
         raise ValueError("config 必须为 SlamtecL515Config")
     if config.camera is not None and not isinstance(config.camera, L515Config):
         raise ValueError("camera 必须为 L515Config 或 None")
-    if not isinstance(config.camera_pose_in_robot, Pose2D) or not all(
+    if not isinstance(
+        config.camera_extrinsics_in_robot, CameraExtrinsics
+    ) or not all(
         _is_finite(value)
         for value in (
-            config.camera_pose_in_robot.x_m,
-            config.camera_pose_in_robot.y_m,
-            config.camera_pose_in_robot.yaw_rad,
+            config.camera_extrinsics_in_robot.forward_m,
+            config.camera_extrinsics_in_robot.left_m,
+            config.camera_extrinsics_in_robot.height_m,
+            config.camera_extrinsics_in_robot.yaw_rad,
+            config.camera_extrinsics_in_robot.pitch_down_rad,
+            config.camera_extrinsics_in_robot.roll_rad,
         )
     ):
-        raise ValueError("camera_pose_in_robot 必须为有限 Pose2D")
+        raise ValueError(
+            "camera_extrinsics_in_robot 必须为有限 CameraExtrinsics"
+        )
     for name in (
         "request_timeout_s",
         "action_timeout_s",
