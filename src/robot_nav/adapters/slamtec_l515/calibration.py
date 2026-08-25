@@ -72,7 +72,10 @@ def calibrate_slamtec_l515(
         action_timeout_s=action_timeout_s,
         minimum_localization_quality=minimum_localization_quality,
     )
-    with SlamtecL515Adapter(adapter_config) as adapter:
+    with SlamtecL515Adapter(
+        adapter_config,
+        on_action_progress=progress,
+    ) as adapter:
         result = calibrate_l515_extrinsics(
             _HermesCalibrationMotion(adapter),
             camera_config,

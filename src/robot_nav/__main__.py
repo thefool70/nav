@@ -250,6 +250,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="单个 Hermes 运动 Action 的超时秒数",
     )
     slamtec.add_argument(
+        "--action-stall-timeout-s",
+        type=_positive_float,
+        default=30.0,
+        help="活跃 Action 无足够位姿变化的终止秒数，默认 30",
+    )
+    slamtec.add_argument(
         "--min-localization-quality",
         type=_localization_quality,
         default=1,
@@ -459,11 +465,13 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
         ),
         camera_extrinsics_in_robot=_slamtec_extrinsics_from_args(args),
         action_timeout_s=args.action_timeout_s,
+        action_stall_timeout_s=args.action_stall_timeout_s,
         minimum_localization_quality=args.min_localization_quality,
     )
     with SlamtecL515Adapter(
         config,
         on_motion_frame=on_motion_frame,
+        on_action_progress=print,
     ) as chassis:
         if args.preflight_only:
             info = chassis.get_robot_info()
@@ -487,13 +495,17 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             return 0
 
         observer = _build_observer(args.debug_random_score, api_key)
-        return _run_navigation(
-            chassis,
-            args.target,
-            args.max_cycles,
-            observer,
-            on_cycle,
-        )
+        try:
+            return _run_navigation(
+                chassis,
+                args.target,
+                args.max_cycles,
+                observer,
+                on_cycle,
+            )
+        except RuntimeError as exc:
+            print(f"Hermes 导航停止：{exc}")
+            return 1
 
 
 def _run_s100_l515_calibration(args: argparse.Namespace) -> int:

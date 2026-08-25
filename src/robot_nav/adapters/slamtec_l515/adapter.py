@@ -25,6 +25,7 @@ from .rest_client import (
 
 
 MotionFrameCallback = Callable[[NavigationFrame], None]
+ActionProgressCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,22 @@ class SlamtecL515Config:
     request_timeout_s: float = 5.0
     action_timeout_s: float = 120.0
     action_poll_interval_s: float = 0.2
+    action_progress_interval_s: float = 2.0
+    action_stall_timeout_s: float = 30.0
+    action_stall_translation_m: float = 0.02
+    action_stall_rotation_rad: float = math.radians(1.0)
     motion_frame_interval_s: float = 0.5
     minimum_localization_quality: int = 1
     position_tolerance_m: float = 0.03
     yaw_tolerance_rad: float = math.radians(1.0)
+
+
+@dataclass
+class _ActionMonitorState:
+    started_s: float
+    last_sample_s: float
+    last_motion_s: float
+    last_motion_pose: Pose2D
 
 
 class SlamtecL515Adapter:
@@ -52,10 +65,12 @@ class SlamtecL515Adapter:
         self,
         config: SlamtecL515Config,
         on_motion_frame: Optional[MotionFrameCallback] = None,
+        on_action_progress: Optional[ActionProgressCallback] = None,
     ) -> None:
         _validate_config(config)
         self.config = config
         self._on_motion_frame = on_motion_frame
+        self._on_action_progress = on_action_progress
         self._last_motion_frame_s = float("-inf")
         self._client = SlamtecRestClient(
             config.base_url, config.request_timeout_s
@@ -177,14 +192,35 @@ class SlamtecL515Adapter:
     def _execute_action(
         self, action_name: str, options: Mapping[str, Any]
     ) -> None:
-        """创建并同步等待一个 Action，中断时立即请求底盘终止。"""
+        """监控活跃 Action 的反馈和位姿；不计入 VLM 等待时间。"""
         action_id = self._client.create_action(action_name, options)
+        action_label = action_name.rsplit(".", 1)[-1]
+        started_s = time.monotonic()
+        monitor_state = _ActionMonitorState(
+            started_s=started_s,
+            last_sample_s=float("-inf"),
+            last_motion_s=started_s,
+            last_motion_pose=self._client.get_pose(),
+        )
+        self._report_action_progress(
+            f"Hermes Action #{action_id} {action_label} 已创建。"
+        )
+
+        def monitor_action(status: int, stage: str) -> None:
+            self._monitor_action(
+                action_id,
+                action_label,
+                monitor_state,
+                status,
+                stage,
+            )
+
         try:
             self._client.wait_for_action(
                 action_id=action_id,
                 timeout_s=self.config.action_timeout_s,
                 poll_interval_s=self.config.action_poll_interval_s,
-                on_poll=self._publish_motion_frame,
+                on_poll=monitor_action,
             )
         except BaseException:
             try:
@@ -192,6 +228,65 @@ class SlamtecL515Adapter:
             except RuntimeError:
                 pass
             raise
+        self._report_action_progress(
+            f"Hermes Action #{action_id} {action_label} 完成，"
+            f"耗时 {time.monotonic() - started_s:.1f}s。"
+        )
+
+    def _monitor_action(
+        self,
+        action_id: int,
+        action_label: str,
+        state: _ActionMonitorState,
+        status: int,
+        stage: str,
+    ) -> None:
+        """采样活跃 Action 位姿，定期报告并识别真正的底盘停滞。"""
+        self._publish_motion_frame()
+        now = time.monotonic()
+        if (
+            now - state.last_sample_s
+            < self.config.action_progress_interval_s
+        ):
+            return
+
+        pose = self._client.get_pose()
+        moved_m = math.hypot(
+            pose.x_m - state.last_motion_pose.x_m,
+            pose.y_m - state.last_motion_pose.y_m,
+        )
+        turned_rad = abs(
+            _angle_difference(pose.yaw_rad, state.last_motion_pose.yaw_rad)
+        )
+        if (
+            moved_m >= self.config.action_stall_translation_m
+            or turned_rad >= self.config.action_stall_rotation_rad
+        ):
+            state.last_motion_pose = pose
+            state.last_motion_s = now
+
+        elapsed_s = now - state.started_s
+        still_s = now - state.last_motion_s
+        stage_text = stage or "-"
+        self._report_action_progress(
+            f"Hermes Action #{action_id} {action_label}: "
+            f"status={_action_status_text(status)}, "
+            f"elapsed={elapsed_s:.1f}s, still={still_s:.1f}s, "
+            f"pose=({pose.x_m:.2f}, {pose.y_m:.2f}, "
+            f"{math.degrees(pose.yaw_rad):.1f}°), stage={stage_text}"
+        )
+        state.last_sample_s = now
+
+        if still_s >= self.config.action_stall_timeout_s:
+            raise RuntimeError(
+                f"Hermes Action {action_id} 已连续 {still_s:.1f} 秒"
+                "没有产生足够位姿变化"
+            )
+
+    def _report_action_progress(self, message: str) -> None:
+        """向入口报告底盘 Action 进度；不参与运动控制。"""
+        if self._on_action_progress is not None:
+            self._on_action_progress(message)
 
     def _publish_motion_frame(self, force: bool = False) -> None:
         """运动期间按固定间隔向 Rerun 发布真实底盘帧。"""
@@ -339,6 +434,10 @@ def _validate_config(config: SlamtecL515Config) -> None:
         "request_timeout_s",
         "action_timeout_s",
         "action_poll_interval_s",
+        "action_progress_interval_s",
+        "action_stall_timeout_s",
+        "action_stall_translation_m",
+        "action_stall_rotation_rad",
         "motion_frame_interval_s",
         "position_tolerance_m",
         "yaw_tolerance_rad",
@@ -361,6 +460,10 @@ def _wrap_angle(value: float) -> float:
 
 def _angle_difference(target_rad: float, current_rad: float) -> float:
     return _wrap_angle(target_rad - current_rad)
+
+
+def _action_status_text(status: int) -> str:
+    return {0: "new", 1: "working", 3: "paused"}.get(status, str(status))
 
 
 def _is_finite(value: Any) -> bool:

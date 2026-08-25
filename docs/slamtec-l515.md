@@ -102,11 +102,17 @@ hardware/slamtec_l515/run.sh \
 运动命令不会直接发轮速。Adapter 将局部相对平移转换成地图坐标，交给
 `MoveToAction` 使用底盘自身规划与避障，再用 `RotateToAction` 达到目标朝向。
 每个 Action 都会等待成功、失败或超时；中断和超时时请求终止当前 Action。
+运行期间终端每约 2 秒显示 Action ID、状态、已执行时间、连续静止时间、位姿和
+底盘返回的阶段。默认连续 30 秒没有超过 2 cm 或 1° 的位姿变化时终止当前
+Action。该计时只覆盖已经创建的 Hermes Action；VLM 推理发生在 Action 创建前，
+即使耗时很长也不会被判定为底盘停滞。
 
 常用参数：
 
 - `--base-url`：Robot Agent 地址，默认 `http://192.168.11.1:1448`。
 - `--action-timeout-s`：单个 Action 超时，默认 120 秒。
+- `--action-stall-timeout-s`：活跃 Action 连续静止终止时间，默认 30 秒；不会
+  计算模型推理时间。
 - `--min-localization-quality`：仅定位模式使用的最低质量，默认 1。
 - `--camera-serial`：连接多台 RealSense 时选择 L515。
 - `--camera-calibration`：指定另一份外参 JSON。

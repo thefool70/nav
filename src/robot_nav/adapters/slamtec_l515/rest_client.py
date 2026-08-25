@@ -174,9 +174,9 @@ class SlamtecRestClient:
         action_id: int,
         timeout_s: float,
         poll_interval_s: float,
-        on_poll: Optional[Callable[[], None]] = None,
+        on_poll: Optional[Callable[[int, str], None]] = None,
     ) -> None:
-        """轮询到 Action 成功；失败、取消或超时时抛出明确异常。"""
+        """轮询 Action；把执行状态和阶段交给调用方监控。"""
         if isinstance(action_id, bool) or not isinstance(action_id, int):
             raise ValueError("action_id 必须为整数")
         if not _is_positive_finite(timeout_s):
@@ -196,6 +196,9 @@ class SlamtecRestClient:
             status = state.get("status")
             if isinstance(status, bool) or not isinstance(status, int):
                 raise RuntimeError("Hermes Action state 缺少整数 status")
+            stage = payload.get("stage")
+            if not isinstance(stage, str):
+                stage = ""
             if status == 4:
                 result = state.get("result")
                 if result == 0:
@@ -216,7 +219,7 @@ class SlamtecRestClient:
                     f"Hermes Action {action_id} 超过 {timeout_s:.1f} 秒未结束"
                 )
             if on_poll is not None:
-                on_poll()
+                on_poll(status, stage)
             time.sleep(min(float(poll_interval_s), deadline - now))
 
     def abort_current_action(self) -> None:
