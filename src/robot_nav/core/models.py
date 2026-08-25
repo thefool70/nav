@@ -14,6 +14,8 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 Grid = Sequence[Sequence[Optional[float]]]
 # 深度图：单位为米，None 表示该像素无有效深度。
 DepthImage = Sequence[Sequence[Optional[float]]]
+# 目标掩码：True 表示像素属于目标，尺寸应与 RGB/对齐深度一致。
+MaskImage = Sequence[Sequence[bool]]
 # 单像素 RGB 三元组，取值 0-255。
 RGB = Tuple[int, int, int]
 # RGB 图像：外层为行（y），内层为列（x）。
@@ -100,7 +102,7 @@ class TargetSearchGoal:
 
 
 class TargetVisibility(Enum):
-    """视觉/VLM 对目标可见性的判定结果。"""
+    """VLM 输出可见或不可见；UNCERTAIN 仅表示内部感知失败。"""
 
     VISIBLE = "visible"
     NOT_VISIBLE = "not_visible"
@@ -109,24 +111,25 @@ class TargetVisibility(Enum):
 
 @dataclass(frozen=True)
 class TargetObservation:
-    """视觉/VLM 对单帧图像中语义目标的观测结果。direction_score 为当前
-    方向的探索价值（0-1，越大越值得优先探索）；bbox_norm 为归一化包围盒
-    (x_min, y_min, x_max, y_max)，取值 0-1；reason 为人类可读说明。"""
+    """视觉模型对单帧语义目标的观测结果。
+
+    bbox_norm 为归一化包围盒 (x_min, y_min, x_max, y_max)，取值 0-1；
+    target_mask 是与 RGB/对齐深度同尺寸的目标像素掩码；reason 只记录观测
+    失败等内部诊断。
+    """
 
     visibility: TargetVisibility
-    direction_score: Optional[float] = None
     bbox_norm: Optional[Tuple[float, float, float, float]] = None
+    target_mask: Optional[MaskImage] = None
     reason: str = ""
 
 
 @dataclass(frozen=True)
 class ScanEvidence:
-    """一次扫描中单个方向的观测证据。heading_world_rad 为该方向在世界
-    坐标系下的朝向（弧度），direction_score 为该方向的探索价值。"""
+    """一次扫描中单个方向的目标可见性证据。"""
 
     heading_world_rad: float
     visibility: TargetVisibility
-    direction_score: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,14 @@ class FrontierCandidate:
     frontier_cell_count: int
     path_distance_m: float
     score: float
+    semantic_score: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class FrontierScoreRequest:
+    """一次批量语义评分所要覆盖的全部 Frontier 候选。"""
+
+    candidates: Tuple[FrontierCandidate, ...]
 
 
 @dataclass(frozen=True)
@@ -219,8 +230,9 @@ class SearchState:
     """语义目标搜索的周期状态。scan_headings_world_rad 为世界系扫描朝向
     序列，next_scan_index 为下一个待扫描朝向的下标，observation_history
     按时间顺序保存观测节点，scan_evidence 保存最近一次扫描的逐方向观测
-    证据，active_node_id 为当前活跃观测节点，target_approach_attempts 为
-    已尝试接近目标的次数。"""
+    证据；initial_scan_complete 区分首次 8×45° 环扫与后续 Frontier 视场扫描；
+    active_node_id 为当前活跃观测节点，target_approach_attempts 为已尝试接近
+    目标的次数。"""
 
     phase: SearchPhase = SearchPhase.SCANNING
     scan_headings_world_rad: Tuple[float, ...] = ()
@@ -229,6 +241,7 @@ class SearchState:
     scan_evidence: Tuple[ScanEvidence, ...] = ()
     active_node_id: Optional[str] = None
     target_approach_attempts: int = 0
+    initial_scan_complete: bool = False
 
 
 class NavigationStatus(Enum):
@@ -238,6 +251,7 @@ class NavigationStatus(Enum):
     INVALID_INPUT = "invalid_input"
     NO_SOLUTION = "no_solution"
     NEEDS_OBSERVATION = "needs_observation"
+    NEEDS_FRONTIER_SCORES = "needs_frontier_scores"
     MISSING_DATA = "missing_data"
 
 
@@ -260,3 +274,4 @@ class NavigationResult:
     command: Optional[RelativePoseCommand]
     debug: NavigationDebug
     state: SearchState
+    frontier_score_request: Optional[FrontierScoreRequest] = None

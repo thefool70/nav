@@ -6,7 +6,7 @@ from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleTargetObserver,
 )
-from .perception import TargetObserver
+from .perception import TargetBoxObserver, TargetObserver
 from .random_observer import RandomScoreTargetObserver
 
 __all__ = [
@@ -15,5 +15,6 @@ __all__ = [
     "OpenAICompatibleConfig",
     "OpenAICompatibleTargetObserver",
     "RandomScoreTargetObserver",
+    "TargetBoxObserver",
     "TargetObserver",
 ]

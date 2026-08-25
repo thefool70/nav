@@ -1,14 +1,14 @@
-"""目标视觉提示词与模型回答解析。
+"""目标视觉和 Frontier 批量评分的提示词与回答解析。
 
 本模块只处理文本，不调用模型或读写设备。模型回答统一转换为导航核心已经
-定义的可见性、方向评分和归一化目标框。
+定义的可见性、Frontier 分数和归一化目标框。
 """
 
 from __future__ import annotations
 
 import json
 import math
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from .models import TargetVisibility
 
@@ -17,23 +17,38 @@ def build_target_visibility_prompt(target_text: str) -> str:
     """构造完整 RGB 图上的目标可见性问题。"""
     target = _target_json(target_text)
     return (
-        "你是机器人当前画面的目标存在性检测器。"
-        f"目标是 {target}。只依据当前完整 RGB 图像判断目标是否可见；"
-        "检查画面边缘、远处和部分遮挡区域，不要依据房间常识猜测。"
-        "无法可靠判断时使用 uncertain。只返回 JSON，不要 Markdown："
-        '{"visibility":"visible|not_visible|uncertain","reason":"简短依据"}'
+        "You are the target-presence detector for the robot's current view. "
+        f"The target description is {target}. Decide only from the complete "
+        "current RGB image whether the target is visible. Inspect image edges, "
+        "distant regions, and partially occluded objects. Do not infer presence "
+        "from room-level common sense. Choose exactly one of the two labels. "
+        "Return exactly one of these JSON objects, without Markdown: "
+        '{"visibility":"visible"} or {"visibility":"not_visible"}'
     )
 
 
-def build_search_direction_prompt(target_text: str) -> str:
-    """构造目标不可见时的当前方向探索价值问题。"""
+def build_frontier_scores_prompt(
+    target_text: str,
+    marker_labels: Sequence[str],
+) -> str:
+    """构造一次性评分多视角 RGB 中全部 Frontier 标记的问题。"""
     target = _target_json(target_text)
+    labels = tuple(str(label).strip() for label in marker_labels)
+    if (
+        not labels
+        or any(not label for label in labels)
+        or len(set(labels)) != len(labels)
+    ):
+        raise ValueError("Frontier 标记必须是不重复的非空字符串")
+    score_template = {label: 0.0 for label in labels}
     return (
-        f"当前画面没有确认目标 {target}。评估沿相机当前朝向继续探索的价值，"
-        "同时考虑前方是否可通行以及之后找到目标的可能性。地图仍负责最终的"
-        "可达性和安全判断。只返回 JSON，不要 Markdown："
-        '{"search_direction_score":0.0,"reason":"简短依据"}。'
-        "search_direction_score 必须在 0 到 1 之间。"
+        "The image is a multi-view RGB contact sheet from one robot scan. Each "
+        "colored numeric marker denotes a Frontier exploration direction. "
+        f"The target description is {target}. For every marker, score the "
+        "likelihood of finding the target by exploring beyond that marker, where "
+        "0 is the lowest likelihood and 1 is the highest. Return every marker "
+        "exactly once. Return JSON only, with no reasons, explanation, or Markdown: "
+        + json.dumps({"scores": score_template}, ensure_ascii=False)
     )
 
 
@@ -41,39 +56,51 @@ def build_target_grounding_prompt(target_text: str) -> str:
     """构造目标已确认可见时的边界框定位问题。"""
     target = _target_json(target_text)
     return (
-        f"目标 {target} 已确认出现在当前完整 RGB 图像中。定位一个最匹配实例，"
-        "边界框应紧贴该实例所有可见部分，不要包含大块背景。bbox_2d 使用"
-        "[x_min,y_min,x_max,y_max]，每个坐标是 0 到 1000 的图像相对坐标。"
-        "只返回 JSON，不要 Markdown："
-        '{"bbox_2d":[100,100,900,900],"reason":"简短依据"}'
+        f"The target {target} has already been confirmed visible in the complete "
+        "current RGB image. Locate the single best-matching instance. The bounding "
+        "box must tightly enclose all visible parts of that instance without large "
+        "background regions. Use bbox_2d=[x_min,y_min,x_max,y_max], with every "
+        "coordinate expressed on a 0-to-1000 image-relative scale. Return JSON "
+        "only, without Markdown: "
+        '{"bbox_2d":[100,100,900,900]}'
     )
 
 
 def parse_target_visibility_response(
     text: str,
-) -> Tuple[TargetVisibility, str]:
+) -> TargetVisibility:
     """解析目标可见性回答；格式不合法时抛出 ValueError。"""
     payload = _extract_json_mapping(text, "目标可见性")
     raw_visibility = str(payload.get("visibility", "")).strip().lower()
-    try:
-        visibility = TargetVisibility(raw_visibility)
-    except ValueError as exc:
-        raise ValueError("目标可见性必须是 visible、not_visible 或 uncertain") from exc
-    return visibility, _reason(payload)
+    if raw_visibility == TargetVisibility.VISIBLE.value:
+        return TargetVisibility.VISIBLE
+    if raw_visibility == TargetVisibility.NOT_VISIBLE.value:
+        return TargetVisibility.NOT_VISIBLE
+    raise ValueError("目标可见性必须是 visible 或 not_visible")
 
 
-def parse_search_direction_response(text: str) -> Tuple[float, str]:
-    """解析 0 到 1 的当前方向探索评分。"""
-    payload = _extract_json_mapping(text, "方向评分")
-    score = _finite_float(payload.get("search_direction_score"))
-    if score is None or not 0.0 <= score <= 1.0:
-        raise ValueError("search_direction_score 必须是 0 到 1 的有限数")
-    return score, _reason(payload)
+def parse_frontier_scores_response(
+    text: str,
+    marker_labels: Sequence[str],
+) -> Mapping[str, float]:
+    """解析一次返回的全部 Frontier 0-1 分数。"""
+    labels = tuple(str(label).strip() for label in marker_labels)
+    payload = _extract_json_mapping(text, "Frontier 评分")
+    raw_scores = payload.get("scores")
+    if not isinstance(raw_scores, Mapping):
+        raise ValueError("Frontier 评分回答缺少 scores 对象")
+    scores = {}
+    for label in labels:
+        score = _finite_float(raw_scores.get(label))
+        if score is None or not 0.0 <= score <= 1.0:
+            raise ValueError(f"Frontier {label} 分数必须是 0 到 1 的有限数")
+        scores[label] = score
+    return scores
 
 
 def parse_target_grounding_response(
     text: str,
-) -> Tuple[Tuple[float, float, float, float], str]:
+) -> Tuple[float, float, float, float]:
     """解析千分制 bbox_2d，并转换为 0 到 1 的归一化边界框。"""
     payload = _extract_json_mapping(text, "目标框")
     raw_bbox = payload.get("bbox_2d")
@@ -97,7 +124,7 @@ def parse_target_grounding_response(
         y_min / 1000.0,
         x_max / 1000.0,
         y_max / 1000.0,
-    ), _reason(payload)
+    )
 
 
 def _target_json(target_text: str) -> str:
@@ -122,10 +149,6 @@ def _extract_json_mapping(text: str, result_name: str) -> Mapping[str, Any]:
     return payload
 
 
-def _reason(payload: Mapping[str, Any]) -> str:
-    return str(payload.get("reason", "")).strip()[:400]
-
-
 def _finite_float(value: Any) -> Optional[float]:
     if isinstance(value, bool):
         return None
@@ -137,10 +160,10 @@ def _finite_float(value: Any) -> Optional[float]:
 
 
 __all__ = [
-    "build_search_direction_prompt",
+    "build_frontier_scores_prompt",
     "build_target_grounding_prompt",
     "build_target_visibility_prompt",
-    "parse_search_direction_response",
+    "parse_frontier_scores_response",
     "parse_target_grounding_response",
     "parse_target_visibility_response",
 ]

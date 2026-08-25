@@ -1,4 +1,4 @@
-"""调试用随机观察器：不感知视觉内容，只返回随机方向评分。
+"""调试用随机观察器：不感知视觉内容，批量生成随机 Frontier 分数。
 
 仅用于调试扫描、Frontier、移动和回退流程，不能识别或到达语义目标。
 """
@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import random
+from typing import Mapping, Optional
 
+from .perception import ScanObservationContext
 from ..core.models import (
+    FrontierScoreRequest,
     NavigationFrame,
     TargetObservation,
     TargetSearchGoal,
@@ -16,7 +19,7 @@ from ..core.models import (
 
 
 class RandomScoreTargetObserver:
-    """每次观测都返回 NOT_VISIBLE 和 0.0-1.0 均匀随机方向评分的观察器。
+    """观测始终为 NOT_VISIBLE，一轮 Frontier 一次性生成随机分数。
 
     不读取 frame 的视觉内容，也不会返回 VISIBLE 或 bbox_norm；此模式
     只能驱动扫描与探索流程，无法识别或到达语义目标。
@@ -29,15 +32,25 @@ class RandomScoreTargetObserver:
         self,
         frame: NavigationFrame,
         goal: TargetSearchGoal,
+        scan_context: Optional[ScanObservationContext] = None,
     ) -> TargetObservation:
         return TargetObservation(
             visibility=TargetVisibility.NOT_VISIBLE,
-            direction_score=self._random.random(),
             reason=(
-                "调试随机感知：不识别视觉内容，仅生成随机方向评分，"
+                "调试随机感知：不识别视觉内容，"
                 "无法找到或到达语义目标。"
             ),
         )
+
+    def score_frontiers(
+        self,
+        request: FrontierScoreRequest,
+        goal: TargetSearchGoal,
+    ) -> Mapping[str, float]:
+        return {
+            candidate.candidate_id: self._random.random()
+            for candidate in request.candidates
+        }
 
 
 __all__ = ["RandomScoreTargetObserver"]
