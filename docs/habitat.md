@@ -41,8 +41,9 @@ NVIDIA EGL 环境需要时，可给 demo 增加 `--gpu-device-id 0`；当前 WSL
 
 ## 运行完整导航
 
-先把现有 Key 放入 `ROBOT_NAV_VLM_API_KEY` 环境变量，不要写进代码或提交到
-Git。然后通过通用项目入口选择 Habitat Adapter：
+先用 `opencode auth login` 登录 OpenCode Go。入口会自动复用本地凭据；
+如果设置了 `ROBOT_NAV_VLM_API_KEY`，则优先使用该环境变量。两种方式都不会
+把 Key 写入仓库。然后通过通用项目入口选择 Habitat Adapter：
 
 ```bash
 sim/habitat/run.sh python -m robot_nav habitat \
@@ -51,12 +52,13 @@ sim/habitat/run.sh python -m robot_nav habitat \
   --max-cycles 200
 ```
 
-入口默认使用 OpenCode Zen Responses API 和
-`muse-spark-1.2-contributor-free`。它负责组装 Adapter、目标观察器和周期循环；
+入口默认使用 OpenCode Go Anthropic Messages API 和 `qwen3.7-plus`。提示词为
+英文；请求显式发送 `thinking: disabled`，即使用开关式推理的最低档（关闭）。
+它负责组装 Adapter、目标观察器和周期循环；
 `run_navigation_cycle` 仍是环境无关的单周期入口。`sim/habitat/` 只保存 Habitat
 环境、渲染包装和 Adapter 验证脚本，不包含导航算法。
 
-没有 Key 时可用调试随机感知模式启动（不要求 `ROBOT_NAV_VLM_API_KEY`，也不会
+没有可用凭据时可用调试随机感知模式启动（不要求任何 Key，也不会
 创建或调用任何 OpenAI-compatible 观察器）：
 
 ```bash
@@ -67,12 +69,16 @@ sim/habitat/run.sh python -m robot_nav habitat \
   --debug-random-score
 ```
 
-该模式下观察器每次观测都返回 `NOT_VISIBLE` 和 0 到 1 的随机 `direction_score`，
-只用于调试扫描、Frontier、移动和回退流程；它无法识别或到达语义目标。
+该模式下观察器对扫描帧返回 `NOT_VISIBLE`，并为一轮中的整批 Frontier 生成
+0 到 1 的随机分数；只用于调试扫描、Frontier、移动和回退流程，无法识别或
+到达语义目标。
 
 完整导航默认启动 Rerun Web Viewer 实时可视化（记录算法决策帧及 Habitat 每个
 动作后的 RGB、米制深度、三色占用图、机器人位姿与轨迹，同时保留最近的控制
 命令、历史候选点和算法状态），
+其中 `model/interaction` 按时间用一张 CJK 交互卡片显示每次 VLM 的完整提示词、
+实际输入图、请求参数、原始回应和解析结果；目标定位成功时会在输入 RGB 上
+叠加目标框。
 默认自动打开浏览器，未自动打开时使用该链接
 [Rerun Web Viewer](http://127.0.0.1:9090/?url=ws://127.0.0.1:9877)；该地址
 显式连接 9877 数据端口，同时避免 Rerun 继承 Habitat 的无窗口 EGL 图形环境。

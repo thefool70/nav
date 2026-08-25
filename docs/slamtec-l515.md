@@ -1,20 +1,29 @@
 # Hermes + L515 真机 Adapter
 
-Hermes 提供地图位姿、激光障碍图、自主规划和运动控制；外接 L515 只提供对齐
-RGB-D。两者在 `slamtec_l515/adapter.py` 中组合成统一 `NavigationFrame`，算法
-核心没有思岚或 RealSense 分支。
+Hermes 提供地图位姿、激光障碍图、自主规划和运动控制；外接 L515 提供对齐
+RGB-D，并限定算法当前真正观察过的地图区域。两者在 `slamtec_l515/adapter.py`
+中组合成统一 `NavigationFrame`，算法核心没有思岚或 RealSense 分支。
 
 ## 数据链路
 
 ```text
 Hermes 位姿 + 激光栅格图 ─────────────┐
-L515 RGB-D + 内参 + 安装外参 ──────────┼─► NavigationFrame ─► core
-core 相对位姿 ─► 地图系目标点/朝向 ───┴─► Hermes MoveTo/Rotate Action
+L515 RGB-D + 内参 + 安装外参 ─► 可见图筛选/障碍膨胀 ─┼─► NavigationFrame ─► core
+core 相对位姿 ─► 地图系目标点/朝向 ───────────────┴─► Hermes MoveTo/Rotate Action
 ```
 
 `rest_client.py` 只处理 Robot Agent HTTP 协议；`adapter.py` 负责坐标转换、设备
 组合和运动安全检查；L515 采集与外参算法位于 `adapters/realsense/`。标定结果
 包含前、左、高度、yaw、向下 pitch 和 roll，目标深度投影会实际使用这六项。
+
+Adapter 根据 L515 内参和安装 yaw，先取理论水平 FOV 内最远 5 m 的格，再从当前
+深度图计算对应方向邻近 3 列跨全部高度的最远有效深度，只截断确实位于该深度
+视界之后的格子，并保留 `0.15 m` 深度余量。低矮或只占局部画面的障碍不会被
+当成无限高墙；邻近列完全没有有效深度时退回理论 FOV，不凭空制造遮挡。启动后
+首次机器人位姿周围半径 `0.50 m` 的圆形区域仍始终有效。有效障碍按 Hermes
+车体 `465 × 545 mm` 的半对角线向上取整为 `0.36 m` 膨胀，使 Frontier 目标不会
+落在机器人中心无法进入的区域。Hermes 保存的原始地图不会被修改；程序重启后
+重新累计。无 L515 的 `--base-only` 预检仍返回原图。
 
 ## 环境与 WSL 相机
 
@@ -24,6 +33,9 @@ core 相对位姿 ─► 地图系目标点/朝向 ───┴─► Hermes Mov
 micromamba activate robot-nav
 python -m pip install -e '.[slamtec-l515,visualization]'
 ```
+
+该 extra 只管理底盘、相机和可视化依赖，不会重装现有的 PyTorch/SAM2 GPU
+环境；语义导航还要求当前环境能够导入官方 `sam2`，并具备下文所述模型文件。
 
 标准 WSL 内核缺少 L515 Motion Module 所需的 HID Sensor Hub/IIO 枚举。项目用
 librealsense 2.54.1 的 RSUSB 用户态后端绕过该限制，首次使用构建一次：
@@ -97,27 +109,73 @@ hardware/slamtec_l515/run.sh \
   --enable-motion
 ```
 
-完整语义搜索需设置 `ROBOT_NAV_VLM_API_KEY`，再移除
-`--debug-random-score`。Rerun 默认启用，可用 `--no-rerun` 关闭。
+该模式为每轮整批 Frontier 生成随机分数，因此优先级会随随机数变化；只适合
+验证数据、状态机和运动反馈，不能用它评价真实目标搜索路径是否合理。
+
+完整语义搜索先用 `opencode auth login` 登录 OpenCode Go，再移除
+`--debug-random-score`。入口会自动复用本地凭据；
+`ROBOT_NAV_VLM_API_KEY` 仍可用于显式覆盖。Rerun 默认启用，可用
+`--no-rerun` 关闭。默认模型是 OpenCode Go 的 `qwen3.7-plus`，使用英文提示词，
+并关闭 thinking。
+
+语义模式会自动加载官方 SAM2.1 Hiera Small，默认模型文件为
+`data/models/sam2/sam2.1_hiera_small.pt`，默认在 CUDA 上运行。VLM 框选目标后，
+SAM2 生成掩码，目标距离只使用掩码内的对齐深度；空掩码会触发一次 VLM 重新
+框选，仍为空则保持底盘不动并等待下一帧。可用 `--sam2-checkpoint` 指定另一份
+同架构模型，用 `--sam2-device cpu` 临时改为 CPU 推理。
 
 运动命令不会直接发轮速。Adapter 将局部相对平移转换成地图坐标，交给
 `MoveToAction` 使用底盘自身规划与避障，再用 `RotateToAction` 达到目标朝向。
 每个 Action 都会等待成功、失败或超时；中断和超时时请求终止当前 Action。
 运行期间终端每约 2 秒显示 Action ID、状态、已执行时间、连续静止时间、位姿和
-底盘返回的阶段。默认连续 30 秒没有超过 2 cm 或 1° 的位姿变化时终止当前
-Action。该计时只覆盖已经创建的 Hermes Action；VLM 推理发生在 Action 创建前，
-即使耗时很长也不会被判定为底盘停滞。
+底盘返回的阶段。`MoveToAction` 默认连续 15 秒没有超过 2 cm 的平移时终止；
+`RotateToAction` 则以 1° 的旋转为有效进展，实际朝向在目标 `5°` 内即满足导航
+需要。若实际朝向已经到达但 Action 状态仍停在 `working`，Adapter 会终止该僵住
+的 Action 并继续；明显未到达目标的旋转停滞仍停止程序。该计时只覆盖已经创建的
+Hermes Action；VLM 推理发生在 Action 创建前，即使耗时很长也不会被判定为底盘
+停滞。
+
+Frontier 的 `MoveToAction` 被规划器拒绝、执行失败、总超时，或成功结束但总
+平移不足 2 cm 时，会淘汰对应 Frontier，随后从同一观测节点尝试其他候选；
+连续静止达到 15 秒门槛则按实际位置结束本次探索移动，下一周期直接扫描。
+目标接近的 `MoveToAction` 遇到上述可恢复失败或连续静止时，不淘汰 Frontier、
+也不停止导航，而是保留实际位置并在下一周期重新观测目标。网络、相机、地图、
+底盘健康状态，以及未达到目标朝向的旋转 Action 异常仍会停止程序。
+
+正式导航每次启动都会在 `data/run_logs/` 自动创建一份 JSONL 日志，并在终端
+打印绝对路径。日志逐条保存运行参数、每周期位姿与机器人所在栅格、地图统计、
+视觉结果、Frontier 候选摘要、相对命令与世界目标，以及 Hermes Action 的实际
+起点、目标、阶段、连续静止时间、位姿、失败原因和最终位移。为控制体积，日志
+不复制 RGB、深度、完整占据图和每条 Frontier 的全部格子；这些仍在 Rerun 中
+查看。需要固定路径时使用 `--run-log data/run_logs/my-run.jsonl`；若文件已存在，
+新记录会追加到文件末尾。
+
+Rerun 的 map 视图用朝向三角形实时表示机器人，并叠加轨迹、当前 Frontier 和
+本轮命令；world 视图固定为 Y 轴向上，并显示计划扫描朝向、当前 Frontier、历史
+观测节点及其候选方向。空间图形不附着文字，简要状态合并在 world 左上角，完整
+信息位于 `navigation/status` 面板。节点到候选点的虚线颜色与方向状态一致：
+待探索为黄色、执行中为蓝色、已探索为灰色、不可达为红色。
+启用 VLM 时，选中对应时间点后，`model/interaction` 使用单张 CJK 卡片显示
+完整提示词、实际输入 RGB、模型与推理参数、assistant 文本、完整 HTTP JSON、
+解析结果或错误。目标定位成功时，目标框叠加在卡片的输入 RGB 上；Frontier
+评分时，该 RGB 就是实际发送的编号拼图。导航决策帧的 `camera/rgb` 以洋红色
+半透明区域显示 SAM2 掩码，并保留绿色 VLM 目标框；状态面板同时显示掩码尺寸
+和前景像素数。`model/sam2/latest_success` 单独保留最近一次成功分割，不会被
+后续运动帧或无目标帧清除；`model/sam2/status` 显示当前观测的掩码状态。
 
 常用参数：
 
 - `--base-url`：Robot Agent 地址，默认 `http://192.168.11.1:1448`。
 - `--action-timeout-s`：单个 Action 超时，默认 120 秒。
-- `--action-stall-timeout-s`：活跃 Action 连续静止终止时间，默认 30 秒；不会
-  计算模型推理时间。
+- `--action-stall-timeout-s`：活跃 Action 连续静止终止时间，默认 15 秒；不会
+  计算模型推理时间；探索移动触发后从当时的真实位置继续扫描。
+- `--run-log`：指定 JSONL 运行日志路径；默认在 `data/run_logs/` 自动命名。
 - `--debug-frontier`：在下发移动命令前打印当前一轮 Frontier 候选及评分组成；
   用于区分本轮候选和 Rerun 中累积显示的历史候选。
 - `--min-localization-quality`：仅定位模式使用的最低质量，默认 1。
 - `--camera-serial`：连接多台 RealSense 时选择 L515。
+- `--sam2-checkpoint`：SAM2.1 Hiera Small 模型文件路径。
+- `--sam2-device`：SAM2 推理设备，默认 `cuda`。
 - `--camera-calibration`：指定另一份外参 JSON。
 - `--camera-height-m`、`--camera-forward-m`、`--camera-left-m`、
   `--camera-yaw-deg`、`--camera-pitch-down-deg`、`--camera-roll-deg`：

@@ -7,13 +7,15 @@
 ## 数据流
 
 ```text
-ChassisInterface ──► NavigationFrame ──┐
-                                      ├─► navigate() ──► RelativePoseCommand
-TargetObserver ────► TargetObservation ┘
+ChassisInterface ──► NavigationFrame ──────────────┐
+TargetObserver ────► TargetObservation ────────────┼─► navigate()
+TargetObserver ────► {Frontier ID: semantic score} ┘       │
+                                                             ▼
+                                                  RelativePoseCommand
 ```
 
 - `ChassisInterface` 统一仿真器和真底盘的数据与控制接口。
-- `TargetObserver` 统一视觉/VLM 的目标可见性、方向评分和目标框输出。
+- `TargetObserver` 统一目标可见性、目标框、目标掩码和整批 Frontier 评分。
 - `core` 只处理算法，不依赖 Habitat、底盘 SDK 或具体视觉模型。
 
 `run_navigation_cycle` 串联一个周期：读取帧、调用目标观察器、推进算法、在有
@@ -27,20 +29,32 @@ TargetObserver ────► TargetObservation ┘
   `slam_toolbox` 生成统一位姿/占用图；支持借助 L515 Motion Module 与 RGB-D
   自动估计安装外参，并保留直接深度累计模式用于局部排错。
 - Hermes + L515 Adapter：通过 SLAMTEC Robot Agent REST API 读取 Hermes 位姿和
-  激光栅格图，并把相对位姿转换为底盘自主规划 Action；外接 L515 负责对齐
-  RGB-D，并可借助 Hermes 位姿自动标定完整安装外参。
-- OpenAI-compatible 目标观察器：支持 Chat Completions 和 Responses API，输出
-  目标可见性、不可见方向评分和可见目标框。
-- 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
-  排序、观测历史和回退。
+  激光栅格图，按 L515 水平 FOV 与实际深度视界累计已观察区域并按底盘外形膨胀
+  障碍，再把相对位姿转换为底盘自主规划 Action；不可达 Frontier 会被淘汰后
+  继续搜索。
+- VLM 目标观察器：支持 Chat Completions、Responses 和 Anthropic Messages；
+  单帧输出目标可见性或目标框，一轮扫描结束后把全部 Frontier 标在扫描 RGB
+  拼图中，并用一次请求返回全部分数。
+- Hermes 语义模式用本地 SAM2 细化 VLM 目标框，目标距离只取掩码内深度；空
+  掩码会触发一次重新框选，仍为空则保持不动并在下一帧重试。
+- 算法主流程：开始时连续转动 8 次、每次 45° 并观察，后续只用相机 FOV 覆盖
+  当前 Frontier 聚类代表点，并在地图更新后跳过已经消失或变成障碍的聚类；同时
+  支持目标掩码与深度定位、安全距离接近、Frontier 排序、观测历史和回退。
 - Rerun 实时可视化：记录算法决策帧和 Habitat 动作中间帧，包括 RGB、米制
-  深度、叠加当前 Frontier 的三色占用图、机器人位姿与轨迹、控制命令、历史
-  候选点和状态；Habitat 入口默认启用，用 `--no-rerun` 关闭。
-- 通用入口默认使用 OpenCode Zen 和 Muse Spark 1.2；Key 只在运行时读取，不写入
-  仓库。未提供观察器时算法会返回明确的 `NEEDS_OBSERVATION`。
+  深度、叠加 Frontier/机器人/轨迹/命令的占用图，以及世界系扫描朝向、观测
+  节点、候选方向虚线和角落状态摘要；`model/interaction` 把每次 VLM 的
+  完整提示词、实际图片、请求参数、原始回应和解析结果收纳到一张 CJK
+  交互卡片，成功定位的目标框会叠加在卡片的输入 RGB 上；决策帧 RGB 使用
+  洋红色半透明区域显示 SAM2 掩码，并保留绿色 VLM 框；
+  `model/sam2/latest_success` 持久保留最近一次成功分割。空间图形不附着文字标签。
+- Hermes 导航自动保存 JSONL 运行日志，记录每周期决策、候选摘要、实际运动
+  目标和 Action 位姿反馈，便于在程序退出后复盘异常移动。
+- 通用入口默认使用 OpenCode Go 的 Qwen3.7 Plus，提示词为英文，并关闭模型
+  thinking；优先读取 `ROBOT_NAV_VLM_API_KEY`，未设置时复用 OpenCode Go 本地
+  登录凭据，不把 Key 写入仓库。
 - Habitat 入口支持 `--debug-random-score`：不创建也不调用任何视觉模型，观察器
-  每次只返回 `NOT_VISIBLE` 和随机方向评分，用于调试扫描、Frontier、移动和回退；
-  此模式无法识别或到达语义目标，也不要求 `ROBOT_NAV_VLM_API_KEY`。
+  对扫描帧返回 `NOT_VISIBLE`，再为整批 Frontier 生成随机分数，用于调试扫描、
+  Frontier、移动和回退；此模式无法识别或到达语义目标，也不要求 Key。
 
 算法流程见 [docs/algorithm.md](docs/algorithm.md)，环境接入见
 [Habitat](docs/habitat.md)、[S100 + L515](docs/s100-l515.md) 和
@@ -52,7 +66,7 @@ TargetObserver ────► TargetObservation ┘
 | --- | --- |
 | `src/robot_nav/core/navigator.py` | 算法入口和阶段流转 |
 | `src/robot_nav/core/frontier.py` | 可达 Frontier 提取与排序 |
-| `src/robot_nav/core/grounding.py` | 用完整相机外参把目标框与深度投影到机器人平面 |
+| `src/robot_nav/core/grounding.py` | 用目标掩码、深度和完整相机外参估计目标位置 |
 | `src/robot_nav/core/vision.py` | VLM 提示词和回答解析 |
 | `src/robot_nav/core/history.py` | 探索方向历史与回退依据 |
 | `src/robot_nav/core/models.py` | 全部输入、输出与状态契约 |
@@ -60,14 +74,18 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/adapters/habitat/adapter.py` | Habitat-Sim Adapter |
 | `src/robot_nav/adapters/s100_l515/adapter.py` | S100 + L515 真机 Adapter |
 | `src/robot_nav/adapters/slamtec_l515/adapter.py` | Hermes + L515 真机 Adapter |
+| `src/robot_nav/adapters/slamtec_l515/observed_map.py` | L515 FOV、障碍遮挡与 Hermes 障碍膨胀 |
 | `src/robot_nav/adapters/slamtec_l515/rest_client.py` | Hermes REST 与 Action 边界 |
 | `src/robot_nav/adapters/realsense/l515_camera.py` | 底盘无关的 L515 RGB-D 采集 |
 | `src/robot_nav/adapters/realsense/calibration/` | 两种底盘共享的 L515 外参标定算法 |
 | `src/robot_nav/adapters/s100_l515/ros_slam.py` | ROS SLAM 与统一导航帧的边界 |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
-| `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
-| `src/robot_nav/adapters/random_observer.py` | 调试随机方向评分观察器 |
+| `src/robot_nav/adapters/openai_compatible.py` | OpenAI/Anthropic-compatible VLM 调用 |
+| `src/robot_nav/adapters/sam2_observer.py` | 用 SAM2 将 VLM 目标框细化为掩码 |
+| `src/robot_nav/adapters/frontier_overlay.py` | 在扫描 RGB 拼图中编号 Frontier |
+| `src/robot_nav/adapters/random_observer.py` | 调试用 Frontier 批量随机评分观察器 |
 | `src/robot_nav/visualization/rerun_view.py` | Rerun 导航调试界面 |
+| `src/robot_nav/run_log.py` | 不含图像和完整地图的 JSONL 运行日志 |
 | `src/robot_nav/app.py` | 单周期串联入口 |
 | `src/robot_nav/__main__.py` | Adapter 选择、循环和终端输出 |
 | `slam/s100_l515/` | S100 + L515 的 ROS 环境、启动与 SLAM 参数 |
