@@ -14,8 +14,11 @@ from ...core.models import (
     Pose2D,
     RelativePoseCommand,
 )
+from ..chassis import MotionStalledError, RecoverableMotionError
 from ..realsense import L515Camera, L515Capture, L515Config
+from .observed_map import L515ObservedMap
 from .rest_client import (
+    SlamtecActionError,
     SlamtecExploreMap,
     SlamtecRestClient,
     SlamtecRobotHealth,
@@ -41,13 +44,14 @@ class SlamtecL515Config:
     action_timeout_s: float = 120.0
     action_poll_interval_s: float = 0.2
     action_progress_interval_s: float = 2.0
-    action_stall_timeout_s: float = 30.0
+    action_stall_timeout_s: float = 15.0
     action_stall_translation_m: float = 0.02
     action_stall_rotation_rad: float = math.radians(1.0)
     motion_frame_interval_s: float = 0.5
     minimum_localization_quality: int = 1
     position_tolerance_m: float = 0.03
-    yaw_tolerance_rad: float = math.radians(1.0)
+    # 与 core 的扫描朝向容差一致，避免为已经可接受的微小误差再创建 Action。
+    yaw_tolerance_rad: float = math.radians(5.0)
 
 
 @dataclass
@@ -56,6 +60,10 @@ class _ActionMonitorState:
     last_sample_s: float
     last_motion_s: float
     last_motion_pose: Pose2D
+
+
+class _ActionStalledError(RuntimeError):
+    """活跃 Hermes Action 长时间没有产生有效位姿变化。"""
 
 
 class SlamtecL515Adapter:
@@ -76,6 +84,7 @@ class SlamtecL515Adapter:
             config.base_url, config.request_timeout_s
         )
         self._camera: Optional[L515Camera] = None
+        self._observed_map = L515ObservedMap()
 
         action_names = self._client.get_action_names()
         self._move_to_action = resolve_action_name(
@@ -127,10 +136,18 @@ class SlamtecL515Adapter:
         capture = self._camera.capture() if self._camera is not None else None
         pose = self._client.get_pose()
         slamtec_map = self._client.get_explore_map()
+        obstacle_map = _to_obstacle_map(slamtec_map)
+        if capture is not None:
+            obstacle_map = self._observed_map.update(
+                obstacle_map,
+                pose,
+                capture,
+                self.config.camera_extrinsics_in_robot,
+            )
         return _build_navigation_frame(
             timestamp_s=time.monotonic(),
             pose=pose,
-            slamtec_map=slamtec_map,
+            obstacle_map=obstacle_map,
             capture=capture,
             camera_extrinsics=self.config.camera_extrinsics_in_robot,
         )
@@ -144,6 +161,17 @@ class SlamtecL515Adapter:
         target_xy = _relative_target_world(start_pose, command)
         target_yaw = _wrap_angle(start_pose.yaw_rad + command.yaw_rad)
         translation = math.hypot(command.forward_m, command.left_m)
+        self._report_action_progress(
+            "Hermes command: "
+            f"start_pose=({start_pose.x_m:.3f}, {start_pose.y_m:.3f}, "
+            f"{math.degrees(start_pose.yaw_rad):.2f}°), "
+            f"relative=({command.forward_m:.3f}, "
+            f"{command.left_m:.3f}, "
+            f"{math.degrees(command.yaw_rad):.2f}°), "
+            f"translation={translation:.3f} m, "
+            f"target=({target_xy[0]:.3f}, {target_xy[1]:.3f}, "
+            f"{math.degrees(target_yaw):.2f}°)"
+        )
 
         if translation > self.config.position_tolerance_m:
             self._execute_action(
@@ -196,11 +224,12 @@ class SlamtecL515Adapter:
         action_id = self._client.create_action(action_name, options)
         action_label = action_name.rsplit(".", 1)[-1]
         started_s = time.monotonic()
+        started_pose = self._client.get_pose()
         monitor_state = _ActionMonitorState(
             started_s=started_s,
             last_sample_s=float("-inf"),
             last_motion_s=started_s,
-            last_motion_pose=self._client.get_pose(),
+            last_motion_pose=started_pose,
         )
         self._report_action_progress(
             f"Hermes Action #{action_id} {action_label} 已创建。"
@@ -213,6 +242,7 @@ class SlamtecL515Adapter:
                 monitor_state,
                 status,
                 stage,
+                action_name == self._move_to_action,
             )
 
         try:
@@ -222,15 +252,86 @@ class SlamtecL515Adapter:
                 poll_interval_s=self.config.action_poll_interval_s,
                 on_poll=monitor_action,
             )
-        except BaseException:
+        except BaseException as exc:
+            detail = str(exc) or type(exc).__name__
+            abort_error: Optional[RuntimeError] = None
             try:
                 self._client.abort_current_action()
-            except RuntimeError:
-                pass
+            except RuntimeError as caught_abort_error:
+                abort_error = caught_abort_error
+
+            if (
+                abort_error is None
+                and action_name == self._rotate_to_action
+                and isinstance(exc, _ActionStalledError)
+            ):
+                pose, target_yaw, yaw_error = self._read_rotation_error(options)
+                if yaw_error <= self.config.yaw_tolerance_rad:
+                    self._report_action_progress(
+                        f"Hermes Action #{action_id} {action_label} 状态停滞，"
+                        "但实际朝向已经到达目标，按完成处理："
+                        f"pose={math.degrees(pose.yaw_rad):.2f}°，"
+                        f"target={math.degrees(target_yaw):.2f}°，"
+                        f"error={math.degrees(yaw_error):.2f}°。"
+                    )
+                    return
+
+            if abort_error is not None:
+                detail = f"{detail}；终止 Action 失败：{abort_error}"
+            self._report_action_progress(
+                f"Hermes Action #{action_id} {action_label} 失败：{detail}"
+            )
+            if action_name == self._move_to_action and isinstance(
+                exc, _ActionStalledError
+            ):
+                raise MotionStalledError(str(exc)) from exc
+            if action_name == self._move_to_action and isinstance(
+                exc, SlamtecActionError
+            ):
+                raise RecoverableMotionError(str(exc)) from exc
             raise
+        completion_detail = ""
+        if action_name == self._move_to_action:
+            final_pose = self._client.get_pose()
+            translated_m = math.hypot(
+                final_pose.x_m - started_pose.x_m,
+                final_pose.y_m - started_pose.y_m,
+            )
+            completion_detail = (
+                f"，final_pose=({final_pose.x_m:.3f}, "
+                f"{final_pose.y_m:.3f}, "
+                f"{math.degrees(final_pose.yaw_rad):.2f}°)，"
+                f"translated={translated_m:.3f} m"
+            )
+            if translated_m < self.config.action_stall_translation_m:
+                self._report_action_progress(
+                    "Hermes MoveToAction 已结束但没有有效平移："
+                    f"{translated_m:.3f} m"
+                )
+                raise RecoverableMotionError(
+                    "Hermes MoveToAction 已结束，但底盘未产生有效平移："
+                    f"{translated_m:.3f} m"
+                )
         self._report_action_progress(
             f"Hermes Action #{action_id} {action_label} 完成，"
-            f"耗时 {time.monotonic() - started_s:.1f}s。"
+            f"耗时 {time.monotonic() - started_s:.1f}s"
+            f"{completion_detail}。"
+        )
+
+    def _read_rotation_error(
+        self,
+        options: Mapping[str, Any],
+    ) -> Tuple[Pose2D, float, float]:
+        """读取 RotateToAction 当前朝向与目标朝向的最短角误差。"""
+        raw_target = options.get("angle")
+        if not _is_finite(raw_target):
+            raise RuntimeError("RotateToAction 缺少有限目标角度")
+        target_yaw = _wrap_angle(float(raw_target))
+        pose = self._client.get_pose()
+        return (
+            pose,
+            target_yaw,
+            abs(_angle_difference(target_yaw, pose.yaw_rad)),
         )
 
     def _monitor_action(
@@ -240,6 +341,7 @@ class SlamtecL515Adapter:
         state: _ActionMonitorState,
         status: int,
         stage: str,
+        requires_translation: bool,
     ) -> None:
         """采样活跃 Action 位姿，定期报告并识别真正的底盘停滞。"""
         self._publish_motion_frame()
@@ -258,10 +360,13 @@ class SlamtecL515Adapter:
         turned_rad = abs(
             _angle_difference(pose.yaw_rad, state.last_motion_pose.yaw_rad)
         )
-        if (
-            moved_m >= self.config.action_stall_translation_m
-            or turned_rad >= self.config.action_stall_rotation_rad
-        ):
+        made_progress = moved_m >= self.config.action_stall_translation_m
+        if not requires_translation:
+            made_progress = (
+                made_progress
+                or turned_rad >= self.config.action_stall_rotation_rad
+            )
+        if made_progress:
             state.last_motion_pose = pose
             state.last_motion_s = now
 
@@ -278,7 +383,7 @@ class SlamtecL515Adapter:
         state.last_sample_s = now
 
         if still_s >= self.config.action_stall_timeout_s:
-            raise RuntimeError(
+            raise _ActionStalledError(
                 f"Hermes Action {action_id} 已连续 {still_s:.1f} 秒"
                 "没有产生足够位姿变化"
             )
@@ -316,12 +421,11 @@ class SlamtecL515Adapter:
 def _build_navigation_frame(
     timestamp_s: float,
     pose: Pose2D,
-    slamtec_map: SlamtecExploreMap,
+    obstacle_map: ObstacleMap,
     capture: Optional[L515Capture],
     camera_extrinsics: CameraExtrinsics,
 ) -> NavigationFrame:
     """把两类设备数据冻结为 core 只读的同一地图坐标帧。"""
-    obstacle_map = _to_obstacle_map(slamtec_map)
     if capture is None:
         return NavigationFrame(
             timestamp_s=timestamp_s,

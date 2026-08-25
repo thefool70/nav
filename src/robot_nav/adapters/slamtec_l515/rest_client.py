@@ -20,6 +20,10 @@ from urllib.request import (
 from ...core.models import Pose2D
 
 
+class SlamtecActionError(RuntimeError):
+    """Hermes 已接受 Action，但规划执行失败或未在时限内结束。"""
+
+
 @dataclass(frozen=True)
 class SlamtecExploreMap:
     """Robot Agent 栅格图原始数据；origin 是首格左下角而非格中心。"""
@@ -205,7 +209,9 @@ class SlamtecRestClient:
                     return
                 reason = state.get("reason")
                 detail = reason if isinstance(reason, str) and reason else result
-                raise RuntimeError(f"Hermes Action {action_id} 执行失败：{detail}")
+                raise SlamtecActionError(
+                    f"Hermes Action {action_id} 执行失败：{detail}"
+                )
 
             now = time.monotonic()
             if now >= deadline:
@@ -215,7 +221,7 @@ class SlamtecRestClient:
                     raise RuntimeError(
                         f"Hermes Action {action_id} 已超时，且终止请求失败：{exc}"
                     ) from exc
-                raise RuntimeError(
+                raise SlamtecActionError(
                     f"Hermes Action {action_id} 超过 {timeout_s:.1f} 秒未结束"
                 )
             if on_poll is not None:
@@ -369,6 +375,7 @@ def _is_positive_finite(value: Any) -> bool:
 
 
 __all__ = [
+    "SlamtecActionError",
     "SlamtecExploreMap",
     "SlamtecRestClient",
     "SlamtecRobotHealth",
