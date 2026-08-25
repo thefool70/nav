@@ -133,14 +133,16 @@ class ScanEvidence:
 class FrontierCandidate:
     """一次扫描中发现的前沿候选点。row、col 为在障碍图中的栅格坐标，
     world_xy 为世界坐标（米）；heading_world_rad 为朝向该候选点的世界
-    系方向（弧度）；frontier_cell_count 为该前沿的栅格数；path_distance_m
-    为沿路径到该点的距离（米）；score 为探索优先级。"""
+    系方向（弧度）；frontier_cells 保存该前沿包含的全部栅格；
+    frontier_cell_count 为其栅格数；path_distance_m 为沿路径到该点的距离
+    （米）；score 为探索优先级。"""
 
     candidate_id: str
     row: int
     col: int
     world_xy: Tuple[float, float]
     heading_world_rad: float
+    frontier_cells: Tuple[Tuple[int, int], ...]
     frontier_cell_count: int
     path_distance_m: float
     score: float

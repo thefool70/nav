@@ -346,6 +346,7 @@ def _frontier_candidate_debug(
         "world_x_m": candidate.world_xy[0],
         "world_y_m": candidate.world_xy[1],
         "heading_world_rad": candidate.heading_world_rad,
+        "frontier_cells": candidate.frontier_cells,
         "frontier_cell_count": candidate.frontier_cell_count,
         "frontier_length_m": frontier_length_m,
         "path_distance_m": candidate.path_distance_m,

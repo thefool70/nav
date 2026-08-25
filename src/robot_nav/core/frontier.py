@@ -24,8 +24,9 @@ def find_frontier_candidates(
     excluded_world_xy: Sequence[Tuple[float, float]] = (),
     min_frontier_length_m: float = 0.5,
     min_goal_distance_m: float = 0.35,
+    max_search_path_distance_m: float = 3.0,
 ) -> Tuple[FrontierCandidate, ...]:
-    """返回排序后的探索候选；候选只是建议，不是路径或安全证明。"""
+    """在局部路径范围内返回探索候选；候选不是路径或安全证明。"""
     grid = _normalize_grid(obstacle_map)
     resolution = _positive_finite(obstacle_map.resolution_m, "resolution_m")
     minimum_length = _non_negative_finite(
@@ -33,6 +34,9 @@ def find_frontier_candidates(
     )
     minimum_distance = _non_negative_finite(
         min_goal_distance_m, "min_goal_distance_m"
+    )
+    maximum_distance = _positive_finite(
+        max_search_path_distance_m, "max_search_path_distance_m"
     )
     preferred_heading = _optional_heading(preferred_heading_world_rad)
     excluded_points = _normalize_points(excluded_world_xy)
@@ -50,18 +54,47 @@ def find_frontier_candidates(
         (pose.x_m, pose.y_m), obstacle_map
     )
     seed = _nearest_free_cell(requested_seed, free_cells)
-    reachable_distance = _reachable_free_distances(seed, free_cells)
-    frontier_cells = _find_frontier_cells(grid, set(reachable_distance))
-    if not frontier_cells:
-        return ()
+    maximum_steps = int(math.floor(maximum_distance / resolution))
+    reachable_distance = _reachable_free_distances(
+        seed, free_cells, maximum_steps
+    )
+    reachable_cells = set(reachable_distance)
+    map_frontier_cells = _find_frontier_cells(grid, reachable_cells)
+    range_frontier_cells = (
+        _find_range_frontier_cells(reachable_cells, free_cells)
+        - map_frontier_cells
+    )
 
     minimum_cells = max(1, int(math.ceil(minimum_length / resolution)))
+    candidate_groups = []
+    for component in _connected_components(map_frontier_cells):
+        if len(component) >= minimum_cells:
+            candidate_groups.append(
+                ("map_frontier", component, _component_midpoint(component))
+            )
+
+    direction_reference = (
+        preferred_heading if preferred_heading is not None else pose.yaw_rad
+    )
+    for direction_heading, cells in _group_cells_by_direction(
+        range_frontier_cells,
+        obstacle_map,
+        pose,
+        direction_reference,
+    ):
+        candidate_groups.append(
+            (
+                "range_frontier",
+                cells,
+                _cell_nearest_heading(
+                    cells, direction_heading, obstacle_map, pose
+                ),
+            )
+        )
+
     excluded_radius = max(0.4, 2.0 * resolution)
     candidates = []
-    for component in _connected_components(frontier_cells):
-        if len(component) < minimum_cells:
-            continue
-        row, col = _component_midpoint(component)
+    for frontier_kind, cells, (row, col) in candidate_groups:
         path_distance = reachable_distance[(row, col)] * resolution
         if path_distance < minimum_distance:
             continue
@@ -69,7 +102,7 @@ def find_frontier_candidates(
         if _is_excluded(world_xy, excluded_points, excluded_radius):
             continue
         heading = math.atan2(world_xy[1] - pose.y_m, world_xy[0] - pose.x_m)
-        frontier_length = len(component) * resolution
+        frontier_length = len(cells) * resolution
         score = frontier_length - PATH_DISTANCE_SCORE_WEIGHT * path_distance
         if preferred_heading is not None:
             score += PREFERRED_HEADING_SCORE_WEIGHT * math.cos(
@@ -77,12 +110,13 @@ def find_frontier_candidates(
             )
         candidates.append(
             FrontierCandidate(
-                candidate_id=f"frontier:{row}:{col}",
+                candidate_id=f"{frontier_kind}:{row}:{col}",
                 row=row,
                 col=col,
                 world_xy=world_xy,
                 heading_world_rad=heading,
-                frontier_cell_count=len(component),
+                frontier_cells=tuple(sorted(cells)),
+                frontier_cell_count=len(cells),
                 path_distance_m=path_distance,
                 score=score,
             )
@@ -144,12 +178,18 @@ def _nearest_free_cell(requested: Cell, free_cells: Set[Cell]) -> Cell:
     )
 
 
-def _reachable_free_distances(seed: Cell, free_cells: Set[Cell]) -> Dict[Cell, int]:
-    """用四邻接 BFS 返回从 seed 到各可达自由格的步数。"""
+def _reachable_free_distances(
+    seed: Cell,
+    free_cells: Set[Cell],
+    maximum_steps: int,
+) -> Dict[Cell, int]:
+    """用四邻接 BFS 返回不超过 maximum_steps 的可达自由格步数。"""
     distances = {seed: 0}
     queue = deque([seed])
     while queue:
         row, col = queue.popleft()
+        if distances[(row, col)] >= maximum_steps:
+            continue
         for neighbor in _four_neighbors(row, col):
             if neighbor in free_cells and neighbor not in distances:
                 distances[neighbor] = distances[(row, col)] + 1
@@ -169,6 +209,71 @@ def _find_frontier_cells(grid: GridValues, reachable: Set[Cell]) -> Set[Cell]:
         ):
             result.add((row, col))
     return result
+
+
+def _find_range_frontier_cells(
+    reachable: Set[Cell], free_cells: Set[Cell]
+) -> Set[Cell]:
+    """返回局部 BFS 边界上、外侧仍邻接完整地图自由格的格子。"""
+    return {
+        (row, col)
+        for row, col in reachable
+        if any(
+            neighbor in free_cells and neighbor not in reachable
+            for neighbor in _four_neighbors(row, col)
+        )
+    }
+
+
+def _group_cells_by_direction(
+    cells: Set[Cell],
+    obstacle_map: ObstacleMap,
+    pose: Pose2D,
+    reference_heading: float,
+) -> Tuple[Tuple[float, Set[Cell]], ...]:
+    """把范围边界按参考方向及其三个正交方向分成四组。"""
+    headings = tuple(
+        reference_heading + index * math.pi / 2.0 for index in range(4)
+    )
+    groups = [set() for _ in headings]
+    for cell in cells:
+        cell_heading = _cell_heading(cell, obstacle_map, pose)
+        group_index = min(
+            range(len(headings)),
+            key=lambda index: (
+                abs(_angle_difference(cell_heading, headings[index])),
+                index,
+            ),
+        )
+        groups[group_index].add(cell)
+    return tuple(
+        (headings[index], group)
+        for index, group in enumerate(groups)
+        if group
+    )
+
+
+def _cell_nearest_heading(
+    cells: Set[Cell],
+    heading: float,
+    obstacle_map: ObstacleMap,
+    pose: Pose2D,
+) -> Cell:
+    """返回一组格子中最接近指定世界航向的真实格。"""
+    return min(
+        cells,
+        key=lambda cell: (
+            abs(_angle_difference(_cell_heading(cell, obstacle_map, pose), heading)),
+            cell,
+        ),
+    )
+
+
+def _cell_heading(
+    cell: Cell, obstacle_map: ObstacleMap, pose: Pose2D
+) -> float:
+    world_xy = grid_cell_center_to_world(cell[0], cell[1], obstacle_map)
+    return math.atan2(world_xy[1] - pose.y_m, world_xy[0] - pose.x_m)
 
 
 def _connected_components(cells: Set[Cell]) -> Tuple[Set[Cell], ...]:
