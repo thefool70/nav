@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Tuple
 
 from ...core.models import NavigationFrame, Pose2D, RelativePoseCommand
-from .l515_camera import L515Camera, L515Capture, L515Config
+from ..realsense import L515Camera, L515Capture, L515Config
 from .mapping import CameraMount, DepthOccupancyMap, DepthOccupancyMapConfig
 from .motion import S100MotionConfig, S100MotionController
 from .planner import plan_known_free_path

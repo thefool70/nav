@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Tuple
 
-from ..l515_camera import L515Capture
+from ...realsense import L515Capture
 
 
 _DEPTH_RANGE_M = (0.25, 4.0)

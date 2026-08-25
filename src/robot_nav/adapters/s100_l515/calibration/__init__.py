@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ....core.models import Pose2D
-from ..l515_camera import L515Camera, L515Capture, L515Config
+from ...realsense import L515Camera, L515Capture, L515Config
 from ..l515_motion import (
     L515MotionConfig,
     L515MotionSensor,

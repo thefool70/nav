@@ -1,7 +1,7 @@
 """WHEELTEC S100 与 RealSense L515 真实设备环境。"""
 
 from .adapter import S100L515Adapter, S100L515Config
-from .l515_camera import L515Camera, L515Capture, L515Config
+from ..realsense import L515Camera, L515Capture, L515Config
 from .l515_motion import (
     L515MotionConfig,
     L515MotionSensor,
