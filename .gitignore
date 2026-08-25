@@ -8,4 +8,5 @@ dist/
 *.egg-info/
 .eggs/
 data/
+hardware/realsense/.rsusb/
 slam/s100_l515/.rsusb/

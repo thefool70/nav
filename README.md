@@ -27,8 +27,8 @@ TargetObserver ────► TargetObservation ┘
   `slam_toolbox` 生成统一位姿/占用图；支持借助 L515 Motion Module 与 RGB-D
   自动估计安装外参，并保留直接深度累计模式用于局部排错。
 - Hermes + L515 Adapter：通过 SLAMTEC Robot Agent REST API 读取 Hermes 位姿和
-  激光栅格图，并把相对位姿转换为底盘自主规划 Action；外接 L515 只负责对齐
-  RGB-D，不参与底盘定位和避障。
+  激光栅格图，并把相对位姿转换为底盘自主规划 Action；外接 L515 负责对齐
+  RGB-D，并可借助 Hermes 位姿自动标定完整安装外参。
 - OpenAI-compatible 目标观察器：支持 Chat Completions 和 Responses API，输出
   目标可见性、不可见方向评分和可见目标框。
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
@@ -52,7 +52,7 @@ TargetObserver ────► TargetObservation ┘
 | --- | --- |
 | `src/robot_nav/core/navigator.py` | 算法入口和阶段流转 |
 | `src/robot_nav/core/frontier.py` | 可达 Frontier 提取与排序 |
-| `src/robot_nav/core/grounding.py` | 目标框与深度的二维定位 |
+| `src/robot_nav/core/grounding.py` | 用完整相机外参把目标框与深度投影到机器人平面 |
 | `src/robot_nav/core/vision.py` | VLM 提示词和回答解析 |
 | `src/robot_nav/core/history.py` | 探索方向历史与回退依据 |
 | `src/robot_nav/core/models.py` | 全部输入、输出与状态契约 |
@@ -62,7 +62,7 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/adapters/slamtec_l515/adapter.py` | Hermes + L515 真机 Adapter |
 | `src/robot_nav/adapters/slamtec_l515/rest_client.py` | Hermes REST 与 Action 边界 |
 | `src/robot_nav/adapters/realsense/l515_camera.py` | 底盘无关的 L515 RGB-D 采集 |
-| `src/robot_nav/adapters/s100_l515/calibration/` | 一次性相机安装外参标定 |
+| `src/robot_nav/adapters/realsense/calibration/` | 两种底盘共享的 L515 外参标定算法 |
 | `src/robot_nav/adapters/s100_l515/ros_slam.py` | ROS SLAM 与统一导航帧的边界 |
 | `src/robot_nav/adapters/perception.py` | 视觉/VLM 接口 |
 | `src/robot_nav/adapters/openai_compatible.py` | OpenAI-compatible VLM 调用 |
@@ -71,6 +71,8 @@ TargetObserver ────► TargetObservation ┘
 | `src/robot_nav/app.py` | 单周期串联入口 |
 | `src/robot_nav/__main__.py` | Adapter 选择、循环和终端输出 |
 | `slam/s100_l515/` | S100 + L515 的 ROS 环境、启动与 SLAM 参数 |
+| `hardware/realsense/` | WSL L515 USB 权限与 RSUSB 用户态后端 |
+| `hardware/slamtec_l515/` | Hermes + L515 的真机启动脚本 |
 
 ## Python 环境
 

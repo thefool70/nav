@@ -7,16 +7,17 @@ if (($# == 0)); then
 fi
 
 robot_nav_slam_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+robot_nav_repo_dir="$(cd -- "$robot_nav_slam_dir/../.." && pwd)"
 robot_nav_slam_pids=()
 robot_nav_command=("$@")
 
 configure_realsense_backend() {
-    local rsusb_prefix="$robot_nav_slam_dir/.rsusb"
+    local rsusb_prefix="$robot_nav_repo_dir/hardware/realsense/.rsusb"
 
     if [[ ! -f "$rsusb_prefix/lib/librealsense2.so.2.54.1" ]] || \
        ! compgen -G "$rsusb_prefix/python/pyrealsense2*.so" >/dev/null; then
         echo "缺少 WSL 所需的 librealsense RSUSB 后端。请先运行：" >&2
-        echo "  slam/s100_l515/build_rsusb.sh" >&2
+        echo "  hardware/realsense/build_rsusb.sh" >&2
         exit 1
     fi
 

@@ -19,7 +19,7 @@ for command in git cmake c++; do
     fi
 done
 if ! command -v python >/dev/null 2>&1; then
-    echo "请先激活 robot-nav-slam 环境。" >&2
+    echo "请先激活要运行 L515 的 micromamba 环境。" >&2
     exit 1
 fi
 
@@ -31,6 +31,7 @@ git -C "$source_dir" apply "$script_dir/librealsense-2.54.1-gcc16.patch"
 
 cmake -S "$source_dir" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DCMAKE_CXX_STANDARD=17 \
     -DCMAKE_INSTALL_PREFIX="$install_dir" \
     -DCMAKE_INSTALL_LIBDIR=lib \
