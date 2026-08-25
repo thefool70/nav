@@ -34,8 +34,8 @@ TargetObserver ────► TargetObservation ┘
 - 算法主流程：四向扫描、目标框与深度定位、安全距离接近、Frontier 提取与
   排序、观测历史和回退。
 - Rerun 实时可视化：记录算法决策帧和 Habitat 动作中间帧，包括 RGB、米制
-  深度、三色占用图、机器人位姿与轨迹、控制命令、历史候选点和状态；Habitat
-  入口默认启用，用 `--no-rerun` 关闭。
+  深度、叠加当前 Frontier 的三色占用图、机器人位姿与轨迹、控制命令、历史
+  候选点和状态；Habitat 入口默认启用，用 `--no-rerun` 关闭。
 - 通用入口默认使用 OpenCode Zen 和 Muse Spark 1.2；Key 只在运行时读取，不写入
   仓库。未提供观察器时算法会返回明确的 `NEEDS_OBSERVATION`。
 - Habitat 入口支持 `--debug-random-score`：不创建也不调用任何视觉模型，观察器

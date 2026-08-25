@@ -29,6 +29,12 @@ HEADING_RGB = (0, 220, 140)
 TRAJECTORY_RGB = (0, 120, 255)
 COMMAND_RGB = (255, 140, 0)
 BBOX_RGB = (0, 255, 80)
+MAP_FRONTIER_RGB = (0, 220, 100)
+RANGE_FRONTIER_RGB = (220, 70, 255)
+SELECTED_FRONTIER_RGB = (255, 210, 0)
+SELECTED_FRONTIER_RADIUS_CELLS = 1
+
+FrontierMarker = Tuple[int, int, Tuple[int, int, int], int]
 
 DIRECTION_COLORS = {
     SearchDirectionState.PENDING: (255, 210, 0),
@@ -75,6 +81,7 @@ class RerunVisualizer:
         self._target_text = target_text
         self._sample_index = 0
         self._trajectory_xy: List[Tuple[float, float]] = []
+        self._frontier_markers: Tuple[FrontierMarker, ...] = ()
         self._status_font = _load_status_font()
         if self._status_font is None:
             _print_font_notice_once()
@@ -93,6 +100,7 @@ class RerunVisualizer:
     ) -> None:
         """记录算法决策帧及其观测、命令和状态。"""
         self._begin_sample()
+        self._update_frontier_markers(result)
         self._log_rgb(frame, observation)
         self._log_depth(frame)
         self._log_occupancy_map(frame)
@@ -160,13 +168,40 @@ class RerunVisualizer:
         )
 
     def _log_occupancy_map(self, frame: NavigationFrame) -> None:
-        """用灰/白/黑显示未知、自由和障碍；图像上方对应世界 +y。"""
+        """显示占据栅格，并在对应格子直接叠加当前 Frontier。"""
         occupancy = frame.obstacle_map.occupancy
         if len(occupancy) == 0 or len(occupancy[0]) == 0:
             self._clear("map/occupancy")
             return
         image = _occupancy_to_rgb_numpy(occupancy)
+        _draw_frontier_markers(image, self._frontier_markers)
         self._rr.log("map/occupancy", self._rr.Image(np.flipud(image).copy()))
+
+    def _update_frontier_markers(self, result: NavigationResult) -> None:
+        """保存当前决策的 Frontier，供随后运动帧继续显示。"""
+        candidates = result.debug.details.get("frontier_candidates", ())
+        selected_id = result.debug.details.get("candidate_id")
+        markers = []
+        for candidate in candidates:
+            candidate_id = str(candidate["candidate_id"])
+            if candidate_id.startswith("range_frontier:"):
+                color = RANGE_FRONTIER_RGB
+            else:
+                color = MAP_FRONTIER_RGB
+            markers.extend(
+                (int(row), int(col), color, 0)
+                for row, col in candidate["frontier_cells"]
+            )
+            if candidate_id == selected_id:
+                markers.append(
+                    (
+                        int(candidate["row"]),
+                        int(candidate["col"]),
+                        SELECTED_FRONTIER_RGB,
+                        SELECTED_FRONTIER_RADIUS_CELLS,
+                    )
+                )
+        self._frontier_markers = tuple(markers)
 
     def _log_robot_pose(self, frame: NavigationFrame) -> None:
         """记录世界系机器人位置、朝向和累计轨迹。"""
@@ -306,6 +341,22 @@ def _occupancy_to_rgb_numpy(occupancy: Grid) -> np.ndarray:
                 color = FREE_RGB
             image[row_index, col_index] = color
     return image
+
+
+def _draw_frontier_markers(
+    image: np.ndarray,
+    markers: Tuple[FrontierMarker, ...],
+) -> None:
+    """逐格绘制 Frontier，并把选中代表点画得更醒目。"""
+    height, width = image.shape[:2]
+    for row, col, color, radius in markers:
+        if not 0 <= row < height or not 0 <= col < width:
+            continue
+        row_min = max(0, row - radius)
+        row_max = min(height, row + radius + 1)
+        col_min = max(0, col - radius)
+        col_max = min(width, col + radius + 1)
+        image[row_min:row_max, col_min:col_max] = color
 
 
 def _bbox_norm_to_pixel_box(
