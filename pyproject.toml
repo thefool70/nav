@@ -17,6 +17,10 @@ s100-l515 = [
     "pyrealsense2==2.54.1.5217",
     "pyserial>=3.5",
 ]
+slamtec-l515 = [
+    "numpy>=1.24,<2",
+    "pyrealsense2==2.54.1.5217",
+]
 
 [project.scripts]
 robot-nav = "robot_nav.__main__:main"

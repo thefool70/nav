@@ -17,10 +17,10 @@ from .adapters.openai_compatible import (
 )
 from .adapters.perception import TargetObserver
 from .adapters.random_observer import RandomScoreTargetObserver
+from .adapters.realsense import L515Config
 from .adapters.s100_l515 import (
     CameraMount,
     DEFAULT_CAMERA_MOUNT_PATH,
-    L515Config,
     RosSlamConfig,
     S100L515Adapter,
     S100L515Config,
@@ -28,10 +28,15 @@ from .adapters.s100_l515 import (
     S100SerialConfig,
     load_camera_mount,
 )
+from .adapters.slamtec_l515 import (
+    SlamtecL515Adapter,
+    SlamtecL515Config,
+)
 from .app import run_navigation_cycle
 from .core.models import (
     NavigationResult,
     NavigationStatus,
+    Pose2D,
     SearchPhase,
     TargetSearchGoal,
 )
@@ -75,6 +80,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ):
             parser.error("缺少环境变量 ROBOT_NAV_VLM_API_KEY")
         return _run_s100_l515(args, api_key)
+
+    if args.adapter == "slamtec-l515":
+        if args.base_only and not args.preflight_only:
+            parser.error("--base-only 只用于 --preflight-only，不可启动导航")
+        if not args.preflight_only and not args.target:
+            parser.error("slamtec-l515 导航模式必须提供 --target")
+        if not args.preflight_only and not args.enable_motion:
+            parser.error("真机导航必须显式提供 --enable-motion")
+        if (
+            not args.preflight_only
+            and not args.debug_random_score
+            and not api_key
+        ):
+            parser.error("缺少环境变量 ROBOT_NAV_VLM_API_KEY")
+        return _run_slamtec_l515(args, api_key)
 
     parser.error(f"未知 Adapter：{args.adapter}")
     return 2
@@ -150,6 +170,65 @@ def _build_parser() -> argparse.ArgumentParser:
         "--enable-motion",
         action="store_true",
         help="明确允许真机发送非零运动命令",
+    )
+
+    slamtec = adapters.add_parser(
+        "slamtec-l515", help="使用 SLAMTEC Hermes 与外接 RealSense L515"
+    )
+    _add_navigation_arguments(slamtec, target_required=False)
+    slamtec.add_argument(
+        "--base-url",
+        default="http://192.168.11.1:1448",
+        help="Hermes Robot Agent 地址",
+    )
+    slamtec.add_argument(
+        "--camera-serial",
+        help="有多台 RealSense 时指定 L515 序列号",
+    )
+    slamtec.add_argument(
+        "--camera-forward-m",
+        type=_finite_float,
+        default=0.0,
+        help="L515 光心相对底盘中心的前向偏移（米）",
+    )
+    slamtec.add_argument(
+        "--camera-left-m",
+        type=_finite_float,
+        default=0.0,
+        help="L515 光心相对底盘中心的左向偏移（米）",
+    )
+    slamtec.add_argument(
+        "--camera-yaw-deg",
+        type=_finite_float,
+        default=0.0,
+        help="L515 相对底盘正前方的左偏角（度）",
+    )
+    slamtec.add_argument(
+        "--action-timeout-s",
+        type=_positive_float,
+        default=120.0,
+        help="单个 Hermes 运动 Action 的超时秒数",
+    )
+    slamtec.add_argument(
+        "--min-localization-quality",
+        type=_localization_quality,
+        default=1,
+        help="允许运动的最低定位质量，默认 1（范围 0-100）",
+    )
+    slamtec.add_argument(
+        "--base-only",
+        action="store_true",
+        help="L515 未连接时只预检 Hermes 位姿、地图与 Action",
+    )
+    slamtec.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="只读取设备状态与一帧数据，不执行导航",
+    )
+    slamtec.add_argument(
+        "--enable-motion",
+        action="store_true",
+        help="明确允许真机创建运动 Action",
     )
 
     calibration = adapters.add_parser(
@@ -267,6 +346,55 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
                 f"pose=({frame.pose.x_m:.2f}, {frame.pose.y_m:.2f}, "
                 f"{frame.pose.yaw_rad:.2f})，"
                 f"{'SLAM' if args.slam else '本地'} RGB-D 与占用图已生成。"
+            )
+            return 0
+
+        observer = _build_observer(args.debug_random_score, api_key)
+        return _run_navigation(
+            chassis,
+            args.target,
+            args.max_cycles,
+            observer,
+            on_cycle,
+        )
+
+
+def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
+    """组装 Hermes/L515 Adapter；base-only 仅用于无相机预检。"""
+    on_cycle, on_motion_frame = _build_visualization(args)
+    config = SlamtecL515Config(
+        base_url=args.base_url,
+        camera=(
+            None
+            if args.base_only
+            else L515Config(serial_number=args.camera_serial)
+        ),
+        camera_pose_in_robot=Pose2D(
+            x_m=args.camera_forward_m,
+            y_m=args.camera_left_m,
+            yaw_rad=math.radians(args.camera_yaw_deg),
+        ),
+        action_timeout_s=args.action_timeout_s,
+        minimum_localization_quality=args.min_localization_quality,
+    )
+    with SlamtecL515Adapter(
+        config,
+        on_motion_frame=on_motion_frame,
+    ) as chassis:
+        if args.preflight_only:
+            info = chassis.get_robot_info()
+            quality = chassis.get_localization_quality()
+            frame = chassis.read_frame()
+            height = len(frame.obstacle_map.occupancy)
+            width = len(frame.obstacle_map.occupancy[0]) if height else 0
+            print(
+                "Hermes/L515 预检通过："
+                f"model={info.get('modelName', 'unknown')}，"
+                f"firmware={info.get('softwareVersion', 'unknown')}，"
+                f"pose=({frame.pose.x_m:.2f}, {frame.pose.y_m:.2f}, "
+                f"{frame.pose.yaw_rad:.2f})，quality={quality}，"
+                f"map={width}×{height}，"
+                f"L515={'已启用' if chassis.has_camera else '未启用'}。"
             )
             return 0
 
@@ -455,6 +583,13 @@ def _finite_float(value: str) -> float:
     number = float(value)
     if not math.isfinite(number):
         raise argparse.ArgumentTypeError("必须是有限数")
+    return number
+
+
+def _localization_quality(value: str) -> int:
+    number = int(value)
+    if not 0 <= number <= 100:
+        raise argparse.ArgumentTypeError("必须是 0 到 100 的整数")
     return number
 
 
