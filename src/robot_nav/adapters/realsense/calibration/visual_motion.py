@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, List, Sequence, Tuple
 
 from ....core.models import Pose2D
-from ...realsense import L515Capture
+from ..l515_camera import L515Capture
 
 
 _DEPTH_RANGE_M = (0.25, 4.0)

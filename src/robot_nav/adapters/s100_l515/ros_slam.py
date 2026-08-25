@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional, Tuple
 
 from ...core.models import (
+    CameraExtrinsics,
     CameraIntrinsics,
     NavigationFrame,
     ObstacleMap,
@@ -312,6 +313,7 @@ class RosSlamSource:
         quaternion = _mount_quaternion(
             self._camera_mount.yaw_rad,
             self._camera_mount.pitch_down_rad,
+            self._camera_mount.roll_rad,
         )
         _set_quaternion(transform.transform.rotation, quaternion)
         self._static_tf.sendTransform(transform)
@@ -362,10 +364,13 @@ class RosSlamSource:
             depth=_freeze_depth(depth_m),
             rgb=_freeze_rgb(rgb),
             camera_intrinsics=intrinsics,
-            camera_pose_in_robot=Pose2D(
-                self._camera_mount.forward_m,
-                self._camera_mount.left_m,
-                self._camera_mount.yaw_rad,
+            camera_extrinsics_in_robot=CameraExtrinsics(
+                forward_m=self._camera_mount.forward_m,
+                left_m=self._camera_mount.left_m,
+                height_m=self._camera_mount.height_m,
+                yaw_rad=self._camera_mount.yaw_rad,
+                pitch_down_rad=self._camera_mount.pitch_down_rad,
+                roll_rad=self._camera_mount.roll_rad,
             ),
         )
 
@@ -485,18 +490,23 @@ def _quaternion_yaw(quaternion: Any) -> float:
     return math.atan2(sin_yaw, cos_yaw)
 
 
-def _mount_quaternion(yaw_rad: float, pitch_down_rad: float):
+def _mount_quaternion(
+    yaw_rad: float,
+    pitch_down_rad: float,
+    roll_rad: float,
+):
+    """返回 Rz(yaw)·Ry(pitch-down)·Rx(-roll) 的 xyzw 四元数。"""
     half_yaw = yaw_rad / 2.0
     half_pitch = pitch_down_rad / 2.0
-    cosine_yaw = math.cos(half_yaw)
-    sine_yaw = math.sin(half_yaw)
-    cosine_pitch = math.cos(half_pitch)
-    sine_pitch = math.sin(half_pitch)
+    half_roll = -roll_rad / 2.0
+    cy, sy = math.cos(half_yaw), math.sin(half_yaw)
+    cp, sp = math.cos(half_pitch), math.sin(half_pitch)
+    cr, sr = math.cos(half_roll), math.sin(half_roll)
     return (
-        -sine_pitch * sine_yaw,
-        sine_pitch * cosine_yaw,
-        cosine_pitch * sine_yaw,
-        cosine_pitch * cosine_yaw,
+        cy * cp * sr - sy * sp * cr,
+        cy * sp * cr + sy * cp * sr,
+        sy * cp * cr - cy * sp * sr,
+        cy * cp * cr + sy * sp * sr,
     )
 
 

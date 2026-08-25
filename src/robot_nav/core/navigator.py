@@ -208,7 +208,7 @@ def _approach_visible_target(
         frame.depth,
         frame.camera_intrinsics,
         frame.pose,
-        frame.camera_pose_in_robot,
+        frame.camera_extrinsics_in_robot,
     )
     if not estimate.success:
         return _result(

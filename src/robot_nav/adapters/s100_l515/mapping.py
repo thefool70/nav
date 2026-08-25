@@ -14,7 +14,7 @@ class CameraMount:
     """L515 在机器人坐标系中的安装位姿。
 
     forward_m、left_m、height_m 分别沿机器人前、左、上方向；yaw_rad 正值向左；
-    pitch_down_rad 正值表示镜头光轴向地面俯视。当前不支持 roll。
+    pitch_down_rad 正值表示镜头光轴向地面俯视；roll_rad 表示图像顺时针倾斜。
     """
 
     height_m: float
@@ -22,6 +22,7 @@ class CameraMount:
     left_m: float = 0.0
     yaw_rad: float = 0.0
     pitch_down_rad: float = 0.0
+    roll_rad: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -213,15 +214,20 @@ def _depth_pixel_to_robot(
     camera_left = -camera_right
     camera_up = -camera_down
 
+    roll_cos = math.cos(mount.roll_rad)
+    roll_sin = math.sin(mount.roll_rad)
+    rolled_left = camera_left * roll_cos + camera_up * roll_sin
+    rolled_up = -camera_left * roll_sin + camera_up * roll_cos
+
     pitch_cos = math.cos(mount.pitch_down_rad)
     pitch_sin = math.sin(mount.pitch_down_rad)
-    pitched_forward = camera_forward * pitch_cos + camera_up * pitch_sin
-    pitched_up = -camera_forward * pitch_sin + camera_up * pitch_cos
+    pitched_forward = camera_forward * pitch_cos + rolled_up * pitch_sin
+    pitched_up = -camera_forward * pitch_sin + rolled_up * pitch_cos
 
     yaw_cos = math.cos(mount.yaw_rad)
     yaw_sin = math.sin(mount.yaw_rad)
-    robot_forward = pitched_forward * yaw_cos - camera_left * yaw_sin
-    robot_left = pitched_forward * yaw_sin + camera_left * yaw_cos
+    robot_forward = pitched_forward * yaw_cos - rolled_left * yaw_sin
+    robot_left = pitched_forward * yaw_sin + rolled_left * yaw_cos
     return (
         mount.forward_m + robot_forward,
         mount.left_m + robot_left,
@@ -309,6 +315,7 @@ def _validate_camera_mount(mount: CameraMount) -> None:
         mount.left_m,
         mount.yaw_rad,
         mount.pitch_down_rad,
+        mount.roll_rad,
     )
     if not all(_is_finite_number(value) for value in values):
         raise ValueError("相机安装参数必须为有限数")

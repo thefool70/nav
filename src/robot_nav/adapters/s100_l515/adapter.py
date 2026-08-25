@@ -6,7 +6,12 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Tuple
 
-from ...core.models import NavigationFrame, Pose2D, RelativePoseCommand
+from ...core.models import (
+    CameraExtrinsics,
+    NavigationFrame,
+    Pose2D,
+    RelativePoseCommand,
+)
 from ..realsense import L515Camera, L515Capture, L515Config
 from .mapping import CameraMount, DepthOccupancyMap, DepthOccupancyMapConfig
 from .motion import S100MotionConfig, S100MotionController
@@ -238,10 +243,13 @@ def _build_navigation_frame(
         depth=_convert_depth(capture.depth_m),
         rgb=_convert_rgb(capture.rgb),
         camera_intrinsics=capture.camera_intrinsics,
-        camera_pose_in_robot=Pose2D(
-            x_m=camera_mount.forward_m,
-            y_m=camera_mount.left_m,
+        camera_extrinsics_in_robot=CameraExtrinsics(
+            forward_m=camera_mount.forward_m,
+            left_m=camera_mount.left_m,
+            height_m=camera_mount.height_m,
             yaw_rad=camera_mount.yaw_rad,
+            pitch_down_rad=camera_mount.pitch_down_rad,
+            roll_rad=camera_mount.roll_rad,
         ),
     )
 
@@ -317,6 +325,7 @@ def _validate_config(config: S100L515Config) -> None:
         config.camera_mount.left_m,
         config.camera_mount.yaw_rad,
         config.camera_mount.pitch_down_rad,
+        config.camera_mount.roll_rad,
     )
     if not all(_is_finite(value) for value in mount_values):
         raise ValueError("camera_mount 的位置和角度必须为有限数")

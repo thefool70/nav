@@ -6,7 +6,13 @@ import math
 import statistics
 from typing import Optional, Sequence, Tuple
 
-from .models import CameraIntrinsics, DepthImage, Pose2D, TargetEstimate
+from .models import (
+    CameraExtrinsics,
+    CameraIntrinsics,
+    DepthImage,
+    Pose2D,
+    TargetEstimate,
+)
 
 
 def ground_target_bbox(
@@ -14,7 +20,7 @@ def ground_target_bbox(
     depth_m: DepthImage,
     intrinsics: CameraIntrinsics,
     robot_pose_world: Pose2D,
-    camera_pose_in_robot: Pose2D,
+    camera_extrinsics_in_robot: CameraExtrinsics,
     min_depth_m: float = 0.10,
     max_depth_m: float = 5.0,
     min_valid_points: int = 8,
@@ -28,8 +34,8 @@ def ground_target_bbox(
         return TargetEstimate(False, "target_depth_missing")
     if not _valid_intrinsics(intrinsics) or not _valid_pose(robot_pose_world):
         return TargetEstimate(False, "target_calibration_invalid")
-    if not _valid_pose(camera_pose_in_robot):
-        return TargetEstimate(False, "camera_pose_invalid")
+    if not _valid_extrinsics(camera_extrinsics_in_robot):
+        return TargetEstimate(False, "camera_extrinsics_invalid")
     if (
         not _is_finite(min_depth_m)
         or not _is_finite(max_depth_m)
@@ -65,8 +71,16 @@ def ground_target_bbox(
                 * forward_camera
                 / float(intrinsics.fx)
             )
+            up_camera = -(
+                (float(row) - float(intrinsics.cy))
+                * forward_camera
+                / float(intrinsics.fy)
+            )
             forward_base, left_base = _camera_point_to_robot(
-                forward_camera, left_camera, camera_pose_in_robot
+                forward_camera,
+                left_camera,
+                up_camera,
+                camera_extrinsics_in_robot,
             )
             if forward_base > 0.05:
                 points_base.append((forward_base, left_base))
@@ -151,14 +165,30 @@ def _central_bbox_pixels(
 def _camera_point_to_robot(
     forward_camera: float,
     left_camera: float,
-    camera_pose: Pose2D,
+    up_camera: float,
+    extrinsics: CameraExtrinsics,
 ) -> Tuple[float, float]:
-    """应用相机在机器人二维坐标中的 forward/left/yaw 外参。"""
-    cosine = math.cos(float(camera_pose.yaw_rad))
-    sine = math.sin(float(camera_pose.yaw_rad))
+    """按 roll、pitch、yaw 顺序把相机光学点转换到机器人平面。"""
+    roll_cosine = math.cos(float(extrinsics.roll_rad))
+    roll_sine = math.sin(float(extrinsics.roll_rad))
+    rolled_left = left_camera * roll_cosine + up_camera * roll_sine
+    rolled_up = -left_camera * roll_sine + up_camera * roll_cosine
+
+    pitch_cosine = math.cos(float(extrinsics.pitch_down_rad))
+    pitch_sine = math.sin(float(extrinsics.pitch_down_rad))
+    pitched_forward = (
+        forward_camera * pitch_cosine + rolled_up * pitch_sine
+    )
+
+    yaw_cosine = math.cos(float(extrinsics.yaw_rad))
+    yaw_sine = math.sin(float(extrinsics.yaw_rad))
     return (
-        float(camera_pose.x_m) + cosine * forward_camera - sine * left_camera,
-        float(camera_pose.y_m) + sine * forward_camera + cosine * left_camera,
+        float(extrinsics.forward_m)
+        + yaw_cosine * pitched_forward
+        - yaw_sine * rolled_left,
+        float(extrinsics.left_m)
+        + yaw_sine * pitched_forward
+        + yaw_cosine * rolled_left,
     )
 
 
@@ -184,6 +214,20 @@ def _valid_intrinsics(intrinsics: CameraIntrinsics) -> bool:
 def _valid_pose(pose: Pose2D) -> bool:
     return isinstance(pose, Pose2D) and all(
         _is_finite(value) for value in (pose.x_m, pose.y_m, pose.yaw_rad)
+    )
+
+
+def _valid_extrinsics(extrinsics: CameraExtrinsics) -> bool:
+    return isinstance(extrinsics, CameraExtrinsics) and all(
+        _is_finite(value)
+        for value in (
+            extrinsics.forward_m,
+            extrinsics.left_m,
+            extrinsics.height_m,
+            extrinsics.yaw_rad,
+            extrinsics.pitch_down_rad,
+            extrinsics.roll_rad,
+        )
     )
 
 

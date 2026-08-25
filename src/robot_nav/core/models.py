@@ -55,11 +55,27 @@ class CameraIntrinsics:
 
 
 @dataclass(frozen=True)
+class CameraExtrinsics:
+    """相机光心在机器人前/左/上坐标系中的安装外参。
+
+    yaw_rad 向左为正，pitch_down_rad 向下为正；roll_rad 表示从相机后方向
+    镜头看时图像顺时针倾斜为正。长度单位为米，角度单位为弧度。
+    """
+
+    forward_m: float = 0.0
+    left_m: float = 0.0
+    height_m: float = 0.0
+    yaw_rad: float = 0.0
+    pitch_down_rad: float = 0.0
+    roll_rad: float = 0.0
+
+
+@dataclass(frozen=True)
 class NavigationFrame:
     """单周期感知快照。timestamp_s 为采集时刻（秒）；pose 为机器人位姿；
     obstacle_map 为障碍图；depth 与 rgb 可选，depth 单位米；
-    camera_intrinsics 为可选相机内参；camera_pose_in_robot 为相机在机器人
-    局部 forward/left/yaw 二维坐标系中的外参（无相机时保持默认零位姿）。
+    camera_intrinsics 为可选相机内参；camera_extrinsics_in_robot 为相机在
+    机器人局部前/左/上坐标系中的六自由度外参（无相机时保持默认零外参）。
 
     契约：pose 在进入 core 前必须已转换到 obstacle_map.frame_id 坐标系，
     core 内部不再做坐标转换。
@@ -71,8 +87,8 @@ class NavigationFrame:
     depth: Optional[DepthImage] = None
     rgb: Optional[RgbImage] = None
     camera_intrinsics: Optional[CameraIntrinsics] = None
-    camera_pose_in_robot: Pose2D = field(
-        default_factory=lambda: Pose2D(0.0, 0.0, 0.0)
+    camera_extrinsics_in_robot: CameraExtrinsics = field(
+        default_factory=CameraExtrinsics
     )
 
 

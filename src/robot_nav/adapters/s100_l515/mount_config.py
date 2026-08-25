@@ -39,6 +39,9 @@ def load_camera_mount(path: PathLike) -> CameraMount:
         pitch_down_rad=math.radians(
             _finite_field(mount_payload, "pitch_down_deg")
         ),
+        roll_rad=math.radians(
+            _finite_field(mount_payload, "roll_deg", default=0.0)
+        ),
     )
     _validate_mount(mount)
     return mount
@@ -61,6 +64,7 @@ def save_camera_mount(
             "translation": "robot forward / left / up, metres",
             "yaw": "positive left, degrees",
             "pitch": "positive down, degrees",
+            "roll": "image clockwise, degrees",
         },
         "camera_mount": {
             "height_m": round(float(mount.height_m), 6),
@@ -69,6 +73,9 @@ def save_camera_mount(
             "yaw_deg": round(math.degrees(float(mount.yaw_rad)), 6),
             "pitch_down_deg": round(
                 math.degrees(float(mount.pitch_down_rad)), 6
+            ),
+            "roll_deg": round(
+                math.degrees(float(mount.roll_rad)), 6
             ),
         },
         "diagnostics": dict(diagnostics),
@@ -85,8 +92,12 @@ def save_camera_mount(
     return destination
 
 
-def _finite_field(payload: Mapping[str, Any], name: str) -> float:
-    value = payload.get(name)
+def _finite_field(
+    payload: Mapping[str, Any],
+    name: str,
+    default: Any = None,
+) -> float:
+    value = payload.get(name, default)
     if isinstance(value, bool):
         raise ValueError(f"相机外参 {name} 必须为有限数")
     try:
@@ -107,6 +118,7 @@ def _validate_mount(mount: CameraMount) -> None:
         mount.left_m,
         mount.yaw_rad,
         mount.pitch_down_rad,
+        mount.roll_rad,
     )
     if not all(math.isfinite(float(value)) for value in values):
         raise ValueError("相机外参必须全部为有限数")

@@ -1,6 +1,7 @@
 """核心导航算法与数据契约，不依赖 ROS、底盘 SDK、文件系统或 adapters。"""
 
 from .models import (
+    CameraExtrinsics,
     CameraIntrinsics,
     FrontierCandidate,
     NavigationDebug,

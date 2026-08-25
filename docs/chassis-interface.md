@@ -13,7 +13,7 @@
 | 目标 | `TargetSearchGoal(target_text)`，`target_text` 为对目标的人类可读描述（如 "门口"） |
 | 感知快照 | `NavigationFrame(timestamp_s, pose, obstacle_map, ...)`，`timestamp_s` 单位为秒 |
 | 深度图 | `NavigationFrame.depth`，单位为米，`None` 表示无有效深度 |
-| 相机标定 | `CameraIntrinsics` 与 `camera_pose_in_robot`，RGB/深度必须对齐 |
+| 相机标定 | `CameraIntrinsics` 与 `CameraExtrinsics`，RGB/深度必须对齐 |
 | 控制命令 | `RelativePoseCommand(forward_m, left_m, yaw_rad)`，机器人坐标系，向前 / 向左 / 逆时针为正 |
 | 状态 | `NavigationStatus`：OK / INVALID_INPUT / NO_SOLUTION / NEEDS_OBSERVATION / MISSING_DATA |
 
@@ -57,8 +57,8 @@
 ### 图像标定
 - RGB 与深度图的尺寸、排列（行主序）与对齐关系（是否已配准）。
 - RGB 颜色空间（BGR/RGB）与取值范围。
-- 当前 core 只表达相机相对底座的平面位置和 yaw；若真机相机存在不可忽略的
-  pitch/roll，Adapter 需先校正深度，或在硬件参数确认后统一扩展标定契约。
+- `CameraExtrinsics` 使用机器人前/左/上平移、向左 yaw、向下 pitch 和从相机
+  后方向镜头看时图像顺时针为正的 roll；Adapter 必须在生成帧前统一这些方向。
 
 ### 命令覆盖与反馈语义
 - `send_relative_pose` 的位移/旋转覆盖范围、单位换算与限幅。

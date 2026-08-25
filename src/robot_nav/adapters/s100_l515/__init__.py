@@ -2,7 +2,7 @@
 
 from .adapter import S100L515Adapter, S100L515Config
 from ..realsense import L515Camera, L515Capture, L515Config
-from .l515_motion import (
+from ..realsense import (
     L515MotionConfig,
     L515MotionSensor,
     L515StationaryMotion,
