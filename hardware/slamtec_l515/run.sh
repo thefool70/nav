@@ -43,6 +43,7 @@ prepare_l515_usb() {
     windows_script_path="$(wslpath -w "$realsense_dir/prepare_l515.ps1")"
     invoke_windows_powershell \
         -NoProfile \
+        -NonInteractive \
         -ExecutionPolicy Bypass \
         -File "$windows_script_path"
 }

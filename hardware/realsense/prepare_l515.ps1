@@ -7,6 +7,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $DescriptionPattern = "(?i)(RealSense.*L?515|L?515.*RealSense)"
 
+# usbipd emits UTF-8 JSON. Windows PowerShell 5.1 otherwise decodes native
+# output with the legacy console code page, which can corrupt Chinese device
+# descriptions and make the complete JSON document invalid.
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
+
 
 function Get-UsbipdExecutable {
     $command = Get-Command usbipd.exe -ErrorAction SilentlyContinue
