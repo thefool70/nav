@@ -13,6 +13,10 @@ class MotionStalledError(RuntimeError):
     """移动已停止但当前位置仍可用，算法应从下一帧继续探索。"""
 
 
+class MotionInterruptedError(RuntimeError):
+    """后台感知发现目标，请停止当前动作并从实际位置重新决策。"""
+
+
 class ChassisInterface(Protocol):
     """底盘最小接口：读取一帧感知，发送相对位姿控制命令。
 

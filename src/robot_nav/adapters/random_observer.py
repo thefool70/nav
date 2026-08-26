@@ -12,6 +12,8 @@ from .perception import ScanObservationContext
 from ..core.models import (
     FrontierScoreRequest,
     NavigationFrame,
+    TargetConfirmation,
+    TargetConfirmationResult,
     TargetObservation,
     TargetSearchGoal,
     TargetVisibility,
@@ -51,6 +53,18 @@ class RandomScoreTargetObserver:
             candidate.candidate_id: self._random.random()
             for candidate in request.candidates
         }
+
+    def confirm_target(
+        self,
+        frame: NavigationFrame,
+        goal: TargetSearchGoal,
+        observation: TargetObservation,
+    ) -> TargetConfirmationResult:
+        """随机调试模式不会产生目标候选，保留显式兜底。"""
+        return TargetConfirmationResult(
+            TargetConfirmation.UNCERTAIN,
+            "随机调试模式不执行目标最终确认。",
+        )
 
 
 __all__ = ["RandomScoreTargetObserver"]

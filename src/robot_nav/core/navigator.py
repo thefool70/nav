@@ -43,6 +43,8 @@ from .models import (
     SearchDirectionState,
     SearchPhase,
     SearchState,
+    TargetConfirmation,
+    TargetConfirmationResult,
     TargetObservation,
     TargetSearchGoal,
     TargetVisibility,
@@ -58,6 +60,7 @@ TURN_TOLERANCE_RAD = math.radians(5.0)
 TARGET_STANDOFF_M = 0.75
 TARGET_REACHED_M = 0.90
 TARGET_INVALID_DEPTH_FALLBACK_M = 5.0
+REJECTED_TARGET_RADIUS_M = 0.75
 BACKTRACK_ARRIVAL_M = 0.25
 INITIAL_SCAN_TURN_COUNT = 8
 INITIAL_SCAN_STEP_RAD = 2.0 * math.pi / INITIAL_SCAN_TURN_COUNT
@@ -69,6 +72,7 @@ def navigate(
     state: Optional[SearchState] = None,
     observation: Optional[TargetObservation] = None,
     frontier_scores: Optional[Mapping[str, float]] = None,
+    target_confirmation: Optional[TargetConfirmationResult] = None,
 ) -> NavigationResult:
     """推进一个导航周期，并返回本周期命令和下一周期状态。
 
@@ -81,6 +85,7 @@ def navigate(
         state,
         observation,
         frontier_scores,
+        target_confirmation,
     )
     if reason is not None:
         return _invalid_result(state, reason)
@@ -100,6 +105,18 @@ def navigate(
             "failed",
             "目标搜索已经结束，当前状态没有可继续的方向。",
         )
+    if working_state.phase is SearchPhase.VERIFYING_TARGET:
+        return _continue_target_confirmation(
+            frame,
+            working_state,
+            target_confirmation,
+        )
+    # YOLO-World 在所有算法阶段持续观察；有效本地检测可以抢占扫描和探索。
+    if (
+        observation is not None
+        and observation.visibility is TargetVisibility.VISIBLE
+    ):
+        return _approach_visible_target(frame, working_state, observation)
     if working_state.phase is SearchPhase.BACKTRACKING:
         return _continue_backtracking(frame, working_state)
     if working_state.phase is SearchPhase.LOCALIZING_TARGET:
@@ -211,6 +228,68 @@ def continue_after_motion_stall(
             "reason": str(reason),
         },
     )
+
+
+def continue_after_target_detection(
+    result: NavigationResult,
+    reason: str,
+) -> Optional[NavigationResult]:
+    """运动被后台目标检测打断后，保留实际位置并让下一帧处理检测。"""
+    if result.command is None:
+        return None
+    next_state, released_direction_id = _release_interrupted_direction(result)
+    return _result(
+        NavigationStatus.OK,
+        next_state,
+        "motion.target_detected",
+        "运动期间检测到目标候选，已停止当前动作并将在下一帧定位目标。",
+        details={
+            "interrupted_stage": result.debug.stage,
+            "released_direction_id": released_direction_id,
+            "reason": str(reason),
+        },
+    )
+
+
+def _release_interrupted_direction(
+    result: NavigationResult,
+) -> Tuple[SearchState, Optional[str]]:
+    """Frontier 移动被感知打断时，把未到达的方向恢复为待探索。"""
+    if result.debug.stage not in ("explore.select", "backtrack.resume"):
+        return result.state, None
+    direction_id = result.debug.details.get(
+        "candidate_id",
+        result.debug.details.get("direction_id"),
+    )
+    requested_node_id = result.debug.details.get("node_id")
+    if not isinstance(direction_id, str) or not direction_id:
+        return result.state, None
+
+    for node in reversed(result.state.observation_history):
+        if requested_node_id is not None and node.node_id != requested_node_id:
+            continue
+        if not any(
+            direction.direction_id == direction_id
+            and direction.state is SearchDirectionState.COMMITTED
+            for direction in node.directions
+        ):
+            continue
+        updated_node = set_observation_direction_state(
+            node,
+            direction_id,
+            SearchDirectionState.PENDING,
+        )
+        return (
+            replace(
+                result.state,
+                observation_history=_replace_history_node(
+                    result.state.observation_history,
+                    updated_node,
+                ),
+            ),
+            direction_id,
+        )
+    return result.state, None
 
 
 def _reobserve_target_after_motion_issue(
@@ -467,6 +546,74 @@ def _continue_target_approach(
     return _continue_scanning(frame, scan_state, None)
 
 
+def _continue_target_confirmation(
+    frame: NavigationFrame,
+    state: SearchState,
+    confirmation: Optional[TargetConfirmationResult],
+) -> NavigationResult:
+    """候选已接近后等待 VLM 最终确认；否决后屏蔽该世界位置。"""
+    target_world_xy = state.pending_target_world_xy
+    if target_world_xy is None:
+        return _result(
+            NavigationStatus.MISSING_DATA,
+            state,
+            "target.confirm",
+            "目标确认阶段缺少候选世界坐标。",
+        )
+    if confirmation is None:
+        return _result(
+            NavigationStatus.NEEDS_TARGET_CONFIRMATION,
+            state,
+            "target.confirm",
+            "候选已进入观察距离，需要 VLM 最终确认。",
+            details={"target_world_xy": target_world_xy},
+        )
+    if confirmation.confirmation is TargetConfirmation.UNCERTAIN:
+        return _result(
+            NavigationStatus.OK,
+            state,
+            "target.confirm",
+            confirmation.reason or "VLM 最终确认失败，保持当前位置等待重试。",
+            details={"target_world_xy": target_world_xy},
+        )
+    if confirmation.confirmation is TargetConfirmation.CONFIRMED:
+        return _result(
+            NavigationStatus.OK,
+            replace(
+                state,
+                phase=SearchPhase.COMPLETE,
+                pending_target_world_xy=None,
+            ),
+            "target.complete",
+            "VLM 已最终确认目标。",
+            details={"target_world_xy": target_world_xy},
+        )
+
+    rejected_points = state.rejected_target_world_xy + (target_world_xy,)
+    scan_state = _reset_scan_after_move(
+        replace(
+            state,
+            initial_scan_complete=True,
+            rejected_target_world_xy=rejected_points,
+            pending_target_world_xy=None,
+        )
+    )
+    result = _continue_scanning(frame, scan_state, None)
+    return replace(
+        result,
+        debug=NavigationDebug(
+            stage="target.rejected",
+            message="VLM 否决当前候选，已屏蔽该位置并恢复 Frontier 探索。",
+            details={
+                **result.debug.details,
+                "rejected_target_world_xy": target_world_xy,
+                "rejected_target_count": len(rejected_points),
+                "next_stage": result.debug.stage,
+            },
+        ),
+    )
+
+
 def _approach_visible_target(
     frame: NavigationFrame,
     state: SearchState,
@@ -504,13 +651,46 @@ def _approach_visible_target(
             details={"valid_depth_points": estimate.sample_count},
         )
 
+    if (
+        estimate.target_world_xy is not None
+        and _is_rejected_target(
+            estimate.target_world_xy,
+            state.rejected_target_world_xy,
+        )
+    ):
+        scan_state = _reset_scan_after_move(
+            replace(state, initial_scan_complete=True)
+        )
+        result = _continue_scanning(frame, scan_state, None)
+        return replace(
+            result,
+            debug=NavigationDebug(
+                stage="target.ignore_rejected",
+                message="本地检测落在已被 VLM 否决的位置，忽略并继续探索。",
+                details={
+                    **result.debug.details,
+                    "target_world_xy": estimate.target_world_xy,
+                    "next_stage": result.debug.stage,
+                },
+            ),
+        )
+
     if estimate.distance_m is not None and estimate.distance_m <= TARGET_REACHED_M:
         return _result(
-            NavigationStatus.OK,
-            replace(state, phase=SearchPhase.COMPLETE),
-            "target.complete",
-            "目标已进入到达距离。",
-            details={"target_distance_m": estimate.distance_m},
+            NavigationStatus.NEEDS_TARGET_CONFIRMATION,
+            replace(
+                state,
+                phase=SearchPhase.VERIFYING_TARGET,
+                pending_target_world_xy=estimate.target_world_xy,
+            ),
+            "target.confirm",
+            "本地检测目标已进入观察距离，等待 VLM 最终确认。",
+            details={
+                "target_distance_m": estimate.distance_m,
+                "target_world_xy": estimate.target_world_xy,
+                "detection_source": observation.source,
+                "detection_confidence": observation.confidence,
+            },
         )
 
     target_forward, target_left = estimate.target_base_xy or (0.0, 0.0)
@@ -966,6 +1146,22 @@ def _reset_scan_after_move(state: SearchState) -> SearchState:
         scan_evidence=(),
         active_node_id=None,
         target_approach_attempts=0,
+        pending_target_world_xy=None,
+    )
+
+
+def _is_rejected_target(
+    target_world_xy: Tuple[float, float],
+    rejected_points: Tuple[Tuple[float, float], ...],
+) -> bool:
+    """判断本地检测是否落入已被 VLM 否决的位置邻域。"""
+    return any(
+        math.hypot(
+            target_world_xy[0] - rejected_xy[0],
+            target_world_xy[1] - rejected_xy[1],
+        )
+        <= REJECTED_TARGET_RADIUS_M
+        for rejected_xy in rejected_points
     )
 
 
@@ -1056,6 +1252,7 @@ def _validation_error(
     state: Optional[SearchState],
     observation: Optional[TargetObservation],
     frontier_scores: Optional[Mapping[str, float]],
+    target_confirmation: Optional[TargetConfirmationResult],
 ) -> Optional[str]:
     """返回非法公共输入的简短原因；合法输入返回 None。"""
     if not isinstance(goal, TargetSearchGoal) or not isinstance(
@@ -1086,6 +1283,18 @@ def _validation_error(
     if observation is not None:
         if not isinstance(observation.visibility, TargetVisibility):
             return "observation.visibility 必须为 TargetVisibility"
+        if not isinstance(observation.source, str):
+            return "observation.source 必须为字符串"
+        if observation.confidence is not None and (
+            not _is_finite(observation.confidence)
+            or not 0.0 <= float(observation.confidence) <= 1.0
+        ):
+            return "observation.confidence 必须位于 0 到 1"
+    if target_confirmation is not None:
+        if not isinstance(target_confirmation, TargetConfirmationResult):
+            return "target_confirmation 必须为 TargetConfirmationResult 或 None"
+        if not isinstance(target_confirmation.confirmation, TargetConfirmation):
+            return "target_confirmation.confirmation 类型无效"
     if frontier_scores is not None:
         if not isinstance(frontier_scores, Mapping):
             return "frontier_scores 必须为映射或 None"
@@ -1099,6 +1308,16 @@ def _validation_error(
             return "state.phase 必须为 SearchPhase"
         if not isinstance(state.initial_scan_complete, bool):
             return "state.initial_scan_complete 必须为 bool"
+        if (
+            state.pending_target_world_xy is not None
+            and not _valid_world_point(state.pending_target_world_xy)
+        ):
+            return "state.pending_target_world_xy 必须为有限世界坐标或 None"
+        if any(
+            not _valid_world_point(point)
+            for point in state.rejected_target_world_xy
+        ):
+            return "state.rejected_target_world_xy 必须为有限世界坐标序列"
         if (
             isinstance(state.target_approach_attempts, bool)
             or not isinstance(state.target_approach_attempts, int)
@@ -1115,6 +1334,12 @@ def _validation_error(
             ):
                 return "state.next_scan_index 必须位于扫描航向范围内"
     return None
+
+
+def _valid_world_point(value: object) -> bool:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return False
+    return all(_is_finite(component) for component in value)
 
 
 def _invalid_result(state: Optional[SearchState], reason: str) -> NavigationResult:
@@ -1161,6 +1386,7 @@ def _is_finite(value: object) -> bool:
 
 __all__ = [
     "continue_after_motion_stall",
+    "continue_after_target_detection",
     "navigate",
     "recover_from_motion_failure",
 ]

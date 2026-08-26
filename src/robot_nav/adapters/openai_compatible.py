@@ -17,20 +17,25 @@ from urllib.request import Request, urlopen
 from ..core.models import (
     FrontierScoreRequest,
     NavigationFrame,
+    TargetConfirmation,
+    TargetConfirmationResult,
     TargetObservation,
     TargetSearchGoal,
     TargetVisibility,
 )
 from ..core.vision import (
     build_frontier_scores_prompt,
+    build_target_confirmation_prompt,
     build_target_grounding_prompt,
     build_target_visibility_prompt,
     parse_frontier_scores_response,
+    parse_target_confirmation_response,
     parse_target_grounding_response,
     parse_target_visibility_response,
 )
 from .frontier_overlay import (
     BufferedScanImage,
+    annotate_bbox_image,
     buffer_scan_image,
     build_frontier_score_sheet,
     pack_rgb_image,
@@ -203,19 +208,75 @@ class OpenAICompatibleTargetObserver:
         )
         return candidate_scores
 
-    def rebox_visible_target(
+    def record_scan_frame(
+        self,
+        frame: NavigationFrame,
+        context: ScanObservationContext,
+    ) -> None:
+        """只缓存扫描 RGB，供稍后的整批 Frontier 评分，不请求 VLM。"""
+        self._record_scan_image(frame, context)
+
+    def confirm_target(
         self,
         frame: NavigationFrame,
         goal: TargetSearchGoal,
-    ) -> TargetObservation:
-        """目标已确认可见时，只重做目标框请求。"""
+        observation: TargetObservation,
+    ) -> TargetConfirmationResult:
+        """机器人接近候选后，用当前 RGB 做一次二元最终确认。"""
         if frame.rgb is None:
-            return _uncertain("当前帧没有 RGB 图像，无法重新框选目标。")
+            return TargetConfirmationResult(
+                TargetConfirmation.UNCERTAIN,
+                "当前帧没有 RGB 图像，无法最终确认目标。",
+            )
         try:
             image = pack_rgb_image(frame.rgb)
+            if observation.bbox_norm is not None:
+                image = annotate_bbox_image(image, observation.bbox_norm)
+            prompt = build_target_confirmation_prompt(
+                goal.target_text,
+                observation.bbox_norm,
+            )
         except Exception as exc:
-            return _uncertain(_failure_reason("RGB 输入准备失败", exc))
-        return self._observe_visible_target(goal, image)
+            return TargetConfirmationResult(
+                TargetConfirmation.UNCERTAIN,
+                _failure_reason("最终确认输入准备失败", exc),
+            )
+
+        interaction = self._begin_interaction(
+            "target_confirmation",
+            prompt,
+            image,
+            bbox_norm=observation.bbox_norm,
+        )
+        assistant_text = ""
+        response_json = ""
+        try:
+            response_payload, response_json = self._request_model(prompt, image)
+            assistant_text = self._response_text(response_payload)
+            confirmation = parse_target_confirmation_response(assistant_text)
+        except Exception as exc:
+            self._finish_interaction(
+                interaction,
+                assistant_text=assistant_text,
+                response_json=response_json,
+                error=_exception_text(exc),
+            )
+            return TargetConfirmationResult(
+                TargetConfirmation.UNCERTAIN,
+                _failure_reason("目标最终确认失败", exc),
+            )
+
+        self._finish_interaction(
+            interaction,
+            assistant_text=assistant_text,
+            response_json=response_json,
+            parsed_result=json.dumps(
+                {"confirmation": confirmation.value},
+                ensure_ascii=False,
+            ),
+            bbox_norm=observation.bbox_norm,
+        )
+        return TargetConfirmationResult(confirmation)
 
     def _record_scan_image(
         self,
@@ -312,6 +373,7 @@ class OpenAICompatibleTargetObserver:
         task: str,
         prompt: str,
         image: VlmInputImage,
+        bbox_norm: Optional[Tuple[float, float, float, float]] = None,
     ) -> VlmInteraction:
         """在请求发出前记录完整输入，使慢请求期间也能在 Rerun 查看。"""
         self._interaction_index += 1
@@ -326,6 +388,7 @@ class OpenAICompatibleTargetObserver:
             max_output_tokens=self._config.max_output_tokens,
             prompt=prompt,
             image=image,
+            bbox_norm=bbox_norm,
         )
         self._emit_interaction(interaction)
         return interaction

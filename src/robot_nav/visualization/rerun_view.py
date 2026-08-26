@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
-from ..adapters.perception import VlmInteraction
+from ..adapters.perception import LocalPerceptionEvent, VlmInteraction
 from ..core.geometry import world_to_nearest_grid_cell
 from ..core.models import (
     DepthImage,
@@ -103,6 +104,7 @@ class RerunVisualizer:
 
         self._rr = rr
         self._target_text = target_text
+        self._log_lock = threading.RLock()
         self._sample_index = 0
         self._trajectory_xy: List[Tuple[float, float]] = []
         self._frontier_markers: Tuple[FrontierMarker, ...] = ()
@@ -114,6 +116,10 @@ class RerunVisualizer:
         if self._panel_font is None:
             _print_font_notice_once()
         rr.init("robot-nav")
+        _send_default_blueprint(
+            rr,
+            text_panels_as_images=self._panel_font is not None,
+        )
         rr.serve_web(open_browser=True, web_port=9090, ws_port=9877)
         print(
             "Rerun Web Viewer 地址："
@@ -127,6 +133,15 @@ class RerunVisualizer:
         result: NavigationResult,
     ) -> None:
         """记录算法决策帧及其观测、命令和状态。"""
+        with self._log_lock:
+            self._log_cycle(frame, observation, result)
+
+    def _log_cycle(
+        self,
+        frame: NavigationFrame,
+        observation: Optional[TargetObservation],
+        result: NavigationResult,
+    ) -> None:
         self._begin_sample()
         self._last_result = result
         self._update_frontier_markers(result)
@@ -144,6 +159,10 @@ class RerunVisualizer:
 
     def log_motion_frame(self, frame: NavigationFrame) -> None:
         """记录 Adapter 执行动作后的传感器帧，不推进算法状态。"""
+        with self._log_lock:
+            self._log_motion_frame(frame)
+
+    def _log_motion_frame(self, frame: NavigationFrame) -> None:
         self._begin_sample()
         self._log_rgb(frame, None)
         self._log_depth(frame)
@@ -152,18 +171,88 @@ class RerunVisualizer:
         if self._last_result is not None:
             self._log_world_hud(frame, self._last_result)
 
+    def log_local_perception(
+        self,
+        frame: NavigationFrame,
+        event: LocalPerceptionEvent,
+    ) -> None:
+        """更新后台检测面板，不重复写入导航帧、地图或轨迹。"""
+        with self._log_lock:
+            observation = event.observation
+            if self._sample_index == 0:
+                self._begin_sample()
+            else:
+                self._rr.set_time_sequence("frame", self._sample_index)
+            self._log_local_detection_image(frame, observation)
+            self._log_sam2_result(frame, observation)
+            confidence = (
+                "-"
+                if observation.confidence is None
+                else f"{observation.confidence:.3f}"
+            )
+            status_lines = (
+                "YOLO-World + SAM2 live detection",
+                f"sequence: {event.sequence_index}",
+                f"visibility: {observation.visibility.value}",
+                f"confidence: {confidence}",
+                f"candidates: {event.candidate_count}",
+                f"inference: {event.inference_s:.3f} s",
+                f"reason: {observation.reason or '-'}",
+            )
+            if self._panel_font is None:
+                self._rr.log(
+                    "model/yolo_world/status",
+                    self._rr.TextDocument(
+                        "\n".join(_ascii_only(line) for line in status_lines),
+                        media_type="text/plain",
+                    ),
+                )
+            else:
+                self._rr.log(
+                    "model/yolo_world/status",
+                    self._rr.Image(
+                        _render_status_image(self._panel_font, status_lines)
+                    ),
+                )
+
+    def _log_local_detection_image(
+        self,
+        frame: NavigationFrame,
+        observation: TargetObservation,
+    ) -> None:
+        """显示后台推理实际处理的 RGB，不覆盖主相机视图。"""
+        if frame.rgb is None or len(frame.rgb) == 0 or len(frame.rgb[0]) == 0:
+            self._clear("model/yolo_world/latest")
+            return
+
+        image = _rgb_to_numpy(frame.rgb)
+        if observation.target_mask is not None:
+            image = _overlay_target_mask(image, observation.target_mask)
+        else:
+            image = image.copy()
+        if observation.bbox_norm is not None:
+            _draw_bbox_outline(image, observation.bbox_norm, BBOX_RGB)
+        self._rr.log("model/yolo_world/latest", self._rr.Image(image))
+
     def log_vlm_interaction(
         self,
         interaction: VlmInteraction,
     ) -> None:
         """把一次 VLM 请求和回应收纳到同一张交互卡片。"""
+        with self._log_lock:
+            self._log_vlm_interaction(interaction)
+
+    def _log_vlm_interaction(
+        self,
+        interaction: VlmInteraction,
+    ) -> None:
         sample_index = self._vlm_samples.get(interaction.interaction_id)
         if sample_index is None:
-            self._begin_sample()
+            if self._sample_index == 0:
+                self._begin_sample()
             sample_index = self._sample_index
             self._vlm_samples[interaction.interaction_id] = sample_index
-        else:
-            self._rr.set_time_sequence("frame", sample_index)
+        self._rr.set_time_sequence("frame", sample_index)
         self._log_vlm_card(interaction)
 
     def _log_vlm_card(self, interaction: VlmInteraction) -> None:
@@ -197,7 +286,7 @@ class RerunVisualizer:
         frame: NavigationFrame,
         observation: Optional[TargetObservation],
     ) -> None:
-        """记录 RGB，叠加 SAM2 掩码，并把 VLM 目标框换算为像素框。"""
+        """记录 RGB，叠加 SAM2 掩码，并把检测框换算为像素框。"""
         if frame.rgb is None or len(frame.rgb) == 0 or len(frame.rgb[0]) == 0:
             self._rr.log("camera/rgb", self._rr.Clear(recursive=True))
             return
@@ -221,7 +310,7 @@ class RerunVisualizer:
                 mins=[box_min],
                 sizes=[box_size],
                 colors=[BBOX_RGB],
-                labels=["target"],
+                labels=[observation.source or "target"],
             ),
         )
 
@@ -286,7 +375,7 @@ class RerunVisualizer:
                     "mask: success",
                     f"size: {mask.shape[1]}x{mask.shape[0]}",
                     f"foreground: {foreground} px",
-                    "display: magenta mask, green VLM box",
+                    "display: magenta SAM2 mask, green detector box",
                     "image: latest successful result is retained",
                 )
             )
@@ -706,6 +795,56 @@ class RerunVisualizer:
         self._rr.log(path, self._rr.Clear(recursive=False))
 
 
+def _send_default_blueprint(
+    rr: Any,
+    *,
+    text_panels_as_images: bool,
+) -> None:
+    """固定调试布局，避免 Rerun 为每个实体自动创建散乱视图。"""
+    import rerun.blueprint as rrb
+
+    panel_view = (
+        rrb.Spatial2DView if text_panels_as_images else rrb.TextDocumentView
+    )
+    main_views = rrb.Vertical(
+        rrb.Spatial2DView(origin="/camera/rgb", name="RGB + target"),
+        rrb.Horizontal(
+            rrb.Spatial2DView(origin="/map/occupancy", name="Map"),
+            rrb.Spatial2DView(origin="/world", name="World"),
+            column_shares=[1, 1],
+        ),
+        row_shares=[1, 1],
+        name="Navigation",
+    )
+    debug_views = rrb.Tabs(
+        panel_view(origin="/navigation/status", name="Status"),
+        rrb.Spatial2DView(
+            origin="/model/yolo_world/latest",
+            name="YOLO + SAM2",
+        ),
+        rrb.Spatial2DView(
+            origin="/model/sam2/latest_success",
+            name="SAM2 mask",
+        ),
+        panel_view(origin="/model/interaction", name="VLM"),
+        rrb.Spatial2DView(origin="/camera/depth", name="Depth"),
+        active_tab=0,
+        name="Debug",
+    )
+    rr.send_blueprint(
+        rrb.Blueprint(
+            rrb.Horizontal(
+                main_views,
+                debug_views,
+                column_shares=[3, 2],
+            ),
+            auto_views=False,
+            auto_layout=False,
+            collapse_panels=True,
+        )
+    )
+
+
 def _rgb_to_numpy(rgb: RgbImage) -> np.ndarray:
     return np.asarray(rgb, dtype=np.uint8)
 
@@ -1030,7 +1169,11 @@ def _vlm_input_pil_image(font: object, interaction: VlmInteraction):
         outline=BBOX_RGB,
         width=line_width,
     )
-    label = "VLM 目标定位"
+    label = (
+        "YOLO-World 候选"
+        if interaction.task == "target_confirmation"
+        else "VLM 目标定位"
+    )
     label_box = draw.textbbox((0, 0), label, font=font)
     label_width = label_box[2] - label_box[0] + 8
     label_height = label_box[3] - label_box[1] + 6
@@ -1417,6 +1560,15 @@ def _status_lines(
 
     if observation is not None:
         lines.append(f"visibility: {observation.visibility.value}")
+        if observation.source:
+            confidence = (
+                "none"
+                if observation.confidence is None
+                else f"{observation.confidence:.3f}"
+            )
+            lines.append(
+                f"detector: source={observation.source}, confidence={confidence}"
+            )
         if observation.target_mask is not None:
             mask = _target_mask_to_numpy(observation.target_mask)
             if mask is None:

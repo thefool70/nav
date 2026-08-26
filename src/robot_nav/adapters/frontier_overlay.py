@@ -83,6 +83,75 @@ def pack_rgb_image(image: RgbImage) -> VlmInputImage:
     )
 
 
+def annotate_bbox_image(
+    image: VlmInputImage,
+    bbox_norm: Tuple[float, float, float, float],
+    color: Tuple[int, int, int] = (0, 255, 80),
+) -> VlmInputImage:
+    """在实际 VLM 输入上画归一化候选框，帮助模型区分待确认实例。"""
+    x_min, y_min, x_max, y_max = bbox_norm
+    if not (
+        0.0 <= x_min < x_max <= 1.0
+        and 0.0 <= y_min < y_max <= 1.0
+    ):
+        raise ValueError("bbox_norm 必须是 0 到 1 内的有效边界框")
+    expected_bytes = image.width_px * image.height_px * 3
+    if len(image.rgb_bytes) != expected_bytes:
+        raise ValueError("VLM RGB 数据长度与尺寸不匹配")
+
+    left = max(0, min(image.width_px - 1, math.floor(x_min * image.width_px)))
+    top = max(0, min(image.height_px - 1, math.floor(y_min * image.height_px)))
+    right = max(0, min(image.width_px - 1, math.ceil(x_max * image.width_px) - 1))
+    bottom = max(0, min(image.height_px - 1, math.ceil(y_max * image.height_px) - 1))
+    thickness = max(2, round(min(image.width_px, image.height_px) / 160))
+    annotated = bytearray(image.rgb_bytes)
+    _fill_rectangle(
+        annotated,
+        image.width_px,
+        image.height_px,
+        left,
+        top,
+        right - left + 1,
+        thickness,
+        color,
+    )
+    _fill_rectangle(
+        annotated,
+        image.width_px,
+        image.height_px,
+        left,
+        bottom - thickness + 1,
+        right - left + 1,
+        thickness,
+        color,
+    )
+    _fill_rectangle(
+        annotated,
+        image.width_px,
+        image.height_px,
+        left,
+        top,
+        thickness,
+        bottom - top + 1,
+        color,
+    )
+    _fill_rectangle(
+        annotated,
+        image.width_px,
+        image.height_px,
+        right - thickness + 1,
+        top,
+        thickness,
+        bottom - top + 1,
+        color,
+    )
+    return VlmInputImage(
+        width_px=image.width_px,
+        height_px=image.height_px,
+        rgb_bytes=bytes(annotated),
+    )
+
+
 def build_frontier_score_sheet(
     scan_images: Mapping[int, BufferedScanImage],
     candidates: Sequence[FrontierCandidate],
@@ -396,6 +465,7 @@ _DIGITS = {
 __all__ = [
     "BufferedScanImage",
     "FrontierImageMarker",
+    "annotate_bbox_image",
     "buffer_scan_image",
     "build_frontier_score_sheet",
     "pack_rgb_image",

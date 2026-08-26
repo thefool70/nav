@@ -1,22 +1,12 @@
-"""用 SAM2 把 VLM 目标框细化为像素掩码。"""
+"""用 SAM2 把检测器边界框细化为像素掩码。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
-
-from ..core.models import (
-    FrontierScoreRequest,
-    NavigationFrame,
-    TargetObservation,
-    TargetSearchGoal,
-    TargetVisibility,
-)
-from .perception import ScanObservationContext, TargetBoxObserver
-
 
 DEFAULT_SAM2_CHECKPOINT_PATH = Path(
     "data/models/sam2/sam2.1_hiera_small.pt"
@@ -31,78 +21,43 @@ class Sam2ObserverConfig:
     checkpoint_path: Path = DEFAULT_SAM2_CHECKPOINT_PATH
     model_config: str = DEFAULT_SAM2_MODEL_CONFIG
     device: str = "cuda"
-    max_box_attempts: int = 2
 
 
-class Sam2SegmentingTargetObserver:
-    """在 VLM 框选之后生成掩码，并在空掩码时请求重新框选。"""
+class Sam2BoxSegmenter:
+    """把一个归一化边界框转换为同尺寸布尔掩码。"""
 
     def __init__(
         self,
-        box_observer: TargetBoxObserver,
         config: Sam2ObserverConfig = Sam2ObserverConfig(),
     ) -> None:
         _validate_config(config)
-        self._box_observer = box_observer
-        self._config = config
         self._predictor = _build_predictor(config)
+        self._image_shape: Optional[Tuple[int, int]] = None
 
-    def observe(
+    def set_image(self, rgb: Any) -> Tuple[int, int]:
+        """编码一帧 RGB，并返回 (height, width) 供多个 YOLO 框复用。"""
+        image = _as_rgb_array(rgb)
+        self._predictor.set_image(image)
+        self._image_shape = image.shape[:2]
+        return self._image_shape
+
+    def segment(
         self,
-        frame: NavigationFrame,
-        goal: TargetSearchGoal,
-        scan_context: Optional[ScanObservationContext] = None,
-    ) -> TargetObservation:
-        """先取得 VLM 目标框，再用同一帧的 SAM2 掩码确认目标区域。"""
-        observation = self._box_observer.observe(frame, goal, scan_context)
-        image: Optional[np.ndarray] = None
-
-        for attempt_index in range(self._config.max_box_attempts):
-            if observation.visibility is not TargetVisibility.VISIBLE:
-                return observation
-            if observation.bbox_norm is None:
-                return _uncertain("VLM 判定目标可见，但没有返回目标框。")
-
-            try:
-                if image is None:
-                    image = _as_rgb_array(frame.rgb)
-                    self._predictor.set_image(image)
-                mask = self._predict_mask(
-                    observation.bbox_norm,
-                    image.shape[0],
-                    image.shape[1],
-                )
-            except Exception as exc:
-                return _uncertain(f"SAM2 分割失败：{_exception_text(exc)}")
-
-            if mask is not None:
-                return replace(observation, target_mask=mask)
-
-            if attempt_index + 1 < self._config.max_box_attempts:
-                observation = self._box_observer.rebox_visible_target(
-                    frame,
-                    goal,
-                )
-
-        return _uncertain(
-            "SAM2 对两次 VLM 目标框都没有生成掩码，等待下一帧重新观察。"
-        )
-
-    def score_frontiers(
-        self,
-        request: FrontierScoreRequest,
-        goal: TargetSearchGoal,
-    ) -> Mapping[str, float]:
-        """Frontier 评分仍完全交给被包装的 VLM 观察器。"""
-        return self._box_observer.score_frontiers(request, goal)
-
-    def _predict_mask(
-        self,
+        rgb: Any,
         bbox_norm: Tuple[float, float, float, float],
-        height: int,
-        width: int,
     ) -> Optional[np.ndarray]:
         """返回最佳布尔掩码；没有任何前景像素时返回 None。"""
+        self.set_image(rgb)
+        return self.segment_box(bbox_norm)
+
+    def segment_box(
+        self,
+        bbox_norm: Tuple[float, float, float, float],
+    ) -> Optional[np.ndarray]:
+        """在最近一次 set_image 的编码上分割一个边界框。"""
+        if self._image_shape is None:
+            raise RuntimeError("SAM2 尚未设置 RGB 图像")
+        height, width = self._image_shape
         x_min, y_min, x_max, y_max = bbox_norm
         box_pixels = np.asarray(
             [
@@ -176,19 +131,6 @@ def _validate_config(config: Sam2ObserverConfig) -> None:
         raise ValueError("model_config 必须为非空字符串")
     if not isinstance(config.device, str) or not config.device.strip():
         raise ValueError("device 必须为非空字符串")
-    if (
-        isinstance(config.max_box_attempts, bool)
-        or not isinstance(config.max_box_attempts, int)
-        or config.max_box_attempts < 1
-    ):
-        raise ValueError("max_box_attempts 必须为正整数")
-
-
-def _uncertain(reason: str) -> TargetObservation:
-    return TargetObservation(
-        visibility=TargetVisibility.UNCERTAIN,
-        reason=reason,
-    )
 
 
 def _exception_text(exc: Exception) -> str:
@@ -199,5 +141,5 @@ __all__ = [
     "DEFAULT_SAM2_CHECKPOINT_PATH",
     "DEFAULT_SAM2_MODEL_CONFIG",
     "Sam2ObserverConfig",
-    "Sam2SegmentingTargetObserver",
+    "Sam2BoxSegmenter",
 ]

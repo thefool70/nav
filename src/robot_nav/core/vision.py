@@ -10,7 +10,7 @@ import json
 import math
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
-from .models import TargetVisibility
+from .models import TargetConfirmation, TargetVisibility
 
 
 def build_target_visibility_prompt(target_text: str) -> str:
@@ -63,6 +63,33 @@ def build_target_grounding_prompt(target_text: str) -> str:
         "coordinate expressed on a 0-to-1000 image-relative scale. Return JSON "
         "only, without Markdown: "
         '{"bbox_2d":[100,100,900,900]}'
+    )
+
+
+def build_target_confirmation_prompt(
+    target_text: str,
+    bbox_norm: Optional[Tuple[float, float, float, float]],
+) -> str:
+    """构造机器人接近候选后的二元最终确认问题。"""
+    target = _target_json(target_text)
+    box_text = (
+        "not available"
+        if bbox_norm is None
+        else json.dumps(
+            [round(float(value), 4) for value in bbox_norm],
+            ensure_ascii=False,
+        )
+    )
+    return (
+        "The robot has approached a candidate detected for the target "
+        f"{target}. Inspect the current RGB image and decide whether the "
+        "candidate clearly matches the target description. The local detector's "
+        f"normalized candidate box [x_min,y_min,x_max,y_max] is {box_text}. "
+        "When available, the same candidate is outlined in green in the image. "
+        "Confirm only when the visible candidate itself matches; reject lookalikes, "
+        "background context, and ambiguous instances. Return exactly one JSON "
+        "object without Markdown: "
+        '{"confirmation":"confirmed"} or {"confirmation":"rejected"}'
     )
 
 
@@ -127,6 +154,17 @@ def parse_target_grounding_response(
     )
 
 
+def parse_target_confirmation_response(text: str) -> TargetConfirmation:
+    """解析最终确认；格式不合法时抛出 ValueError。"""
+    payload = _extract_json_mapping(text, "目标最终确认")
+    raw_confirmation = str(payload.get("confirmation", "")).strip().lower()
+    if raw_confirmation == TargetConfirmation.CONFIRMED.value:
+        return TargetConfirmation.CONFIRMED
+    if raw_confirmation == TargetConfirmation.REJECTED.value:
+        return TargetConfirmation.REJECTED
+    raise ValueError("目标最终确认必须是 confirmed 或 rejected")
+
+
 def _target_json(target_text: str) -> str:
     target = str(target_text).strip()
     if not target:
@@ -161,9 +199,11 @@ def _finite_float(value: Any) -> Optional[float]:
 
 __all__ = [
     "build_frontier_scores_prompt",
+    "build_target_confirmation_prompt",
     "build_target_grounding_prompt",
     "build_target_visibility_prompt",
     "parse_frontier_scores_response",
+    "parse_target_confirmation_response",
     "parse_target_grounding_response",
     "parse_target_visibility_response",
 ]

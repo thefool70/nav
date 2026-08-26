@@ -102,7 +102,7 @@ class TargetSearchGoal:
 
 
 class TargetVisibility(Enum):
-    """VLM 输出可见或不可见；UNCERTAIN 仅表示内部感知失败。"""
+    """感知输出可见或不可见；UNCERTAIN 仅表示内部感知失败。"""
 
     VISIBLE = "visible"
     NOT_VISIBLE = "not_visible"
@@ -111,16 +111,34 @@ class TargetVisibility(Enum):
 
 @dataclass(frozen=True)
 class TargetObservation:
-    """视觉模型对单帧语义目标的观测结果。
+    """感知模块对单帧语义目标的观测结果。
 
     bbox_norm 为归一化包围盒 (x_min, y_min, x_max, y_max)，取值 0-1；
     target_mask 是与 RGB/对齐深度同尺寸的目标像素掩码；reason 只记录观测
-    失败等内部诊断。
+    失败等内部诊断；source 和 confidence 用于区分 YOLO/VLM 等来源及其置信度。
     """
 
     visibility: TargetVisibility
     bbox_norm: Optional[Tuple[float, float, float, float]] = None
     target_mask: Optional[MaskImage] = None
+    reason: str = ""
+    source: str = ""
+    confidence: Optional[float] = None
+
+
+class TargetConfirmation(Enum):
+    """接近候选目标后的 VLM 最终确认结果。"""
+
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True)
+class TargetConfirmationResult:
+    """VLM 最终确认及其可选失败原因。"""
+
+    confirmation: TargetConfirmation
     reason: str = ""
 
 
@@ -190,6 +208,7 @@ class SearchPhase(Enum):
 
     SCANNING = "scanning"
     LOCALIZING_TARGET = "localizing_target"
+    VERIFYING_TARGET = "verifying_target"
     EXPLORING = "exploring"
     BACKTRACKING = "backtracking"
     COMPLETE = "complete"
@@ -232,7 +251,8 @@ class SearchState:
     按时间顺序保存观测节点，scan_evidence 保存最近一次扫描的逐方向观测
     证据；initial_scan_complete 区分首次 8×45° 环扫与后续 Frontier 视场扫描；
     active_node_id 为当前活跃观测节点，target_approach_attempts 为已尝试接近
-    目标的次数。"""
+    目标的次数；pending_target_world_xy 是等待最终确认的目标位置，
+    rejected_target_world_xy 保存已被 VLM 否决的位置。"""
 
     phase: SearchPhase = SearchPhase.SCANNING
     scan_headings_world_rad: Tuple[float, ...] = ()
@@ -242,6 +262,8 @@ class SearchState:
     active_node_id: Optional[str] = None
     target_approach_attempts: int = 0
     initial_scan_complete: bool = False
+    pending_target_world_xy: Optional[Tuple[float, float]] = None
+    rejected_target_world_xy: Tuple[Tuple[float, float], ...] = ()
 
 
 class NavigationStatus(Enum):
@@ -252,6 +274,7 @@ class NavigationStatus(Enum):
     NO_SOLUTION = "no_solution"
     NEEDS_OBSERVATION = "needs_observation"
     NEEDS_FRONTIER_SCORES = "needs_frontier_scores"
+    NEEDS_TARGET_CONFIRMATION = "needs_target_confirmation"
     MISSING_DATA = "missing_data"
 
 

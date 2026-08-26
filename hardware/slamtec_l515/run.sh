@@ -7,8 +7,13 @@ if (($# == 0)); then
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd -- "$script_dir/../.." && pwd)"
 realsense_dir="$(cd -- "$script_dir/../realsense" && pwd)"
 rsusb_prefix="$realsense_dir/.rsusb"
+
+# 项目中的模型和 Ultralytics 权重均使用相对项目根目录的固定位置。
+cd "$project_root"
+export YOLO_CONFIG_DIR="$project_root/data/ultralytics"
 
 configure_rsusb() {
     if [[ ! -f "$rsusb_prefix/lib/librealsense2.so.2.54.1" ]] || \

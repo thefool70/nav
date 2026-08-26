@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Tuple
@@ -14,7 +15,11 @@ from ...core.models import (
     Pose2D,
     RelativePoseCommand,
 )
-from ..chassis import MotionStalledError, RecoverableMotionError
+from ..chassis import (
+    MotionInterruptedError,
+    MotionStalledError,
+    RecoverableMotionError,
+)
 from ..realsense import L515Camera, L515Capture, L515Config
 from .observed_map import L515ObservedMap
 from .rest_client import (
@@ -29,6 +34,7 @@ from .rest_client import (
 
 MotionFrameCallback = Callable[[NavigationFrame], None]
 ActionProgressCallback = Callable[[str], None]
+MotionInterruptCallback = Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,10 @@ class _ActionStalledError(RuntimeError):
     """活跃 Hermes Action 长时间没有产生有效位姿变化。"""
 
 
+class _ActionInterruptedError(RuntimeError):
+    """后台本地感知请求中断当前 Hermes Action。"""
+
+
 class SlamtecL515Adapter:
     """由 Hermes 提供地图/位姿/规划控制，由外接 L515 提供 RGB-D。"""
 
@@ -73,13 +83,21 @@ class SlamtecL515Adapter:
         self,
         config: SlamtecL515Config,
         on_motion_frame: Optional[MotionFrameCallback] = None,
+        on_continuous_frame: Optional[MotionFrameCallback] = None,
         on_action_progress: Optional[ActionProgressCallback] = None,
+        should_interrupt_motion: Optional[MotionInterruptCallback] = None,
     ) -> None:
         _validate_config(config)
         self.config = config
         self._on_motion_frame = on_motion_frame
+        self._on_continuous_frame = on_continuous_frame
         self._on_action_progress = on_action_progress
+        self._should_interrupt_motion = should_interrupt_motion
         self._last_motion_frame_s = float("-inf")
+        self._frame_read_lock = threading.Lock()
+        self._continuous_frame_stop = threading.Event()
+        self._continuous_frame_thread: Optional[threading.Thread] = None
+        self._continuous_frame_error: Optional[BaseException] = None
         self._client = SlamtecRestClient(
             config.base_url, config.request_timeout_s
         )
@@ -97,6 +115,15 @@ class SlamtecL515Adapter:
         try:
             if config.camera is not None:
                 self._camera = L515Camera(config.camera)
+            if on_continuous_frame is not None:
+                if self._camera is None:
+                    raise ValueError("连续视觉帧需要启用 L515")
+                self._continuous_frame_thread = threading.Thread(
+                    target=self._continuous_frame_loop,
+                    name="slamtec-l515-frames",
+                    daemon=True,
+                )
+                self._continuous_frame_thread.start()
         except Exception:
             self.close()
             raise
@@ -133,24 +160,63 @@ class SlamtecL515Adapter:
 
     def read_frame(self) -> NavigationFrame:
         """组合 Hermes 地图/位姿与同机 L515 对齐 RGB-D。"""
-        capture = self._camera.capture() if self._camera is not None else None
-        pose = self._client.get_pose()
-        slamtec_map = self._client.get_explore_map()
-        obstacle_map = _to_obstacle_map(slamtec_map)
-        if capture is not None:
-            obstacle_map = self._observed_map.update(
-                obstacle_map,
-                pose,
-                capture,
-                self.config.camera_extrinsics_in_robot,
+        self._raise_continuous_frame_error()
+        return self._read_frame_locked()
+
+    def _read_frame_locked(self) -> NavigationFrame:
+        """串行读取相机和 Hermes，避免主循环与连续帧线程争用设备。"""
+        with self._frame_read_lock:
+            capture = (
+                self._camera.capture()
+                if self._camera is not None
+                else None
             )
-        return _build_navigation_frame(
-            timestamp_s=time.monotonic(),
-            pose=pose,
-            obstacle_map=obstacle_map,
-            capture=capture,
-            camera_extrinsics=self.config.camera_extrinsics_in_robot,
-        )
+            pose = self._client.get_pose()
+            slamtec_map = self._client.get_explore_map()
+            obstacle_map = _to_obstacle_map(slamtec_map)
+            if capture is not None:
+                obstacle_map = self._observed_map.update(
+                    obstacle_map,
+                    pose,
+                    capture,
+                    self.config.camera_extrinsics_in_robot,
+                )
+            return _build_navigation_frame(
+                timestamp_s=time.monotonic(),
+                pose=pose,
+                obstacle_map=obstacle_map,
+                capture=capture,
+                camera_extrinsics=self.config.camera_extrinsics_in_robot,
+            )
+
+    def _continuous_frame_loop(self) -> None:
+        """导航全程采集最新帧；慢 VLM 请求期间也保持本地目标检测。"""
+        callback = self._on_continuous_frame
+        if callback is None:
+            return
+        while not self._continuous_frame_stop.is_set():
+            try:
+                callback(self._read_frame_locked())
+            except BaseException as exc:
+                self._continuous_frame_error = exc
+                self._report_action_progress(
+                    "Hermes/L515 连续视觉帧停止："
+                    f"{str(exc) or type(exc).__name__}"
+                )
+                return
+            self._continuous_frame_stop.wait(
+                self.config.motion_frame_interval_s
+            )
+
+    def _raise_continuous_frame_error(self) -> None:
+        """把后台设备错误带回主循环，而不是静默停止实时检测。"""
+        error = self._continuous_frame_error
+        if error is None:
+            return
+        raise RuntimeError(
+            "Hermes/L515 连续视觉帧失败："
+            f"{str(error) or type(error).__name__}"
+        ) from error
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
         """把机器人局部相对位姿转换为 Hermes 的全局规划与原地转向。"""
@@ -278,9 +344,16 @@ class SlamtecL515Adapter:
 
             if abort_error is not None:
                 detail = f"{detail}；终止 Action 失败：{abort_error}"
-            self._report_action_progress(
-                f"Hermes Action #{action_id} {action_label} 失败：{detail}"
+            outcome = (
+                "被实时目标检测中断"
+                if isinstance(exc, _ActionInterruptedError)
+                else "失败"
             )
+            self._report_action_progress(
+                f"Hermes Action #{action_id} {action_label} {outcome}：{detail}"
+            )
+            if isinstance(exc, _ActionInterruptedError):
+                raise MotionInterruptedError(str(exc)) from exc
             if action_name == self._move_to_action and isinstance(
                 exc, _ActionStalledError
             ):
@@ -344,7 +417,15 @@ class SlamtecL515Adapter:
         requires_translation: bool,
     ) -> None:
         """采样活跃 Action 位姿，定期报告并识别真正的底盘停滞。"""
+        self._raise_continuous_frame_error()
         self._publish_motion_frame()
+        if (
+            self._should_interrupt_motion is not None
+            and self._should_interrupt_motion()
+        ):
+            raise _ActionInterruptedError(
+                f"Hermes Action {action_id} 被实时目标检测中断"
+            )
         now = time.monotonic()
         if (
             now - state.last_sample_s
@@ -395,6 +476,8 @@ class SlamtecL515Adapter:
 
     def _publish_motion_frame(self, force: bool = False) -> None:
         """运动期间按固定间隔向 Rerun 发布真实底盘帧。"""
+        if self._on_continuous_frame is not None:
+            return
         if self._on_motion_frame is None:
             return
         now = time.monotonic()
@@ -406,6 +489,24 @@ class SlamtecL515Adapter:
 
     def close(self) -> None:
         """幂等关闭外接 L515；REST 客户端没有常驻连接。"""
+        self._continuous_frame_stop.set()
+        frame_thread = self._continuous_frame_thread
+        self._continuous_frame_thread = None
+        if frame_thread is not None and frame_thread is not threading.current_thread():
+            camera_timeout_s = (
+                self.config.camera.wait_timeout_s
+                if self.config.camera is not None
+                else 0.0
+            )
+            frame_thread.join(
+                timeout=min(
+                    30.0,
+                    2.0 * self.config.request_timeout_s
+                    + camera_timeout_s
+                    + 2.0,
+                )
+            )
+        self._on_continuous_frame = None
         camera = self._camera
         self._camera = None
         if camera is not None:

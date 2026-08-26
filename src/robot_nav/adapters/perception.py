@@ -4,11 +4,12 @@
 """
 
 from dataclasses import dataclass
-from typing import Mapping, Optional, Protocol, Tuple
+from typing import Mapping, Optional, Protocol, Tuple, runtime_checkable
 
 from ..core.models import (
     FrontierScoreRequest,
     NavigationFrame,
+    TargetConfirmationResult,
     TargetObservation,
     TargetSearchGoal,
 )
@@ -52,8 +53,19 @@ class VlmInteraction:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class LocalPerceptionEvent:
+    """一次 YOLO-World + SAM2 推理摘要，不复制 RGB-D 数据。"""
+
+    sequence_index: int
+    frame_timestamp_s: float
+    observation: TargetObservation
+    inference_s: float
+    candidate_count: int
+
+
 class TargetObserver(Protocol):
-    """单帧目标观测与一轮 Frontier 批量评分接口。"""
+    """目标观测、Frontier 批量评分与最终确认接口。"""
 
     def observe(
         self,
@@ -72,22 +84,45 @@ class TargetObserver(Protocol):
         """一次返回本轮全部 Frontier ID 到 0-1 分数的映射。"""
         ...
 
-
-class TargetBoxObserver(TargetObserver, Protocol):
-    """能够在已确认目标可见时重新框选目标的观察器。"""
-
-    def rebox_visible_target(
+    def confirm_target(
         self,
         frame: NavigationFrame,
         goal: TargetSearchGoal,
-    ) -> TargetObservation:
-        """跳过可见性判断，直接在同一帧中重新请求目标框。"""
+        observation: TargetObservation,
+    ) -> TargetConfirmationResult:
+        """机器人接近候选后，最终确认它是否确为目标。"""
+        ...
+
+
+@runtime_checkable
+class ContinuousTargetObserver(TargetObserver, Protocol):
+    """运动期间可接收最新帧并请求中断当前动作的本地观察器。"""
+
+    def submit_motion_frame(
+        self,
+        frame: NavigationFrame,
+        goal: TargetSearchGoal,
+    ) -> None:
+        """非阻塞提交运动帧；尚未处理的旧运动帧可以被覆盖。"""
+        ...
+
+    def set_motion_interrupt_enabled(self, enabled: bool) -> None:
+        """仅在非目标接近动作中允许本地检测中断当前运动。"""
+        ...
+
+    def should_interrupt_motion(self) -> bool:
+        """有启用后产生的新目标检测时返回 True。"""
+        ...
+
+    def close(self) -> None:
+        """停止后台推理线程并释放模型。"""
         ...
 
 
 __all__ = [
+    "ContinuousTargetObserver",
+    "LocalPerceptionEvent",
     "ScanObservationContext",
-    "TargetBoxObserver",
     "TargetObserver",
     "VlmInputImage",
     "VlmInteraction",

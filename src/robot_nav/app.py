@@ -4,10 +4,15 @@ from typing import Callable, Optional
 
 from .adapters.chassis import (
     ChassisInterface,
+    MotionInterruptedError,
     MotionStalledError,
     RecoverableMotionError,
 )
-from .adapters.perception import ScanObservationContext, TargetObserver
+from .adapters.perception import (
+    ContinuousTargetObserver,
+    ScanObservationContext,
+    TargetObserver,
+)
 from .core.models import (
     NavigationFrame,
     NavigationResult,
@@ -15,9 +20,11 @@ from .core.models import (
     SearchState,
     TargetObservation,
     TargetSearchGoal,
+    TargetVisibility,
 )
 from .core.navigator import (
     continue_after_motion_stall,
+    continue_after_target_detection,
     navigate,
     recover_from_motion_failure,
 )
@@ -47,16 +54,40 @@ def run_navigation_cycle(
     frame = chassis.read_frame()
     result = navigate(frame, goal, state)
     used_observation: Optional[TargetObservation] = None
-    if (
-        observer is not None
-        and result.status is NavigationStatus.NEEDS_OBSERVATION
-    ):
+    should_observe = observer is not None and (
+        isinstance(observer, ContinuousTargetObserver)
+        or result.status in {
+            NavigationStatus.NEEDS_OBSERVATION,
+            NavigationStatus.NEEDS_TARGET_CONFIRMATION,
+        }
+    )
+    if should_observe and observer is not None:
         used_observation = observer.observe(
             frame,
             goal,
             _scan_observation_context(result),
         )
         result = navigate(frame, goal, state, used_observation)
+    if (
+        observer is not None
+        and result.status is NavigationStatus.NEEDS_TARGET_CONFIRMATION
+    ):
+        confirmation = observer.confirm_target(
+            frame,
+            goal,
+            used_observation
+            or TargetObservation(
+                visibility=TargetVisibility.UNCERTAIN,
+                reason="最终确认缺少本地检测结果。",
+            ),
+        )
+        result = navigate(
+            frame,
+            goal,
+            result.state,
+            observation=used_observation,
+            target_confirmation=confirmation,
+        )
     if (
         observer is not None
         and result.status is NavigationStatus.NEEDS_FRONTIER_SCORES
@@ -75,8 +106,22 @@ def run_navigation_cycle(
     if on_cycle is not None:
         on_cycle(frame, used_observation, result)
     if result.status is NavigationStatus.OK and result.command is not None:
+        continuous_observer = (
+            observer
+            if isinstance(observer, ContinuousTargetObserver)
+            else None
+        )
+        if continuous_observer is not None:
+            continuous_observer.set_motion_interrupt_enabled(
+                result.debug.stage != "target.approach"
+            )
         try:
             chassis.send_relative_pose(result.command)
+        except MotionInterruptedError as exc:
+            continued = continue_after_target_detection(result, str(exc))
+            if continued is None:
+                raise
+            return continued
         except MotionStalledError as exc:
             continued = continue_after_motion_stall(result, str(exc))
             if continued is None:
@@ -87,6 +132,9 @@ def run_navigation_cycle(
             if recovered is None:
                 raise
             return recovered
+        finally:
+            if continuous_observer is not None:
+                continuous_observer.set_motion_interrupt_enabled(False)
     return result
 
 

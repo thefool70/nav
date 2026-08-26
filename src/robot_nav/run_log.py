@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional, TextIO, Tuple
 
+from .adapters.perception import LocalPerceptionEvent
 from .core.geometry import world_to_nearest_grid_cell
 from .core.models import (
     NavigationFrame,
@@ -42,6 +44,7 @@ class NavigationRunLogger:
             "a", encoding="utf-8"
         )
         self._current_cycle: Optional[int] = None
+        self._write_lock = threading.Lock()
 
     def log_run_start(
         self,
@@ -103,6 +106,23 @@ class NavigationRunLogger:
             message=str(message),
         )
 
+    def log_local_perception(
+        self,
+        frame: NavigationFrame,
+        event: LocalPerceptionEvent,
+    ) -> None:
+        """记录运动期间本地检测摘要，不复制 RGB、深度或掩码。"""
+        self._write(
+            "local_perception",
+            cycle=self._current_cycle,
+            sequence=event.sequence_index,
+            frame_timestamp_s=event.frame_timestamp_s,
+            pose=_pose_summary(frame.pose),
+            observation=_observation_summary(event.observation),
+            inference_s=event.inference_s,
+            candidate_count=event.candidate_count,
+        )
+
     def log_error(self, exc: BaseException) -> None:
         self._write(
             "run_error",
@@ -123,33 +143,35 @@ class NavigationRunLogger:
         )
 
     def close(self) -> None:
-        stream = self._stream
-        self._stream = None
-        if stream is not None:
-            stream.close()
+        with self._write_lock:
+            stream = self._stream
+            self._stream = None
+            if stream is not None:
+                stream.close()
 
     def _write(self, event: str, **payload: Any) -> None:
-        stream = self._stream
-        if stream is None:
-            raise RuntimeError("运行日志已经关闭")
-        record = {
-            "event": event,
-            "wall_time": datetime.now().astimezone().isoformat(
-                timespec="milliseconds"
-            ),
-            "monotonic_s": time.monotonic(),
-            **payload,
-        }
-        stream.write(
-            json.dumps(
-                _jsonable(record),
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
+        with self._write_lock:
+            stream = self._stream
+            if stream is None:
+                raise RuntimeError("运行日志已经关闭")
+            record = {
+                "event": event,
+                "wall_time": datetime.now().astimezone().isoformat(
+                    timespec="milliseconds"
+                ),
+                "monotonic_s": time.monotonic(),
+                **payload,
+            }
+            stream.write(
+                json.dumps(
+                    _jsonable(record),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
             )
-            + "\n"
-        )
-        stream.flush()
+            stream.flush()
 
 
 def _result_summary(
@@ -283,6 +305,8 @@ def _observation_summary(
         "bbox_norm": observation.bbox_norm,
         "target_mask": _mask_summary(observation.target_mask),
         "reason": observation.reason,
+        "source": observation.source,
+        "confidence": observation.confidence,
     }
 
 
@@ -343,6 +367,8 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
         ),
         "initial_scan_complete": state.initial_scan_complete,
         "target_approach_attempts": state.target_approach_attempts,
+        "pending_target_world_xy": state.pending_target_world_xy,
+        "rejected_target_world_xy": state.rejected_target_world_xy,
         "history_node_count": len(state.observation_history),
         "history_direction_counts": direction_counts,
         "active_node_id": state.active_node_id,
