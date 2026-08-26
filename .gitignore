@@ -8,5 +8,12 @@ dist/
 *.egg-info/
 .eggs/
 data/
+weights/
+
+# Local reference materials
+/ZSON.zip
+/slamtech/
+/wheeltech/
+
 hardware/realsense/.rsusb/
 slam/s100_l515/.rsusb/
