@@ -173,6 +173,30 @@ class SlamtecRestClient:
             raise RuntimeError("Hermes Action 创建结果缺少整数 action_id")
         return action_id
 
+    def get_remaining_path(self) -> Tuple[Tuple[float, float], ...]:
+        """读取当前 Action 的剩余地图系路径点。"""
+        payload = _require_mapping(
+            self._request_json("GET", "/api/core/motion/v1/path"),
+            "剩余路径",
+        )
+        raw_points = payload.get("path_points")
+        if not isinstance(raw_points, list):
+            raise RuntimeError("Hermes 剩余路径缺少 path_points 数组")
+
+        points = []
+        for index, raw_point in enumerate(raw_points):
+            if not isinstance(raw_point, list) or len(raw_point) != 2:
+                raise RuntimeError(
+                    f"Hermes 剩余路径点 {index} 不是 [x, y]"
+                )
+            x_m, y_m = raw_point
+            if not _is_finite_number(x_m) or not _is_finite_number(y_m):
+                raise RuntimeError(
+                    f"Hermes 剩余路径点 {index} 包含非有限坐标"
+                )
+            points.append((float(x_m), float(y_m)))
+        return tuple(points)
+
     def wait_for_action(
         self,
         action_id: int,
@@ -371,6 +395,14 @@ def _is_positive_finite(value: Any) -> bool:
         and isinstance(value, (int, float))
         and math.isfinite(value)
         and value > 0.0
+    )
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
     )
 
 

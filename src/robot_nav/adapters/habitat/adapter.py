@@ -12,8 +12,9 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
+from ..chassis import RecoverableMotionError
 from ...core.models import (
     CameraIntrinsics,
     NavigationFrame,
@@ -24,6 +25,13 @@ from ...core.models import (
 
 
 MotionFrameCallback = Callable[[NavigationFrame], None]
+MotionPlanCallback = Callable[
+    [
+        Optional[Tuple[float, float]],
+        Tuple[Tuple[float, float], ...],
+    ],
+    None,
+]
 
 
 @dataclass(frozen=True)
@@ -48,10 +56,12 @@ class HabitatChassisAdapter:
         self,
         config: HabitatConfig,
         on_motion_frame: Optional[MotionFrameCallback] = None,
+        on_motion_plan: Optional[MotionPlanCallback] = None,
     ) -> None:
         self._validate_config(config)
         self.config = config
         self._on_motion_frame = on_motion_frame
+        self._on_motion_plan = on_motion_plan
         self._habitat_sim = self._import_habitat_sim()
         self._sim = None
         self._agent = None
@@ -342,8 +352,17 @@ class HabitatChassisAdapter:
         target_yaw_world = start_pose.yaw_rad + command.yaw_rad
         translation_m = math.hypot(command.forward_m, command.left_m)
         if translation_m > 1.0e-9:
-            target = self._plan_relative_target(state, start_pose, command)
-            self._follow_path(target)
+            target, path_world_xy = self._plan_relative_target(
+                state,
+                start_pose,
+                command,
+            )
+            target_world_xy = (float(target[0]), -float(target[2]))
+            self._report_motion_plan(target_world_xy, path_world_xy)
+            try:
+                self._follow_path(target)
+            finally:
+                self._report_motion_plan(None, ())
         self._turn_to_world_yaw(target_yaw_world)
 
     def _plan_relative_target(
@@ -351,8 +370,8 @@ class HabitatChassisAdapter:
         state: Any,
         pose: Pose2D,
         command: RelativePoseCommand,
-    ) -> Any:
-        """把相对平移投影到 navmesh，确认可达后返回目标点。"""
+    ) -> Tuple[Any, Tuple[Tuple[float, float], ...]]:
+        """把相对平移投影到 navmesh，返回实际目标和最短路径。"""
         cosine = math.cos(pose.yaw_rad)
         sine = math.sin(pose.yaw_rad)
         world_dx = command.forward_m * cosine - command.left_m * sine
@@ -363,7 +382,9 @@ class HabitatChassisAdapter:
         requested[2] = float(state.position[2]) - world_dy
         snapped = self._pathfinder.snap_point(requested)
         if not all(_is_finite(snapped[index]) for index in range(3)):
-            raise RuntimeError("Habitat 无法把相对位姿目标投影到 navmesh")
+            raise RecoverableMotionError(
+                "Habitat 无法把相对位姿目标投影到 navmesh"
+            )
 
         snap_error = math.hypot(
             float(snapped[0]) - float(requested[0]),
@@ -371,14 +392,22 @@ class HabitatChassisAdapter:
         )
         tolerance = max(0.25, 2.0 * self.config.map_resolution_m)
         if snap_error > tolerance:
-            raise RuntimeError("Habitat 相对位姿目标离可导航区域过远")
+            raise RecoverableMotionError(
+                "Habitat 相对位姿目标离可导航区域过远"
+            )
 
         shortest_path = self._habitat_sim.ShortestPath()
         shortest_path.requested_start = state.position
         shortest_path.requested_end = snapped
         if not self._pathfinder.find_path(shortest_path) or not shortest_path.points:
-            raise RuntimeError("Habitat 找不到相对位姿目标的可行路径")
-        return snapped
+            raise RecoverableMotionError(
+                "Habitat 找不到相对位姿目标的可行路径"
+            )
+        path_world_xy = tuple(
+            (float(point[0]), -float(point[2]))
+            for point in shortest_path.points
+        )
+        return snapped, path_world_xy
 
     def _follow_path(self, target: Any) -> None:
         """用 Habitat GreedyGeodesicFollower 执行到目标的离散动作。"""
@@ -386,7 +415,9 @@ class HabitatChassisAdapter:
         try:
             actions = follower.find_path(target)
         except self._habitat_sim.errors.GreedyFollowerError as exc:
-            raise RuntimeError("Habitat 无法把 navmesh 路径转换为动作") from exc
+            raise RecoverableMotionError(
+                "Habitat 无法把 navmesh 路径转换为动作"
+            ) from exc
 
         for action in actions:
             if action is None:
@@ -424,6 +455,20 @@ class HabitatChassisAdapter:
         self._update_observed_cells(pose)
         if self._on_motion_frame is not None:
             self._on_motion_frame(self._build_navigation_frame(observations, pose))
+
+    def _report_motion_plan(
+        self,
+        target_world_xy: Optional[Tuple[float, float]],
+        path_world_xy: Tuple[Tuple[float, float], ...],
+    ) -> None:
+        """发布 navmesh 实际目标和路径；显示失败不影响仿真运动。"""
+        callback = self._on_motion_plan
+        if callback is None:
+            return
+        try:
+            callback(target_world_xy, path_world_xy)
+        except Exception:
+            self._on_motion_plan = None
 
     def _require_open(self) -> None:
         """拒绝在 Adapter 关闭后继续读写仿真。"""

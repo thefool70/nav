@@ -55,6 +55,7 @@ from .core.models import (
     NavigationResult,
     NavigationStatus,
     RelativePoseCommand,
+    SearchMode,
     SearchPhase,
     TargetSearchGoal,
 )
@@ -102,6 +103,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     api_key = _resolve_vlm_api_key()
+    if (
+        getattr(args, "search_mode", SearchMode.OBJECT.value)
+        == SearchMode.SCENE.value
+        and getattr(args, "debug_random_score", False)
+    ):
+        parser.error("场景搜索需要 VLM，不能与 --debug-random-score 同时使用")
 
     if args.adapter == "habitat":
         if not args.debug_random_score and not api_key:
@@ -174,6 +181,12 @@ def _build_parser() -> argparse.ArgumentParser:
     habitat = adapters.add_parser("habitat", help="使用 Habitat-Sim Adapter")
     habitat.add_argument("--scene", required=True, help="Habitat .glb 场景路径")
     _add_navigation_arguments(habitat, target_required=True)
+    habitat.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="Habitat navmesh 随机起点种子；相同场景和种子可复现实验",
+    )
     habitat.add_argument(
         "--gpu-device-id",
         type=int,
@@ -475,7 +488,13 @@ def _add_navigation_arguments(
     parser.add_argument(
         "--target",
         required=target_required,
-        help="要搜索的目标描述",
+        help="要搜索的具体物体或目的场景描述",
+    )
+    parser.add_argument(
+        "--search-mode",
+        choices=tuple(mode.value for mode in SearchMode),
+        default=SearchMode.OBJECT.value,
+        help="搜索具体物体 object，或寻找目的场景 scene；默认 object",
     )
     parser.add_argument(
         "--max-cycles",
@@ -507,6 +526,7 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
         on_motion_frame,
         on_vlm_interaction,
         _,
+        on_motion_plan,
     ) = _build_visualization(args)
     observer = _build_observer(
         args.debug_random_score,
@@ -515,15 +535,18 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
     )
     config = HabitatConfig(
         scene_path=args.scene,
+        seed=args.seed,
         gpu_device_id=args.gpu_device_id,
     )
     with HabitatChassisAdapter(
         config,
         on_motion_frame=on_motion_frame,
+        on_motion_plan=on_motion_plan,
     ) as chassis:
         return _run_navigation(
             chassis,
             args.target,
+            SearchMode(args.search_mode),
             args.max_cycles,
             observer,
             on_cycle,
@@ -537,6 +560,7 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
         on_cycle,
         on_motion_frame,
         on_vlm_interaction,
+        _,
         _,
     ) = _build_visualization(args)
     config = S100L515Config(
@@ -571,6 +595,7 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
         return _run_navigation(
             chassis,
             args.target,
+            SearchMode(args.search_mode),
             args.max_cycles,
             observer,
             on_cycle,
@@ -590,6 +615,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             on_motion_frame,
             on_vlm_interaction,
             on_local_perception,
+            on_motion_plan,
         ) = _build_visualization(args)
         if not args.preflight_only:
             on_local_perception = _local_perception_callback(
@@ -612,7 +638,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             on_continuous_frame = _continuous_perception_frame_callback(
                 on_motion_frame,
                 continuous_observer,
-                TargetSearchGoal(args.target),
+                TargetSearchGoal(args.target, SearchMode(args.search_mode)),
             )
         config = SlamtecL515Config(
             base_url=args.base_url,
@@ -636,6 +662,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             on_motion_frame=on_motion_frame,
             on_continuous_frame=on_continuous_frame,
             on_action_progress=action_progress,
+            on_motion_plan=on_motion_plan,
             should_interrupt_motion=(
                 continuous_observer.should_interrupt_motion
                 if continuous_observer is not None
@@ -669,6 +696,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
                 return_code = _run_navigation(
                     chassis,
                     args.target,
+                    SearchMode(args.search_mode),
                     args.max_cycles,
                     observer,
                     on_cycle,
@@ -699,7 +727,7 @@ def _move_slamtec_forward_on_start(chassis: SlamtecL515Adapter) -> None:
     """Hermes 正式导航启动后先沿当前底盘朝向规划前移 1 m。"""
     print(
         "Hermes 启动动作：先沿当前朝向前移 "
-        f"{SLAMTEC_STARTUP_FORWARD_M:.1f} m，再开始目标搜索。"
+        f"{SLAMTEC_STARTUP_FORWARD_M:.1f} m，再开始语义搜索。"
     )
     chassis.send_relative_pose(
         RelativePoseCommand(forward_m=SLAMTEC_STARTUP_FORWARD_M)
@@ -724,6 +752,7 @@ def _build_slamtec_run_logger(
         max_cycles=args.max_cycles,
         configuration={
             "base_url": args.base_url,
+            "search_mode": args.search_mode,
             "debug_random_score": args.debug_random_score,
             "debug_frontier": args.debug_frontier,
             "rerun_enabled": not args.no_rerun,
@@ -731,10 +760,16 @@ def _build_slamtec_run_logger(
             "action_stall_timeout_s": args.action_stall_timeout_s,
             "startup_forward_m": SLAMTEC_STARTUP_FORWARD_M,
             "minimum_localization_quality": args.min_localization_quality,
-            "sam2_enabled": not args.debug_random_score,
+            "sam2_enabled": (
+                not args.debug_random_score
+                and args.search_mode == SearchMode.OBJECT.value
+            ),
             "sam2_checkpoint": args.sam2_checkpoint,
             "sam2_device": args.sam2_device,
-            "yolo_world_enabled": not args.debug_random_score,
+            "yolo_world_enabled": (
+                not args.debug_random_score
+                and args.search_mode == SearchMode.OBJECT.value
+            ),
             "yolo_world_model": args.yolo_world_model,
             "yolo_device": args.yolo_device,
             "yolo_class": args.yolo_class or args.target,
@@ -966,6 +1001,7 @@ def _mount_value(
 def _run_navigation(
     chassis: ChassisInterface,
     target_text: str,
+    search_mode: SearchMode,
     max_cycles: int,
     observer: TargetObserver,
     on_cycle,
@@ -973,7 +1009,7 @@ def _run_navigation(
     run_logger: Optional[NavigationRunLogger] = None,
 ) -> int:
     """重复执行环境无关的单周期入口，直到完成、失败或达到上限。"""
-    goal = TargetSearchGoal(target_text)
+    goal = TargetSearchGoal(target_text, search_mode)
     state = None
     for cycle_index in range(1, max_cycles + 1):
         cycle_callback = _with_frontier_debug(on_cycle, debug_frontier)
@@ -999,6 +1035,7 @@ def _run_navigation(
             return 0
         if result.status in {
             NavigationStatus.NEEDS_OBSERVATION,
+            NavigationStatus.NEEDS_SCENE_ASSESSMENT,
             NavigationStatus.NEEDS_FRONTIER_SCORES,
             NavigationStatus.NEEDS_TARGET_CONFIRMATION,
         }:
@@ -1081,7 +1118,7 @@ def _print_frontier_debug(frame, result: NavigationResult) -> None:
             f"world=({candidate['world_x_m']:.3f}, "
             f"{candidate['world_y_m']:.3f}) m "
             f"cells={candidate['frontier_cell_count']} "
-            f"length={candidate['frontier_length_m']:.3f} m "
+            f"span={candidate['frontier_span_m']:.3f} m "
             f"path={candidate['path_distance_m']:.3f} m "
             f"distance_penalty={candidate['distance_penalty']:.3f} "
             f"vlm={semantic_text} "
@@ -1122,13 +1159,19 @@ def _build_slamtec_observer(
     on_vlm_interaction=None,
     on_local_perception=None,
 ) -> TargetObserver:
-    """Hermes 用 YOLO-World + SAM2 常驻检测，VLM 只评分和最终确认。"""
+    """按搜索模式选择整轮场景 VLM，或 YOLO+SAM2 物体观察器。"""
     semantic_advisor = _build_observer(
         args.debug_random_score,
         api_key,
         on_vlm_interaction,
     )
     if args.debug_random_score:
+        return semantic_advisor
+    if args.search_mode == SearchMode.SCENE.value:
+        print(
+            "目的场景搜索已启用：整轮扫描后由 VLM 判断当前位置，"
+            "不加载 YOLO-World 或 SAM2。"
+        )
         return semantic_advisor
     if not isinstance(semantic_advisor, OpenAICompatibleTargetObserver):
         raise RuntimeError("当前 VLM 观察器不支持 Frontier 评分与最终确认")
@@ -1174,7 +1217,7 @@ def _continuous_perception_frame_callback(
 
 def _build_visualization(args: argparse.Namespace):
     if args.no_rerun or getattr(args, "preflight_only", False):
-        return None, None, None, None
+        return None, None, None, None, None
 
     from .visualization import RerunVisualizer
 
@@ -1184,6 +1227,7 @@ def _build_visualization(args: argparse.Namespace):
         visualizer.log_motion_frame,
         visualizer.log_vlm_interaction,
         visualizer.log_local_perception,
+        visualizer.log_motion_plan,
     )
 
 

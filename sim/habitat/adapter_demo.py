@@ -12,6 +12,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="读取一帧 Habitat 导航数据")
     parser.add_argument("--scene", required=True, help="Habitat .glb 场景路径")
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="Habitat navmesh 随机起点种子",
+    )
+    parser.add_argument(
         "--gpu-device-id",
         type=int,
         default=-1,
@@ -21,6 +27,7 @@ def main() -> None:
 
     config = HabitatConfig(
         scene_path=args.scene,
+        seed=args.seed,
         gpu_device_id=args.gpu_device_id,
     )
     with HabitatChassisAdapter(config) as chassis:

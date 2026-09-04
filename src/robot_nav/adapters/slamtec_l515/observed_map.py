@@ -1,9 +1,9 @@
-"""用 L515 水平 FOV 与障碍遮挡筛选 Hermes 地图，再膨胀禁行区域。"""
+"""用 L515 理论水平 FOV 筛选 Hermes 地图，再膨胀禁行区域。"""
 
 from __future__ import annotations
 
 import math
-from typing import Any, Optional, Set, Tuple
+from typing import Optional, Set, Tuple
 
 from ...core.geometry import (
     grid_cell_center_to_world,
@@ -21,13 +21,10 @@ WorldGridKey = Tuple[int, int]
 HERMES_OBSTACLE_INFLATION_RADIUS_M = 0.36
 START_AREA_RADIUS_M = 0.50
 MAX_FOV_DISTANCE_M = 5.0
-# 邻近 3 列消除单列深度孔洞，15 cm 余量吸收深度噪声与地图格误差。
-FOV_DEPTH_MARGIN_M = 0.15
-FOV_DEPTH_COLUMN_RADIUS_PX = 1
 
 
 class L515ObservedMap:
-    """累计未被障碍遮挡的 FOV 与出生点地图格，并输出膨胀有效图。"""
+    """累计理论 FOV 与出生点地图格，并输出膨胀有效图。"""
 
     def __init__(
         self,
@@ -177,10 +174,9 @@ def _cells_in_camera_fov(
     camera_extrinsics: CameraExtrinsics,
     max_distance_m: float,
 ) -> Set[Cell]:
-    """返回水平 FOV 内且未被 L515 深度视界截断的地图格。"""
-    _, width = capture.depth_m.shape
+    """返回理论水平 FOV 内、距相机不超过上限的全部地图格。"""
+    image_width = int(capture.rgb.shape[1])
     intrinsics = capture.camera_intrinsics
-    depth_horizon = _farthest_valid_depth_by_column(capture.depth_m)
     camera_world = _robot_point_to_world(
         (camera_extrinsics.forward_m, camera_extrinsics.left_m),
         robot_pose,
@@ -206,16 +202,11 @@ def _cells_in_camera_fov(
                 left_m,
                 float(intrinsics.fx),
                 float(intrinsics.cx),
-                width,
+                image_width,
             )
             if image_col is None:
                 continue
-            if _depth_horizon_reaches(
-                depth_horizon,
-                image_col,
-                forward_m,
-            ):
-                visible.add((row, col))
+            visible.add((row, col))
     return visible
 
 
@@ -233,48 +224,6 @@ def _horizontal_image_column(
     if not 0 <= image_col < image_width:
         return None
     return image_col
-
-
-def _farthest_valid_depth_by_column(
-    depth_m: Any,
-) -> Tuple[Optional[float], ...]:
-    """返回每个图像列跨全部高度的最远有效深度。"""
-    height, width = depth_m.shape
-    farthest: list[Optional[float]] = [None] * int(width)
-    for row in range(int(height)):
-        for col in range(int(width)):
-            raw_depth = depth_m[row][col]
-            try:
-                value = float(raw_depth)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(value) or value <= 0.0:
-                continue
-            current_farthest = farthest[col]
-            if current_farthest is None or value > current_farthest:
-                farthest[col] = value
-    return tuple(farthest)
-
-
-def _depth_horizon_reaches(
-    farthest_depth_by_column: Tuple[Optional[float], ...],
-    image_col: int,
-    required_forward_m: float,
-) -> bool:
-    """判断目标方向是否有深度射线到达；无有效深度时使用理论 FOV。"""
-    first_col = max(0, image_col - FOV_DEPTH_COLUMN_RADIUS_PX)
-    last_col = min(
-        len(farthest_depth_by_column),
-        image_col + FOV_DEPTH_COLUMN_RADIUS_PX + 1,
-    )
-    valid_depths = tuple(
-        depth
-        for depth in farthest_depth_by_column[first_col:last_col]
-        if depth is not None
-    )
-    if not valid_depths:
-        return True
-    return max(valid_depths) + FOV_DEPTH_MARGIN_M >= required_forward_m
 
 
 def _cells_near_world_point(

@@ -35,6 +35,13 @@ from .rest_client import (
 MotionFrameCallback = Callable[[NavigationFrame], None]
 ActionProgressCallback = Callable[[str], None]
 MotionInterruptCallback = Callable[[], bool]
+MotionPlanCallback = Callable[
+    [
+        Optional[Tuple[float, float]],
+        Tuple[Tuple[float, float], ...],
+    ],
+    None,
+]
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,7 @@ class _ActionMonitorState:
     last_sample_s: float
     last_motion_s: float
     last_motion_pose: Pose2D
+    path_error_reported: bool = False
 
 
 class _ActionStalledError(RuntimeError):
@@ -85,6 +93,7 @@ class SlamtecL515Adapter:
         on_motion_frame: Optional[MotionFrameCallback] = None,
         on_continuous_frame: Optional[MotionFrameCallback] = None,
         on_action_progress: Optional[ActionProgressCallback] = None,
+        on_motion_plan: Optional[MotionPlanCallback] = None,
         should_interrupt_motion: Optional[MotionInterruptCallback] = None,
     ) -> None:
         _validate_config(config)
@@ -92,6 +101,7 @@ class SlamtecL515Adapter:
         self._on_motion_frame = on_motion_frame
         self._on_continuous_frame = on_continuous_frame
         self._on_action_progress = on_action_progress
+        self._on_motion_plan = on_motion_plan
         self._should_interrupt_motion = should_interrupt_motion
         self._last_motion_frame_s = float("-inf")
         self._frame_read_lock = threading.Lock()
@@ -243,6 +253,7 @@ class SlamtecL515Adapter:
             self._execute_action(
                 self._move_to_action,
                 {"target": {"x": target_xy[0], "y": target_xy[1], "z": 0.0}},
+                target_world_xy=target_xy,
             )
 
         should_restore_yaw = (
@@ -284,7 +295,10 @@ class SlamtecL515Adapter:
             )
 
     def _execute_action(
-        self, action_name: str, options: Mapping[str, Any]
+        self,
+        action_name: str,
+        options: Mapping[str, Any],
+        target_world_xy: Optional[Tuple[float, float]] = None,
     ) -> None:
         """监控活跃 Action 的反馈和位姿；不计入 VLM 等待时间。"""
         action_id = self._client.create_action(action_name, options)
@@ -300,6 +314,10 @@ class SlamtecL515Adapter:
         self._report_action_progress(
             f"Hermes Action #{action_id} {action_label} 已创建。"
         )
+        self._report_motion_plan(
+            target_world_xy,
+            (),
+        )
 
         def monitor_action(status: int, stage: str) -> None:
             self._monitor_action(
@@ -309,6 +327,7 @@ class SlamtecL515Adapter:
                 status,
                 stage,
                 action_name == self._move_to_action,
+                target_world_xy,
             )
 
         try:
@@ -325,6 +344,7 @@ class SlamtecL515Adapter:
                 self._client.abort_current_action()
             except RuntimeError as caught_abort_error:
                 abort_error = caught_abort_error
+            self._report_motion_plan(None, ())
 
             if (
                 abort_error is None
@@ -363,6 +383,7 @@ class SlamtecL515Adapter:
             ):
                 raise RecoverableMotionError(str(exc)) from exc
             raise
+        self._report_motion_plan(None, ())
         completion_detail = ""
         if action_name == self._move_to_action:
             final_pose = self._client.get_pose()
@@ -415,6 +436,7 @@ class SlamtecL515Adapter:
         status: int,
         stage: str,
         requires_translation: bool,
+        target_world_xy: Optional[Tuple[float, float]],
     ) -> None:
         """采样活跃 Action 位姿，定期报告并识别真正的底盘停滞。"""
         self._raise_continuous_frame_error()
@@ -451,6 +473,13 @@ class SlamtecL515Adapter:
             state.last_motion_pose = pose
             state.last_motion_s = now
 
+        if requires_translation and self._on_motion_plan is not None:
+            remaining_path = self._read_remaining_path(state)
+            self._report_motion_plan(
+                target_world_xy,
+                remaining_path,
+            )
+
         elapsed_s = now - state.started_s
         still_s = now - state.last_motion_s
         stage_text = stage or "-"
@@ -467,6 +496,44 @@ class SlamtecL515Adapter:
             raise _ActionStalledError(
                 f"Hermes Action {action_id} 已连续 {still_s:.1f} 秒"
                 "没有产生足够位姿变化"
+            )
+
+    def _read_remaining_path(
+        self,
+        state: _ActionMonitorState,
+    ) -> Tuple[Tuple[float, float], ...]:
+        """尽力读取底盘路径；可视化接口异常不影响运动 Action。"""
+        if state.path_error_reported:
+            return ()
+        try:
+            return self._client.get_remaining_path()
+        except RuntimeError as exc:
+            if not state.path_error_reported:
+                state.path_error_reported = True
+                self._report_action_progress(
+                    f"Hermes 剩余路径暂不可用，仅隐藏路径可视化：{exc}"
+                )
+            return ()
+
+    def _report_motion_plan(
+        self,
+        target_world_xy: Optional[Tuple[float, float]],
+        remaining_path_world_xy: Tuple[Tuple[float, float], ...],
+    ) -> None:
+        """发布底盘实际目标和剩余路径；显示失败时自动停用该回调。"""
+        callback = self._on_motion_plan
+        if callback is None:
+            return
+        try:
+            callback(
+                target_world_xy,
+                remaining_path_world_xy,
+            )
+        except Exception as exc:
+            self._on_motion_plan = None
+            self._report_action_progress(
+                "Hermes 路径可视化已停用："
+                f"{str(exc) or type(exc).__name__}"
             )
 
     def _report_action_progress(self, message: str) -> None:

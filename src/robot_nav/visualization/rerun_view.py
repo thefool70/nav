@@ -31,6 +31,8 @@ OCCUPIED_RGB = (25, 25, 25)
 ROBOT_RGB = (0, 170, 255)
 TRAJECTORY_RGB = (0, 120, 255)
 COMMAND_RGB = (255, 140, 0)
+MOTION_TARGET_RGB = (255, 70, 70)
+MOTION_PATH_RGB = (190, 90, 255)
 BBOX_RGB = (0, 255, 80)
 SAM2_MASK_RGB = (255, 60, 180)
 SAM2_MASK_ALPHA = 0.38
@@ -111,6 +113,7 @@ class RerunVisualizer:
         self._current_frontiers: Tuple[Mapping[str, Any], ...] = ()
         self._selected_frontier_id: Optional[str] = None
         self._last_result: Optional[NavigationResult] = None
+        self._last_frame: Optional[NavigationFrame] = None
         self._vlm_samples: Dict[int, int] = {}
         self._panel_font = _load_panel_font()
         if self._panel_font is None:
@@ -143,6 +146,7 @@ class RerunVisualizer:
         result: NavigationResult,
     ) -> None:
         self._begin_sample()
+        self._last_frame = frame
         self._last_result = result
         self._update_frontier_markers(result)
         self._log_rgb(frame, observation)
@@ -164,12 +168,105 @@ class RerunVisualizer:
 
     def _log_motion_frame(self, frame: NavigationFrame) -> None:
         self._begin_sample()
+        self._last_frame = frame
         self._log_rgb(frame, None)
         self._log_depth(frame)
         self._log_occupancy_map(frame)
         self._log_robot_pose(frame)
         if self._last_result is not None:
             self._log_world_hud(frame, self._last_result)
+
+    def log_motion_plan(
+        self,
+        target_world_xy: Optional[Tuple[float, float]],
+        remaining_path_world_xy: Tuple[Tuple[float, float], ...],
+    ) -> None:
+        """显示 Adapter 实际采用的目标与规划路径。"""
+        with self._log_lock:
+            if self._sample_index == 0:
+                self._begin_sample()
+            else:
+                self._rr.set_time_sequence("frame", self._sample_index)
+            self._log_motion_plan(
+                target_world_xy,
+                remaining_path_world_xy,
+            )
+
+    def _log_motion_plan(
+        self,
+        target_world_xy: Optional[Tuple[float, float]],
+        remaining_path_world_xy: Tuple[Tuple[float, float], ...],
+    ) -> None:
+        if target_world_xy is None:
+            self._rr.log("world/motion_plan", self._rr.Clear(recursive=True))
+            self._rr.log(
+                "map/occupancy/motion_plan",
+                self._rr.Clear(recursive=True),
+            )
+            return
+
+        target_view = _world_to_view_point(target_world_xy)
+        self._rr.log(
+            "world/motion_plan/target",
+            self._rr.Points2D(
+                [target_view],
+                colors=[MOTION_TARGET_RGB],
+                radii=0.13,
+            ),
+        )
+        if len(remaining_path_world_xy) >= 2:
+            self._rr.log(
+                "world/motion_plan/path",
+                self._rr.LineStrips2D(
+                    [[
+                        _world_to_view_point(point)
+                        for point in remaining_path_world_xy
+                    ]],
+                    colors=[MOTION_PATH_RGB],
+                    radii=0.035,
+                ),
+            )
+        else:
+            self._clear("world/motion_plan/path")
+
+        frame = self._last_frame
+        if frame is None:
+            return
+        target_pixel = _world_to_map_pixel(target_world_xy, frame)
+        if target_pixel is None:
+            self._clear("map/occupancy/motion_plan/target")
+        else:
+            self._rr.log(
+                "map/occupancy/motion_plan/target",
+                self._rr.Points2D(
+                    [target_pixel],
+                    colors=[MOTION_TARGET_RGB],
+                    radii=4.0,
+                    draw_order=35.0,
+                ),
+            )
+
+        path_pixels = tuple(
+            pixel
+            for point in remaining_path_world_xy
+            for pixel in [_world_to_map_pixel(point, frame)]
+            if pixel is not None
+        )
+        if (
+            len(path_pixels) >= 2
+            and len(path_pixels) == len(remaining_path_world_xy)
+        ):
+            self._rr.log(
+                "map/occupancy/motion_plan/path",
+                self._rr.LineStrips2D(
+                    [path_pixels],
+                    colors=[MOTION_PATH_RGB],
+                    radii=1.5,
+                    draw_order=34.0,
+                ),
+            )
+        else:
+            self._clear("map/occupancy/motion_plan/path")
 
     def log_local_perception(
         self,
@@ -1516,10 +1613,7 @@ def _status_lines(
         lines.append(
             "scan source: "
             f"clusters={details['frontier_scan_candidate_count']}, "
-            "remaining="
-            f"{details.get('frontier_scan_remaining_candidate_count', '-')}, "
-            f"raw_cells={details['frontier_scan_cell_count']}, "
-            f"skipped_views={details.get('skipped_scan_heading_count', 0)}"
+            f"raw_cells={details['frontier_scan_cell_count']}"
         )
 
     candidates = details.get("frontier_candidates", ())
@@ -1544,7 +1638,7 @@ def _status_lines(
                 "selected frontier: "
                 f"{selected_id}, rank=1/{details.get('candidate_count')}, "
                 f"path={float(selected['path_distance_m']):.2f} m, "
-                f"length={float(selected['frontier_length_m']):.2f} m, "
+                f"span={float(selected['frontier_span_m']):.2f} m, "
                 f"vlm={semantic_text}, "
                 f"semantic bonus={float(selected['semantic_bonus']):.2f}, "
                 f"score={float(selected['score']):.2f}"
@@ -1608,7 +1702,7 @@ def _status_lines(
     lines.extend(
         (
             "map legend: robot=blue, frontier=green, selected=yellow, "
-            "command=orange",
+            "command=orange, adapter target=red, adapter path=purple",
             "history links: pending=yellow, committed=blue, explored=gray, "
             "invalidated=red",
         )
