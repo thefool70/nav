@@ -12,6 +12,8 @@ from .perception import ScanObservationContext
 from ..core.models import (
     FrontierScoreRequest,
     NavigationFrame,
+    SceneAssessment,
+    SceneAssessmentResult,
     TargetConfirmation,
     TargetConfirmationResult,
     TargetObservation,
@@ -53,6 +55,16 @@ class RandomScoreTargetObserver:
             candidate.candidate_id: self._random.random()
             for candidate in request.candidates
         }
+
+    def assess_scene(
+        self,
+        goal: TargetSearchGoal,
+    ) -> SceneAssessmentResult:
+        """随机评分模式不读取图像，不能判断目的场景。"""
+        return SceneAssessmentResult(
+            SceneAssessment.UNCERTAIN,
+            "随机调试模式不执行目的场景判断。",
+        )
 
     def confirm_target(
         self,

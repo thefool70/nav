@@ -15,11 +15,11 @@ from .frontier import (
     PATH_DISTANCE_SCORE_WEIGHT,
     SEMANTIC_SCORE_WEIGHT,
     find_frontier_candidates,
+    is_world_point_reachable,
 )
 from .geometry import (
     grid_cell_center_to_world,
     world_point_to_robot,
-    world_to_nearest_grid_cell,
 )
 from .grounding import ground_target_bbox
 from .history import (
@@ -39,9 +39,12 @@ from .models import (
     Pose2D,
     RelativePoseCommand,
     ScanEvidence,
+    SceneAssessment,
+    SceneAssessmentResult,
     SearchDirection,
     SearchDirectionState,
     SearchPhase,
+    SearchMode,
     SearchState,
     TargetConfirmation,
     TargetConfirmationResult,
@@ -73,6 +76,7 @@ def navigate(
     observation: Optional[TargetObservation] = None,
     frontier_scores: Optional[Mapping[str, float]] = None,
     target_confirmation: Optional[TargetConfirmationResult] = None,
+    scene_assessment: Optional[SceneAssessmentResult] = None,
 ) -> NavigationResult:
     """推进一个导航周期，并返回本周期命令和下一周期状态。
 
@@ -86,6 +90,7 @@ def navigate(
         observation,
         frontier_scores,
         target_confirmation,
+        scene_assessment,
     )
     if reason is not None:
         return _invalid_result(state, reason)
@@ -96,31 +101,39 @@ def navigate(
             NavigationStatus.OK,
             working_state,
             "complete",
-            "目标搜索已经完成。",
+            "语义搜索已经完成。",
         )
     if working_state.phase is SearchPhase.FAILED:
         return _result(
             NavigationStatus.NO_SOLUTION,
             working_state,
             "failed",
-            "目标搜索已经结束，当前状态没有可继续的方向。",
+            "语义搜索已经结束，当前状态没有可继续的方向。",
+        )
+    if working_state.phase is SearchPhase.VERIFYING_SCENE:
+        return _continue_scene_assessment(
+            frame,
+            working_state,
+            scene_assessment,
         )
     if working_state.phase is SearchPhase.VERIFYING_TARGET:
         return _continue_target_confirmation(
             frame,
+            goal,
             working_state,
             target_confirmation,
         )
-    # YOLO-World 在所有算法阶段持续观察；有效本地检测可以抢占扫描和探索。
+    # 物体模式下 YOLO-World 持续观察；有效检测可以抢占扫描和探索。
     if (
-        observation is not None
+        goal.search_mode is SearchMode.OBJECT
+        and observation is not None
         and observation.visibility is TargetVisibility.VISIBLE
     ):
-        return _approach_visible_target(frame, working_state, observation)
+        return _approach_visible_target(frame, goal, working_state, observation)
     if working_state.phase is SearchPhase.BACKTRACKING:
         return _continue_backtracking(frame, working_state)
     if working_state.phase is SearchPhase.LOCALIZING_TARGET:
-        return _continue_target_approach(frame, working_state, observation)
+        return _continue_target_approach(frame, goal, working_state, observation)
     if working_state.phase is SearchPhase.EXPLORING:
         return _select_exploration_target(
             frame,
@@ -128,7 +141,7 @@ def navigate(
             frontier_scores,
         )
 
-    return _continue_scanning(frame, working_state, observation)
+    return _continue_scanning(frame, goal, working_state, observation)
 
 
 def recover_from_motion_failure(
@@ -318,6 +331,7 @@ def _reobserve_target_after_motion_issue(
 
 def _continue_scanning(
     frame: NavigationFrame,
+    goal: TargetSearchGoal,
     state: SearchState,
     observation: Optional[TargetObservation],
 ) -> NavigationResult:
@@ -342,101 +356,39 @@ def _continue_scanning(
                     working_state, f"障碍图无法用于 Frontier 扫描：{exc}"
                 )
             if not candidates:
-                return _select_exploration_target(
-                    frame,
-                    working_state,
-                    frontier_scores=None,
-                )
-            try:
-                headings = _frontier_scan_headings(frame, candidates)
-            except ValueError as exc:
-                return _result(
-                    NavigationStatus.MISSING_DATA,
-                    working_state,
-                    "scan.plan",
-                    f"无法按相机视野规划 Frontier 扫描：{exc}",
-                )
-            if not headings:
-                return _select_exploration_target(
-                    frame,
-                    working_state,
-                    frontier_scores=None,
-                )
-            scan_debug_details = _frontier_scan_debug_details(
-                candidates,
-                frame.obstacle_map.resolution_m,
-                remaining_candidate_count=len(candidates),
-            )
+                if goal.search_mode is SearchMode.SCENE:
+                    headings = (frame.pose.yaw_rad,)
+                else:
+                    return _select_exploration_target(
+                        frame,
+                        working_state,
+                        frontier_scores=None,
+                    )
+            else:
+                try:
+                    headings = _frontier_scan_headings(frame, candidates)
+                except ValueError as exc:
+                    return _result(
+                        NavigationStatus.MISSING_DATA,
+                        working_state,
+                        "scan.plan",
+                        f"无法按相机视野规划 Frontier 扫描：{exc}",
+                    )
+                if not headings:
+                    if goal.search_mode is SearchMode.SCENE:
+                        headings = (frame.pose.yaw_rad,)
+                    else:
+                        return _select_exploration_target(
+                            frame,
+                            working_state,
+                            frontier_scores=None,
+                        )
+                scan_debug_details = _frontier_scan_debug_details(candidates)
 
         working_state = _start_scan_with_headings(working_state, headings)
-    elif working_state.initial_scan_complete and observation is None:
-        # 每个待执行视角前用最新地图重聚类；已变成障碍的旧聚类会自然消失。
-        try:
-            candidates = _available_frontier_candidates(
-                frame,
-                working_state,
-                semantic_scores=None,
-            )
-        except ValueError as exc:
-            return _invalid_result(
-                working_state, f"障碍图无法用于 Frontier 扫描：{exc}"
-            )
-        if not candidates:
-            return _select_exploration_target(
-                frame,
-                replace(working_state, phase=SearchPhase.EXPLORING),
-                frontier_scores=None,
-            )
-
-        try:
-            remaining_candidates = _frontiers_not_covered_by_evidence(
-                frame,
-                working_state,
-                candidates,
-            )
-            refreshed_headings = _frontier_scan_headings(
-                frame,
-                remaining_candidates,
-            )
-        except ValueError as exc:
-            return _result(
-                NavigationStatus.MISSING_DATA,
-                working_state,
-                "scan.plan",
-                f"无法刷新 Frontier 扫描计划：{exc}",
-            )
-
-        if not remaining_candidates or not refreshed_headings:
-            return _select_exploration_target(
-                frame,
-                replace(working_state, phase=SearchPhase.EXPLORING),
-                frontier_scores=None,
-            )
-
-        previous_remaining_count = (
-            len(working_state.scan_headings_world_rad)
-            - working_state.next_scan_index
-        )
-        completed_headings = tuple(
-            evidence.heading_world_rad
-            for evidence in working_state.scan_evidence
-        )
-        working_state = replace(
-            working_state,
-            scan_headings_world_rad=completed_headings + refreshed_headings,
-            next_scan_index=len(completed_headings),
-        )
-        scan_debug_details = _frontier_scan_debug_details(
-            candidates,
-            frame.obstacle_map.resolution_m,
-            remaining_candidate_count=len(remaining_candidates),
-            skipped_heading_count=max(
-                0,
-                previous_remaining_count - len(refreshed_headings),
-            ),
-        )
     return _advance_scan(
         frame,
+        goal,
         working_state,
         observation,
         scan_debug_details,
@@ -445,6 +397,7 @@ def _continue_scanning(
 
 def _advance_scan(
     frame: NavigationFrame,
+    goal: TargetSearchGoal,
     state: SearchState,
     observation: Optional[TargetObservation],
     scan_debug_details: Optional[Mapping[str, Any]] = None,
@@ -484,8 +437,11 @@ def _advance_scan(
                 state, target_heading, extra=scan_debug_details
             ),
         )
-    if observation.visibility is TargetVisibility.VISIBLE:
-        return _approach_visible_target(frame, state, observation)
+    if (
+        goal.search_mode is SearchMode.OBJECT
+        and observation.visibility is TargetVisibility.VISIBLE
+    ):
+        return _approach_visible_target(frame, goal, state, observation)
 
     evidence = ScanEvidence(
         heading_world_rad=target_heading,
@@ -500,23 +456,41 @@ def _advance_scan(
     if next_index < len(state.scan_headings_world_rad):
         return _continue_scanning(
             frame,
+            goal,
             replace(scanned_state, next_scan_index=next_index),
             observation=None,
         )
 
+    return _finish_scan(frame, goal, scanned_state)
+
+
+def _finish_scan(
+    frame: NavigationFrame,
+    goal: TargetSearchGoal,
+    state: SearchState,
+) -> NavigationResult:
+    """结束本轮采集；场景模式先判断当前位置，物体模式直接探索。"""
+    completed_state = replace(
+        state,
+        phase=(
+            SearchPhase.VERIFYING_SCENE
+            if goal.search_mode is SearchMode.SCENE
+            else SearchPhase.EXPLORING
+        ),
+        initial_scan_complete=True,
+    )
+    if goal.search_mode is SearchMode.SCENE:
+        return _continue_scene_assessment(frame, completed_state, None)
     return _select_exploration_target(
         frame,
-        replace(
-            scanned_state,
-            phase=SearchPhase.EXPLORING,
-            initial_scan_complete=True,
-        ),
+        completed_state,
         frontier_scores=None,
     )
 
 
 def _continue_target_approach(
     frame: NavigationFrame,
+    goal: TargetSearchGoal,
     state: SearchState,
     observation: Optional[TargetObservation],
 ) -> NavigationResult:
@@ -536,18 +510,57 @@ def _continue_target_approach(
             observation.reason or "目标观测不确定，保持当前位置等待重新观测。",
         )
     if observation.visibility is TargetVisibility.VISIBLE:
-        return _approach_visible_target(frame, state, observation)
+        return _approach_visible_target(frame, goal, state, observation)
 
     # 8×45° 环扫只发生在程序开始；目标丢失后按当前 Frontier 重新规划视角。
     scan_state = _reset_scan_after_move(
         replace(state, initial_scan_complete=True)
     )
     # 下一次观测必须带 scan_context，才能进入本轮批量评分图像缓冲。
-    return _continue_scanning(frame, scan_state, None)
+    return _continue_scanning(frame, goal, scan_state, None)
+
+
+def _continue_scene_assessment(
+    frame: NavigationFrame,
+    state: SearchState,
+    assessment: Optional[SceneAssessmentResult],
+) -> NavigationResult:
+    """整轮扫描结束后先判断当前位置，未到场景时再选择 Frontier。"""
+    if assessment is None:
+        return _result(
+            NavigationStatus.NEEDS_SCENE_ASSESSMENT,
+            state,
+            "scene.assess",
+            "本轮扫描完成，需要 VLM 判断是否已经位于目的场景。",
+            details={"scan_image_count": len(state.scan_evidence)},
+        )
+    if assessment.assessment is SceneAssessment.UNCERTAIN:
+        return _result(
+            NavigationStatus.OK,
+            state,
+            "scene.assess",
+            assessment.reason or "目的场景判断失败，保持当前位置等待重试。",
+            details={"scan_image_count": len(state.scan_evidence)},
+        )
+    if assessment.assessment is SceneAssessment.MATCHED:
+        return _result(
+            NavigationStatus.OK,
+            replace(state, phase=SearchPhase.COMPLETE),
+            "scene.complete",
+            "VLM 确认机器人已经位于目的场景。",
+            details={"scan_image_count": len(state.scan_evidence)},
+        )
+
+    return _select_exploration_target(
+        frame,
+        replace(state, phase=SearchPhase.EXPLORING),
+        frontier_scores=None,
+    )
 
 
 def _continue_target_confirmation(
     frame: NavigationFrame,
+    goal: TargetSearchGoal,
     state: SearchState,
     confirmation: Optional[TargetConfirmationResult],
 ) -> NavigationResult:
@@ -598,7 +611,7 @@ def _continue_target_confirmation(
             pending_target_world_xy=None,
         )
     )
-    result = _continue_scanning(frame, scan_state, None)
+    result = _continue_scanning(frame, goal, scan_state, None)
     return replace(
         result,
         debug=NavigationDebug(
@@ -616,6 +629,7 @@ def _continue_target_confirmation(
 
 def _approach_visible_target(
     frame: NavigationFrame,
+    goal: TargetSearchGoal,
     state: SearchState,
     observation: TargetObservation,
 ) -> NavigationResult:
@@ -661,7 +675,7 @@ def _approach_visible_target(
         scan_state = _reset_scan_after_move(
             replace(state, initial_scan_complete=True)
         )
-        result = _continue_scanning(frame, scan_state, None)
+        result = _continue_scanning(frame, goal, scan_state, None)
         return replace(
             result,
             debug=NavigationDebug(
@@ -749,7 +763,7 @@ def _select_exploration_target(
     state: SearchState,
     frontier_scores: Optional[Mapping[str, float]],
 ) -> NavigationResult:
-    """先请求全部 Frontier 语义分数，再排序选择下一探索点。"""
+    """多个 Frontier 先请求语义分数；单个 Frontier 直接选择。"""
     explored_state = _mark_latest_committed_explored(state)
     try:
         candidates = _available_frontier_candidates(
@@ -764,13 +778,11 @@ def _select_exploration_target(
         return _begin_backtracking(frame, explored_state)
 
     candidate_details = tuple(
-        _frontier_candidate_debug(
-            candidate,
-            frame.obstacle_map.resolution_m,
-        )
+        _frontier_candidate_debug(candidate)
         for candidate in candidates
     )
-    if frontier_scores is None:
+    skip_semantic_scoring = frontier_scores is None and len(candidates) == 1
+    if frontier_scores is None and not skip_semantic_scoring:
         scoring_state = replace(explored_state, phase=SearchPhase.EXPLORING)
         return _result(
             NavigationStatus.NEEDS_FRONTIER_SCORES,
@@ -808,12 +820,17 @@ def _select_exploration_target(
         NavigationStatus.OK,
         next_state,
         "explore.select",
-        "选择评分最高的 Frontier，保存其余方向供后续回退。",
+        (
+            "仅有一个可达 Frontier，跳过语义评分并直接前往。"
+            if skip_semantic_scoring
+            else "选择评分最高的 Frontier，保存其余方向供后续回退。"
+        ),
         _command_to_world_point(candidates[0].world_xy, frame.pose),
         {
             "candidate_id": candidates[0].candidate_id,
             "candidate_count": len(candidates),
             "candidate_score": candidates[0].score,
+            "frontier_scoring_skipped": skip_semantic_scoring,
             "frontier_path_distance_weight": PATH_DISTANCE_SCORE_WEIGHT,
             "frontier_semantic_score_weight": SEMANTIC_SCORE_WEIGHT,
             "frontier_candidates": candidate_details,
@@ -823,10 +840,8 @@ def _select_exploration_target(
 
 def _frontier_candidate_debug(
     candidate: FrontierCandidate,
-    resolution_m: float,
 ) -> Mapping[str, Any]:
     """拆开候选分数，供命令发送前的可选终端诊断使用。"""
-    frontier_length_m = candidate.frontier_cell_count * resolution_m
     distance_penalty = PATH_DISTANCE_SCORE_WEIGHT * candidate.path_distance_m
     return {
         "candidate_id": candidate.candidate_id,
@@ -837,25 +852,23 @@ def _frontier_candidate_debug(
         "heading_world_rad": candidate.heading_world_rad,
         "frontier_cells": candidate.frontier_cells,
         "frontier_cell_count": candidate.frontier_cell_count,
-        "frontier_length_m": frontier_length_m,
+        "frontier_span_m": candidate.frontier_span_m,
         "path_distance_m": candidate.path_distance_m,
         "distance_penalty": distance_penalty,
         "semantic_score": candidate.semantic_score,
-        "semantic_bonus": candidate.score - frontier_length_m + distance_penalty,
+        "semantic_bonus": (
+            candidate.score - candidate.frontier_span_m + distance_penalty
+        ),
         "score": candidate.score,
     }
 
 
 def _frontier_scan_debug_details(
     candidates: Tuple[FrontierCandidate, ...],
-    resolution_m: float,
-    remaining_candidate_count: int,
-    skipped_heading_count: int = 0,
 ) -> Mapping[str, Any]:
-    """返回动态 Frontier 扫描计划的聚类来源与裁剪结果。"""
+    """返回本轮 Frontier 扫描计划的聚类来源。"""
     return {
         "frontier_scan_candidate_count": len(candidates),
-        "frontier_scan_remaining_candidate_count": remaining_candidate_count,
         "frontier_scan_cell_count": len(
             {
                 cell
@@ -863,9 +876,8 @@ def _frontier_scan_debug_details(
                 for cell in candidate.frontier_cells
             }
         ),
-        "skipped_scan_heading_count": skipped_heading_count,
         "frontier_candidates": tuple(
-            _frontier_candidate_debug(candidate, resolution_m)
+            _frontier_candidate_debug(candidate)
             for candidate in candidates
         ),
     }
@@ -941,8 +953,10 @@ def _resume_pending_direction(
     for direction in node.directions:
         if direction.state is not SearchDirectionState.PENDING:
             continue
-        if not _candidate_still_available(
-            direction.candidate_world_xy, frame.obstacle_map
+        if not _candidate_still_reachable(
+            direction.candidate_world_xy,
+            frame.obstacle_map,
+            frame.pose,
         ):
             working_node = set_observation_direction_state(
                 working_node,
@@ -1013,43 +1027,6 @@ def _frontier_scan_headings(
         camera_center_offset_rad=camera_center_offset,
         horizontal_fov_rad=horizontal_fov,
     )
-
-
-def _frontiers_not_covered_by_evidence(
-    frame: NavigationFrame,
-    state: SearchState,
-    candidates: Tuple[FrontierCandidate, ...],
-) -> Tuple[FrontierCandidate, ...]:
-    """返回尚未落入本轮任何已完成视场的当前 Frontier 聚类。"""
-    camera_center_offset, horizontal_fov = _horizontal_camera_view(frame)
-    return tuple(
-        candidate
-        for candidate in candidates
-        if not any(
-            _scan_view_covers_heading(
-                evidence.heading_world_rad,
-                candidate.heading_world_rad,
-                camera_center_offset,
-                horizontal_fov,
-            )
-            for evidence in state.scan_evidence
-        )
-    )
-
-
-def _scan_view_covers_heading(
-    robot_heading_rad: float,
-    point_heading_rad: float,
-    camera_center_offset_rad: float,
-    horizontal_fov_rad: float,
-) -> bool:
-    """判断一个机器人朝向的相机视场是否覆盖指定世界方向。"""
-    camera_heading = robot_heading_rad + camera_center_offset_rad
-    heading_error = shortest_turn_to_heading(
-        camera_heading,
-        point_heading_rad,
-    )
-    return abs(heading_error) <= horizontal_fov_rad / 2.0 + 1e-12
 
 
 def _horizontal_camera_view(frame: NavigationFrame) -> Tuple[float, float]:
@@ -1204,21 +1181,17 @@ def _replace_history_node(
     )
 
 
-def _candidate_still_available(
+def _candidate_still_reachable(
     candidate_world_xy: Optional[Tuple[float, float]],
     obstacle_map: ObstacleMap,
+    pose: Pose2D,
 ) -> bool:
-    """候选点越界或已知为障碍时返回 False；未知状态保留历史判断。"""
+    """候选点仍属于机器人当前 BFS 可达自由区时返回 True。"""
     if candidate_world_xy is None:
         return False
     try:
-        row, col = world_to_nearest_grid_cell(candidate_world_xy, obstacle_map)
-        rows = obstacle_map.occupancy
-        if row < 0 or col < 0 or row >= len(rows) or col >= len(rows[row]):
-            return False
-        value = rows[row][col]
-        return value is None or (_is_finite(value) and float(value) <= 0.5)
-    except (TypeError, ValueError, IndexError):
+        return is_world_point_reachable(obstacle_map, pose, candidate_world_xy)
+    except (TypeError, ValueError):
         return False
 
 
@@ -1253,12 +1226,15 @@ def _validation_error(
     observation: Optional[TargetObservation],
     frontier_scores: Optional[Mapping[str, float]],
     target_confirmation: Optional[TargetConfirmationResult],
+    scene_assessment: Optional[SceneAssessmentResult],
 ) -> Optional[str]:
     """返回非法公共输入的简短原因；合法输入返回 None。"""
     if not isinstance(goal, TargetSearchGoal) or not isinstance(
         goal.target_text, str
     ) or not goal.target_text.strip():
         return "目标文本必须为非空字符串"
+    if not isinstance(goal.search_mode, SearchMode):
+        return "goal.search_mode 必须为 SearchMode"
     if not isinstance(frame, NavigationFrame):
         return "frame 必须为 NavigationFrame"
     if not _is_finite(frame.timestamp_s):
@@ -1295,6 +1271,11 @@ def _validation_error(
             return "target_confirmation 必须为 TargetConfirmationResult 或 None"
         if not isinstance(target_confirmation.confirmation, TargetConfirmation):
             return "target_confirmation.confirmation 类型无效"
+    if scene_assessment is not None:
+        if not isinstance(scene_assessment, SceneAssessmentResult):
+            return "scene_assessment 必须为 SceneAssessmentResult 或 None"
+        if not isinstance(scene_assessment.assessment, SceneAssessment):
+            return "scene_assessment.assessment 类型无效"
     if frontier_scores is not None:
         if not isinstance(frontier_scores, Mapping):
             return "frontier_scores 必须为映射或 None"

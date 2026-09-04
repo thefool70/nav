@@ -94,11 +94,19 @@ class NavigationFrame:
     )
 
 
+class SearchMode(str, Enum):
+    """搜索语义：寻找具体物体，或判断机器人是否进入目的场景。"""
+
+    OBJECT = "object"
+    SCENE = "scene"
+
+
 @dataclass(frozen=True)
 class TargetSearchGoal:
-    """语义目标搜索目标，target_text 为对目标的人类可读描述（如 "门口"）。"""
+    """语义搜索目标；target_text 描述物体或目的场景。"""
 
     target_text: str
+    search_mode: SearchMode = SearchMode.OBJECT
 
 
 class TargetVisibility(Enum):
@@ -142,9 +150,28 @@ class TargetConfirmationResult:
     reason: str = ""
 
 
+class SceneAssessment(Enum):
+    """VLM 对整轮扫描是否已经位于目的场景的判断。"""
+
+    MATCHED = "matched"
+    NOT_MATCHED = "not_matched"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True)
+class SceneAssessmentResult:
+    """目的场景判断及其可选失败原因。"""
+
+    assessment: SceneAssessment
+    reason: str = ""
+
+
 @dataclass(frozen=True)
 class ScanEvidence:
-    """一次扫描中单个方向的目标可见性证据。"""
+    """一次扫描中单个方向的采集证据。
+
+    场景模式不做逐帧目标检测，此时 NOT_VISIBLE 只表示该方向已经完成采集。
+    """
 
     heading_world_rad: float
     visibility: TargetVisibility
@@ -155,8 +182,9 @@ class FrontierCandidate:
     """一次扫描中发现的前沿候选点。row、col 为在障碍图中的栅格坐标，
     world_xy 为世界坐标（米）；heading_world_rad 为朝向该候选点的世界
     系方向（弧度）；frontier_cells 保存该前沿包含的全部栅格；
-    frontier_cell_count 为其栅格数；path_distance_m 为沿路径到该点的距离
-    （米）；score 为探索优先级。"""
+    frontier_cell_count 为其栅格数；frontier_span_m 为聚类完整栅格包围框的
+    对角跨度（米）；path_distance_m 为沿路径到该点的距离（米）；
+    score 为探索优先级。"""
 
     candidate_id: str
     row: int
@@ -165,6 +193,7 @@ class FrontierCandidate:
     heading_world_rad: float
     frontier_cells: Tuple[Tuple[int, int], ...]
     frontier_cell_count: int
+    frontier_span_m: float
     path_distance_m: float
     score: float
     semantic_score: Optional[float] = None
@@ -207,6 +236,7 @@ class SearchPhase(Enum):
     """语义目标搜索的阶段。"""
 
     SCANNING = "scanning"
+    VERIFYING_SCENE = "verifying_scene"
     LOCALIZING_TARGET = "localizing_target"
     VERIFYING_TARGET = "verifying_target"
     EXPLORING = "exploring"
@@ -273,6 +303,7 @@ class NavigationStatus(Enum):
     INVALID_INPUT = "invalid_input"
     NO_SOLUTION = "no_solution"
     NEEDS_OBSERVATION = "needs_observation"
+    NEEDS_SCENE_ASSESSMENT = "needs_scene_assessment"
     NEEDS_FRONTIER_SCORES = "needs_frontier_scores"
     NEEDS_TARGET_CONFIRMATION = "needs_target_confirmation"
     MISSING_DATA = "missing_data"

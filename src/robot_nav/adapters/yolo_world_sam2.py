@@ -14,6 +14,7 @@ import numpy as np
 from ..core.models import (
     FrontierScoreRequest,
     NavigationFrame,
+    SceneAssessmentResult,
     TargetConfirmation,
     TargetConfirmationResult,
     TargetObservation,
@@ -38,7 +39,7 @@ LocalPerceptionCallback = Callable[
 
 
 class _SemanticAdvisor(Protocol):
-    """YOLO 本地检测之外仍由 VLM 承担的两个低频职责。"""
+    """YOLO 本地检测之外仍由 VLM 承担的低频语义职责。"""
 
     def record_scan_frame(
         self,
@@ -51,6 +52,11 @@ class _SemanticAdvisor(Protocol):
         request: FrontierScoreRequest,
         goal: TargetSearchGoal,
     ) -> Mapping[str, float]: ...
+
+    def assess_scene(
+        self,
+        goal: TargetSearchGoal,
+    ) -> SceneAssessmentResult: ...
 
     def confirm_target(
         self,
@@ -173,6 +179,13 @@ class YoloWorldSam2TargetObserver:
     ) -> Mapping[str, float]:
         """Frontier 批量评分继续使用现有 VLM。"""
         return self._semantic_advisor.score_frontiers(request, goal)
+
+    def assess_scene(
+        self,
+        goal: TargetSearchGoal,
+    ) -> SceneAssessmentResult:
+        """保留完整接口；Hermes 场景模式不会创建本地目标观察器。"""
+        return self._semantic_advisor.assess_scene(goal)
 
     def confirm_target(
         self,

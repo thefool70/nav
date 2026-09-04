@@ -1,4 +1,4 @@
-"""通过 OpenAI/Anthropic-compatible API 观察语义目标。"""
+"""通过 OpenAI/Anthropic-compatible API 提供语义搜索判断。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,9 @@ from urllib.request import Request, urlopen
 from ..core.models import (
     FrontierScoreRequest,
     NavigationFrame,
+    SceneAssessment,
+    SceneAssessmentResult,
+    SearchMode,
     TargetConfirmation,
     TargetConfirmationResult,
     TargetObservation,
@@ -25,10 +28,12 @@ from ..core.models import (
 )
 from ..core.vision import (
     build_frontier_scores_prompt,
+    build_scene_assessment_prompt,
     build_target_confirmation_prompt,
     build_target_grounding_prompt,
     build_target_visibility_prompt,
     parse_frontier_scores_response,
+    parse_scene_assessment_response,
     parse_target_confirmation_response,
     parse_target_grounding_response,
     parse_target_visibility_response,
@@ -38,6 +43,7 @@ from .frontier_overlay import (
     annotate_bbox_image,
     buffer_scan_image,
     build_frontier_score_sheet,
+    build_scan_contact_sheet,
     pack_rgb_image,
 )
 from .perception import (
@@ -69,7 +75,7 @@ class OpenAICompatibleConfig:
 
 
 class OpenAICompatibleTargetObserver:
-    """把一帧 RGB 经过 VLM 判断后转换为 TargetObservation。"""
+    """处理物体观测、整轮场景判断和 Frontier 批量评分。"""
 
     def __init__(
         self,
@@ -90,7 +96,7 @@ class OpenAICompatibleTargetObserver:
         goal: TargetSearchGoal,
         scan_context: Optional[ScanObservationContext] = None,
     ) -> TargetObservation:
-        """判断单帧目标可见性；可见时再请求目标框。"""
+        """物体模式判断单帧；场景模式只缓存当前扫描 RGB。"""
         if frame.rgb is None:
             return _uncertain("当前帧没有 RGB 图像。")
 
@@ -106,6 +112,15 @@ class OpenAICompatibleTargetObserver:
                 image = pack_rgb_image(frame.rgb)
         except Exception as exc:
             return _uncertain(_failure_reason("RGB 输入准备失败", exc))
+
+        if goal.search_mode is SearchMode.SCENE:
+            if scan_context is None:
+                return _uncertain("场景模式只能在扫描方向中采集 RGB。")
+            return TargetObservation(
+                visibility=TargetVisibility.NOT_VISIBLE,
+                reason="场景模式已缓存当前扫描方向，整轮结束后统一判断。",
+                source="scene_scan",
+            )
 
         prompt = build_target_visibility_prompt(goal.target_text)
         interaction = self._begin_interaction(
@@ -160,6 +175,7 @@ class OpenAICompatibleTargetObserver:
             prompt = build_frontier_scores_prompt(
                 goal.target_text,
                 marker_labels,
+                goal.search_mode,
             )
         except Exception:
             self._scan_images.clear()
@@ -208,12 +224,60 @@ class OpenAICompatibleTargetObserver:
         )
         return candidate_scores
 
+    def assess_scene(
+        self,
+        goal: TargetSearchGoal,
+    ) -> SceneAssessmentResult:
+        """把本轮全部扫描 RGB 拼成一张图，请求一次目的场景判断。"""
+        try:
+            image = build_scan_contact_sheet(self._scan_images)
+            prompt = build_scene_assessment_prompt(goal.target_text)
+        except Exception as exc:
+            return SceneAssessmentResult(
+                SceneAssessment.UNCERTAIN,
+                _failure_reason("目的场景输入准备失败", exc),
+            )
+
+        interaction = self._begin_interaction(
+            "scene_assessment",
+            prompt,
+            image,
+        )
+        assistant_text = ""
+        response_json = ""
+        try:
+            response_payload, response_json = self._request_model(prompt, image)
+            assistant_text = self._response_text(response_payload)
+            assessment = parse_scene_assessment_response(assistant_text)
+        except Exception as exc:
+            self._finish_interaction(
+                interaction,
+                assistant_text=assistant_text,
+                response_json=response_json,
+                error=_exception_text(exc),
+            )
+            return SceneAssessmentResult(
+                SceneAssessment.UNCERTAIN,
+                _failure_reason("目的场景判断失败", exc),
+            )
+
+        self._finish_interaction(
+            interaction,
+            assistant_text=assistant_text,
+            response_json=response_json,
+            parsed_result=json.dumps(
+                {"scene": assessment.value},
+                ensure_ascii=False,
+            ),
+        )
+        return SceneAssessmentResult(assessment)
+
     def record_scan_frame(
         self,
         frame: NavigationFrame,
         context: ScanObservationContext,
     ) -> None:
-        """只缓存扫描 RGB，供稍后的整批 Frontier 评分，不请求 VLM。"""
+        """只缓存扫描 RGB，供整轮场景判断和 Frontier 评分。"""
         self._record_scan_image(frame, context)
 
     def confirm_target(

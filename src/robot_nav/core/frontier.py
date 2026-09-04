@@ -14,8 +14,27 @@ Cell = Tuple[int, int]
 GridValues = Tuple[Tuple[Optional[float], ...], ...]
 
 PATH_DISTANCE_SCORE_WEIGHT = 0.05
-SEMANTIC_SCORE_WEIGHT = 0.75
+SEMANTIC_SCORE_WEIGHT = 1.5
 FRONTIER_CLEARANCE_SEARCH_M = 0.75
+
+
+def is_world_point_reachable(
+    obstacle_map: ObstacleMap,
+    pose: Pose2D,
+    world_xy: Tuple[float, float],
+) -> bool:
+    """目标格属于机器人当前四邻接 BFS 可达自由区时返回 True。"""
+    grid = _normalize_grid(obstacle_map)
+    free_cells = _free_cells(grid)
+    if not free_cells:
+        return False
+
+    requested_seed = world_to_nearest_grid_cell(
+        (pose.x_m, pose.y_m), obstacle_map
+    )
+    seed = _nearest_free_cell(requested_seed, free_cells)
+    target = world_to_nearest_grid_cell(world_xy, obstacle_map)
+    return target in _reachable_free_distances(seed, free_cells)
 
 
 def find_frontier_candidates(
@@ -23,14 +42,14 @@ def find_frontier_candidates(
     pose: Pose2D,
     semantic_scores: Optional[Mapping[str, float]] = None,
     excluded_world_xy: Sequence[Tuple[float, float]] = (),
-    min_frontier_length_m: float = 0.5,
+    min_frontier_span_m: float = 0.5,
     min_goal_distance_m: float = 0.35,
 ) -> Tuple[FrontierCandidate, ...]:
     """返回可达 Frontier，并优先选择远离占据格的聚类代表点。"""
     grid = _normalize_grid(obstacle_map)
     resolution = _positive_finite(obstacle_map.resolution_m, "resolution_m")
-    minimum_length = _non_negative_finite(
-        min_frontier_length_m, "min_frontier_length_m"
+    minimum_span = _non_negative_finite(
+        min_frontier_span_m, "min_frontier_span_m"
     )
     minimum_distance = _non_negative_finite(
         min_goal_distance_m, "min_goal_distance_m"
@@ -38,12 +57,7 @@ def find_frontier_candidates(
     normalized_scores = _normalize_semantic_scores(semantic_scores)
     excluded_points = _normalize_points(excluded_world_xy)
 
-    free_cells = {
-        (row, col)
-        for row, values in enumerate(grid)
-        for col, value in enumerate(values)
-        if value is not None and value <= 0.5
-    }
+    free_cells = _free_cells(grid)
     if not free_cells:
         return ()
 
@@ -55,7 +69,6 @@ def find_frontier_candidates(
     reachable_cells = set(reachable_distance)
     frontier_cells = _find_frontier_cells(grid, reachable_cells)
 
-    minimum_cells = max(1, int(math.ceil(minimum_length / resolution)))
     clearance_search_steps = max(
         1,
         int(math.ceil(FRONTIER_CLEARANCE_SEARCH_M / resolution)),
@@ -63,12 +76,13 @@ def find_frontier_candidates(
     candidate_groups = tuple(
         component
         for component in _connected_components(frontier_cells)
-        if len(component) >= minimum_cells
+        if _frontier_span_m(component, resolution) >= minimum_span
     )
 
     excluded_radius = max(0.4, 2.0 * resolution)
     candidates = []
     for cells in candidate_groups:
+        frontier_span = _frontier_span_m(cells, resolution)
         row, col = _safest_frontier_cell(
             cells,
             grid,
@@ -83,8 +97,7 @@ def find_frontier_candidates(
             continue
         candidate_id = f"frontier:{row}:{col}"
         heading = math.atan2(world_xy[1] - pose.y_m, world_xy[0] - pose.x_m)
-        frontier_length = len(cells) * resolution
-        score = frontier_length - PATH_DISTANCE_SCORE_WEIGHT * path_distance
+        score = frontier_span - PATH_DISTANCE_SCORE_WEIGHT * path_distance
         semantic_score = normalized_scores.get(candidate_id)
         if semantic_score is not None:
             score += SEMANTIC_SCORE_WEIGHT * (2.0 * semantic_score - 1.0)
@@ -97,6 +110,7 @@ def find_frontier_candidates(
                 heading_world_rad=heading,
                 frontier_cells=tuple(sorted(cells)),
                 frontier_cell_count=len(cells),
+                frontier_span_m=frontier_span,
                 path_distance_m=path_distance,
                 score=score,
                 semantic_score=semantic_score,
@@ -111,6 +125,16 @@ def find_frontier_candidates(
         )
     )
     return tuple(candidates)
+
+
+def _frontier_span_m(component: Set[Cell], resolution_m: float) -> float:
+    """返回 Frontier 聚类所占完整栅格包围框的对角跨度。"""
+    rows = [cell[0] for cell in component]
+    cols = [cell[1] for cell in component]
+    return math.hypot(
+        max(rows) - min(rows) + 1,
+        max(cols) - min(cols) + 1,
+    ) * resolution_m
 
 
 def _normalize_grid(obstacle_map: ObstacleMap) -> GridValues:
@@ -144,6 +168,16 @@ def _normalize_grid(obstacle_map: ObstacleMap) -> GridValues:
             normalized_row.append(converted)
         normalized.append(tuple(normalized_row))
     return tuple(normalized)
+
+
+def _free_cells(grid: GridValues) -> Set[Cell]:
+    """返回占据图中的全部已知自由格。"""
+    return {
+        (row, col)
+        for row, values in enumerate(grid)
+        for col, value in enumerate(values)
+        if value is not None and value <= 0.5
+    }
 
 
 def _nearest_free_cell(requested: Cell, free_cells: Set[Cell]) -> Cell:
@@ -354,4 +388,5 @@ __all__ = [
     "PATH_DISTANCE_SCORE_WEIGHT",
     "SEMANTIC_SCORE_WEIGHT",
     "find_frontier_candidates",
+    "is_world_point_reachable",
 ]

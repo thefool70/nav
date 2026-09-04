@@ -10,7 +10,12 @@ import json
 import math
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
-from .models import TargetConfirmation, TargetVisibility
+from .models import (
+    SceneAssessment,
+    SearchMode,
+    TargetConfirmation,
+    TargetVisibility,
+)
 
 
 def build_target_visibility_prompt(target_text: str) -> str:
@@ -30,6 +35,7 @@ def build_target_visibility_prompt(target_text: str) -> str:
 def build_frontier_scores_prompt(
     target_text: str,
     marker_labels: Sequence[str],
+    search_mode: SearchMode = SearchMode.OBJECT,
 ) -> str:
     """构造一次性评分多视角 RGB 中全部 Frontier 标记的问题。"""
     target = _target_json(target_text)
@@ -41,14 +47,40 @@ def build_frontier_scores_prompt(
     ):
         raise ValueError("Frontier 标记必须是不重复的非空字符串")
     score_template = {label: 0.0 for label in labels}
-    return (
+    if search_mode is SearchMode.SCENE:
+        scoring_rule = (
+            f"The destination scene description is {target}. For every marker, "
+            "score the likelihood that exploring beyond that marker will lead the "
+            "robot into the destination scene"
+        )
+    else:
+        scoring_rule = (
+            f"The target description is {target}. For every marker, score the "
+            "likelihood of finding the target by exploring beyond that marker"
+        )
+    prompt_body = (
         "The image is a multi-view RGB contact sheet from one robot scan. Each "
         "colored numeric marker denotes a Frontier exploration direction. "
-        f"The target description is {target}. For every marker, score the "
-        "likelihood of finding the target by exploring beyond that marker, where "
-        "0 is the lowest likelihood and 1 is the highest. Return every marker "
-        "exactly once. Return JSON only, with no reasons, explanation, or Markdown: "
+        f"{scoring_rule}, where 0 is the lowest likelihood and 1 is the highest. "
+        "Return every marker exactly once. Return JSON only, with no reasons, "
+        "explanation, or Markdown: "
         + json.dumps({"scores": score_template}, ensure_ascii=False)
+    )
+    return prompt_body
+
+
+def build_scene_assessment_prompt(scene_text: str) -> str:
+    """构造整轮扫描拼图上的目的场景判断问题。"""
+    scene = _target_json(scene_text)
+    return (
+        "The image is a multi-view RGB contact sheet captured from one robot "
+        "position after observing the surrounding directions. The destination "
+        f"scene description is {scene}. Decide whether the robot's current position "
+        "is already inside or at that destination scene. Judge from the overall "
+        "surroundings across all views. Do not match merely because the scene is "
+        "visible in the distance or through a doorway, or because a related object "
+        "or sign is visible. Return exactly one JSON object without Markdown: "
+        '{"scene":"matched"} or {"scene":"not_matched"}'
     )
 
 
@@ -165,6 +197,17 @@ def parse_target_confirmation_response(text: str) -> TargetConfirmation:
     raise ValueError("目标最终确认必须是 confirmed 或 rejected")
 
 
+def parse_scene_assessment_response(text: str) -> SceneAssessment:
+    """解析目的场景判断；格式不合法时抛出 ValueError。"""
+    payload = _extract_json_mapping(text, "目的场景判断")
+    raw_scene = str(payload.get("scene", "")).strip().lower()
+    if raw_scene == SceneAssessment.MATCHED.value:
+        return SceneAssessment.MATCHED
+    if raw_scene == SceneAssessment.NOT_MATCHED.value:
+        return SceneAssessment.NOT_MATCHED
+    raise ValueError("目的场景判断必须是 matched 或 not_matched")
+
+
 def _target_json(target_text: str) -> str:
     target = str(target_text).strip()
     if not target:
@@ -199,10 +242,12 @@ def _finite_float(value: Any) -> Optional[float]:
 
 __all__ = [
     "build_frontier_scores_prompt",
+    "build_scene_assessment_prompt",
     "build_target_confirmation_prompt",
     "build_target_grounding_prompt",
     "build_target_visibility_prompt",
     "parse_frontier_scores_response",
+    "parse_scene_assessment_response",
     "parse_target_confirmation_response",
     "parse_target_grounding_response",
     "parse_target_visibility_response",

@@ -152,6 +152,26 @@ def annotate_bbox_image(
     )
 
 
+def build_scan_contact_sheet(
+    scan_images: Mapping[int, BufferedScanImage],
+) -> VlmInputImage:
+    """按扫描顺序拼接全部 RGB，供 VLM 判断当前位置的整体场景。"""
+    if not scan_images:
+        raise ValueError("没有可用的扫描 RGB")
+    ordered_frames = tuple(frame for _, frame in sorted(scan_images.items()))
+    first_frame = ordered_frames[0]
+    tile_width = min(TILE_MAX_WIDTH_PX, first_frame.width_px)
+    tile_height = max(
+        1,
+        round(tile_width * first_frame.height_px / first_frame.width_px),
+    )
+    tiles = tuple(
+        _resize_rgb(frame, tile_width, tile_height)
+        for frame in ordered_frames
+    )
+    return _compose_sheet(tiles, tile_width, tile_height)
+
+
 def build_frontier_score_sheet(
     scan_images: Mapping[int, BufferedScanImage],
     candidates: Sequence[FrontierCandidate],
@@ -195,6 +215,20 @@ def build_frontier_score_sheet(
         _draw_markers(tile, tile_width, tile_height, scaled_markers)
         tiles.append(tile)
 
+    return (
+        _compose_sheet(tuple(tiles), tile_width, tile_height),
+        tuple(markers),
+    )
+
+
+def _compose_sheet(
+    tiles: Sequence[bytearray],
+    tile_width: int,
+    tile_height: int,
+) -> VlmInputImage:
+    """把等尺寸 RGB tile 按固定列数拼成一张紧凑图片。"""
+    if not tiles:
+        raise ValueError("扫描拼图至少需要一张图片")
     columns = min(SHEET_MAX_COLUMNS, len(tiles))
     rows = int(math.ceil(len(tiles) / columns))
     sheet_width = columns * tile_width + (columns - 1) * TILE_GAP_PX
@@ -212,10 +246,7 @@ def build_frontier_score_sheet(
             tile_col * (tile_width + TILE_GAP_PX),
             tile_row * (tile_height + TILE_GAP_PX),
         )
-    return (
-        VlmInputImage(sheet_width, sheet_height, bytes(sheet)),
-        tuple(markers),
-    )
+    return VlmInputImage(sheet_width, sheet_height, bytes(sheet))
 
 
 def _best_scan_frame(
@@ -468,5 +499,6 @@ __all__ = [
     "annotate_bbox_image",
     "buffer_scan_image",
     "build_frontier_score_sheet",
+    "build_scan_contact_sheet",
     "pack_rgb_image",
 ]
