@@ -10,12 +10,12 @@
 | 位姿 | `Pose2D(x_m, y_m, yaw_rad)`，米 / 弧度，yaw 逆时针为正 |
 | 障碍图 | `ObstacleMap(occupancy, resolution_m, origin, frame_id)`，`occupancy[row][col]` 为 `0.0` 自由、`1.0` 占用、`None` 未知 |
 | 障碍图原点 | `origin` 为格 `(row=0, col=0)` 中心在世界坐标系中的位姿；列沿 origin 局部 `+x` 方向增长，行沿 origin 局部 `+y` 方向增长 |
-| 目标 | `TargetSearchGoal(target_text)`，`target_text` 为对目标的人类可读描述（如 "门口"） |
+| 目标 | `TargetSearchGoal(target_text, search_mode)`；模式为具体物体 `object` 或目的场景 `scene` |
 | 感知快照 | `NavigationFrame(timestamp_s, pose, obstacle_map, ...)`，`timestamp_s` 单位为秒 |
 | 深度图 | `NavigationFrame.depth`，单位为米，`None` 表示无有效深度 |
 | 相机标定 | `CameraIntrinsics` 与 `CameraExtrinsics`，RGB/深度必须对齐 |
 | 控制命令 | `RelativePoseCommand(forward_m, left_m, yaw_rad)`，机器人坐标系，向前 / 向左 / 逆时针为正 |
-| 状态 | `NavigationStatus`：OK / INVALID_INPUT / NO_SOLUTION / NEEDS_OBSERVATION / MISSING_DATA |
+| 状态 | `NavigationStatus`：`OK`、`NO_SOLUTION`、输入/数据错误，或请求目标观测、场景判断、Frontier 评分和目标确认 |
 
 ## 坐标系契约
 
@@ -40,6 +40,13 @@ Adapter 抛出 `MotionStalledError`。探索循环不会把它当作规划失败
 如果厂商 SDK 只提供异步接口，真机 Adapter 需要在内部等待完成反馈，不能在
 刚下发命令时就返回。以后若要支持连续速度控制，再统一扩展接口和状态机，
 不要只在真机实现中改变语义。
+
+## 感知边界
+
+`TargetObserver` 与底盘接口相互独立。Adapter 只负责把同步的 RGB、深度、内参和
+外参放进 `NavigationFrame`；目标检测、场景判断和 Frontier 评分不应写进
+`ChassisInterface`。持续检测器可以在底盘运动期间读取 Adapter 提供的新帧，但
+最终结果仍通过 `TargetObservation` 进入核心状态机。
 
 ## 真机接入必须确认
 
@@ -77,5 +84,5 @@ Adapter 抛出 `MotionStalledError`。探索循环不会把它当作规划失败
 只要上述数据、坐标、标定和同步执行契约全部归一化，仿真切换到真底盘时只需
 替换 `ChassisInterface` 的实现；`core` 与 `TargetObserver` 不应包含厂商分支。
 
-当前 S100 + L515 实现与仍需实测的安装参数见
-[s100-l515.md](s100-l515.md)。
+具体实现见 [Habitat](habitat.md)、[Hermes + L515](slamtec-l515.md) 和
+[S100 + L515](s100-l515.md)。

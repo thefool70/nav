@@ -10,6 +10,9 @@ dist/
 data/
 weights/
 
+# Local agent instructions
+/AGENTS.md
+
 # Local reference materials
 /ZSON.zip
 /slamtech/

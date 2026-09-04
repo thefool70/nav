@@ -1,100 +1,118 @@
 # Habitat 仿真
 
-Habitat-Sim 通过 `HabitatChassisAdapter` 接入，与核心算法运行在同一 Python
-进程中。Habitat 依赖只存在于独立的 `robot-nav-habitat` 环境，核心环境不受
-影响。
+`HabitatChassisAdapter` 把 Habitat-Sim 转换为与真底盘相同的
+`ChassisInterface`。导航算法不包含 Habitat 分支；`sim/habitat/` 只保存环境、
+渲染包装和简单的 Adapter 验证脚本。
 
-## 环境与场景
+## 安装
+
+Habitat 使用独立的 Python 3.9 环境，避免图形依赖污染核心环境：
 
 ```bash
 micromamba env create -f sim/habitat/environment.yml
 micromamba activate robot-nav-habitat
 python -m pip install -e .
 python -m habitat_sim.utils.datasets_download \
-  --uids habitat_test_scenes --data-path data/habitat --no-replace
+  --uids habitat_test_scenes \
+  --data-path data/habitat \
+  --no-replace
 ```
 
-环境已存在时可用下面的命令同步：
+环境已存在时可按项目配置同步：
 
 ```bash
 micromamba env update -n robot-nav-habitat \
-  -f sim/habitat/environment.yml --prune
+  -f sim/habitat/environment.yml \
+  --prune
 ```
 
-`environment.yml` 固定使用 `rerun-sdk==0.22.1`、NumPy 1.26.4 和 Pillow
-10.4.0，以兼容 Habitat-Sim 0.3.3 的 Python 3.9 环境。
+当前环境固定 Habitat-Sim 0.3.3、Python 3.9、NumPy 1.26.4、Pillow 10.4.0 和
+Rerun 0.22.1。
 
-## 启动 Adapter
+## 先检查 Adapter
 
-先读取一帧，确认 Habitat 能向统一接口提供位姿、RGB、深度和障碍图：
+下面的命令读取一帧并打印位姿、地图、RGB 和深度尺寸，不调用 VLM：
 
 ```bash
 micromamba activate robot-nav-habitat
-sim/habitat/run.sh python sim/habitat/adapter_demo.py \
-  --scene data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb
+env HABITAT_RENDERER=gpu sim/habitat/run.sh \
+  python sim/habitat/adapter_demo.py \
+  --scene data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb \
+  --seed 1
 ```
 
-`run.sh` 默认自动选择 WSL GPU Mesa 或 CPU `llvmpipe`，并配置无窗口 EGL。
-可通过 `HABITAT_RENDERER=gpu` 或 `HABITAT_RENDERER=cpu` 强制选择。原生
-NVIDIA EGL 环境需要时，可给 demo 增加 `--gpu-device-id 0`；当前 WSL Mesa
-路径默认使用 `-1`。
+成功时应看到：
 
-## 运行完整导航
+```text
+Habitat 渲染后端：WSL Mesa D3D12（GPU）。
+Renderer: D3D12 (NVIDIA GeForce RTX 3060)
+```
 
-先用 `opencode auth login` 登录 OpenCode Go。入口会自动复用本地凭据；
-如果设置了 `ROBOT_NAV_VLM_API_KEY`，则优先使用该环境变量。两种方式都不会
-把 Key 写入仓库。然后通过通用项目入口选择 Habitat Adapter：
+`run.sh` 默认使用 `HABITAT_RENDERER=auto`：先验证 WSL D3D12，失败才回退到
+conda `llvmpipe`。当前机器建议显式使用 `gpu`，这样 GPU 链路异常会直接报错，
+不会静默使用 CPU。GPU 模式统一加载 Arch 的 Mesa、GLVND 与 DRM 库，避免
+conda 中同名库覆盖 D3D12 所需版本。
+
+## 运行导航
+
+没有 VLM 凭据时，先运行随机评分调试模式：
 
 ```bash
-sim/habitat/run.sh python -m robot_nav habitat \
+env HABITAT_RENDERER=gpu sim/habitat/run.sh \
+  python -m robot_nav habitat \
   --scene data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb \
   --target "门口" \
-  --max-cycles 200
+  --seed 1 \
+  --debug-random-score \
+  --max-cycles 100
 ```
 
-入口默认使用 OpenCode Go Anthropic Messages API 和 `qwen3.7-plus`。提示词为
-英文；请求显式发送 `thinking: disabled`，即使用开关式推理的最低档（关闭）。
-它负责组装 Adapter、目标观察器和周期循环；
-`run_navigation_cycle` 仍是环境无关的单周期入口。`sim/habitat/` 只保存 Habitat
-环境、渲染包装和 Adapter 验证脚本，不包含导航算法。
+该模式不调用模型，只能检查扫描、Frontier、路径规划、运动和回退，不能识别
+目标。相同场景和 `--seed` 会使用相同随机起点。
 
-没有可用凭据时可用调试随机感知模式启动（不要求任何 Key，也不会
-创建或调用任何 OpenAI-compatible 观察器）：
+正式语义搜索先执行 `opencode auth login`，再去掉
+`--debug-random-score`。也可以用 `ROBOT_NAV_VLM_API_KEY` 显式覆盖凭据。默认
+模型为 OpenCode Go 的 `qwen3.7-plus`，提示词使用英文并关闭 thinking。
+
+场景搜索额外增加：
 
 ```bash
-sim/habitat/run.sh python -m robot_nav habitat \
-  --scene data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb \
-  --target "门口" \
-  --max-cycles 200 \
-  --debug-random-score
+--search-mode scene --target "洗手间"
 ```
 
-该模式下观察器对扫描帧返回 `NOT_VISIBLE`，并为一轮中的整批 Frontier 生成
-0 到 1 的随机分数；只用于调试扫描、Frontier、移动和回退流程，无法识别或
-到达语义目标。
+场景模式必须使用 VLM，不能与 `--debug-random-score` 同时使用。
 
-完整导航默认启动 Rerun Web Viewer 实时可视化（记录算法决策帧及 Habitat 每个
-动作后的 RGB、米制深度、三色占用图、机器人位姿与轨迹，同时保留最近的控制
-命令、历史候选点和算法状态），
-其中 `model/interaction` 按时间用一张 CJK 交互卡片显示每次 VLM 的完整提示词、
-实际输入图、请求参数、原始回应和解析结果；目标定位成功时会在输入 RGB 上
-叠加目标框。
-默认自动打开浏览器，未自动打开时使用该链接
-[Rerun Web Viewer](http://127.0.0.1:9090/?url=ws://127.0.0.1:9877)；该地址
-显式连接 9877 数据端口，同时避免 Rerun 继承 Habitat 的无窗口 EGL 图形环境。
-不需要时加 `--no-rerun` 关闭。
+## Rerun
 
-当前 adapter demo 仍只验证仿真输入边界，不调用外部模型，也不会假造语义
-目标结果。
+导航默认打开 Rerun Web Viewer；未自动打开时访问：
 
-## Adapter 约定
+[http://127.0.0.1:9090/?url=ws://127.0.0.1:9877](http://127.0.0.1:9090/?url=ws://127.0.0.1:9877)
 
-- 内部二维坐标固定为 `x = Habitat x`、`y = -Habitat z`；Habitat top-down
-  map 的行方向在 Adapter 内翻转，core 不感知 Habitat 坐标。
-- 障碍图只公开机器人附近和相机视野内、未被 navmesh 障碍遮挡的已知区域；
-  其他区域为 `None`，供 Frontier 算法探索。
-- 相对位姿命令先用 navmesh 检查路径和终点，再由 Habitat
-  `GreedyGeodesicFollower` 按默认 0.25 m 前进、10° 转向动作逐步执行；每步
-  更新已知地图并按需送入 Rerun。
-- 动作中间帧不额外调用 VLM 或推进算法状态；到达命令终点后才开始下一导航
-  周期。当前仍是 navmesh 约束的离散运动，不包含电机、惯性等真实动力学。
+主要视图含义：
+
+- RGB、深度和当前占用图。
+- 绿色 Frontier、黄色选中点、橙色算法命令。
+- 红色 Adapter 实际目标、紫色 navmesh 路径、蓝色机器人轨迹。
+- VLM 标签页中的实际输入图、提示词、原始输出和解析结果。
+
+使用 `--no-rerun` 可关闭界面。
+
+## Adapter 行为
+
+- 内部二维坐标为 `x = Habitat x`、`y = -Habitat z`；top-down map 的行方向在
+  Adapter 内完成转换。
+- 地图只公开机器人附近和相机视野中具有 navmesh 视线的区域，其余格为未知，
+  供 Frontier 算法逐步探索。
+- 相对位姿目标先投影到 navmesh，再使用 `GreedyGeodesicFollower` 按 0.25 m
+  前进和 10° 转向的离散动作执行。
+- 目标无法投影、没有路径或 follower 无法生成动作时，Adapter 报告可恢复运动
+  失败，核心算法会淘汰当前候选并继续。
+- 动作中间帧会送入 Rerun，但不会额外推进算法状态或调用 VLM。
+
+## 常见输出
+
+测试场景可能提示缺少 `.scn` 或 `info_semantic.json`。这表示场景没有 Habitat
+语义标注，不影响本项目使用 RGB、深度、navmesh、位姿和占用图。
+
+如果输出停在渲染后端之前，先确认已经激活 `robot-nav-habitat`；如果强制 GPU
+时 EGL 自检失败，检查 `/dev/dxg`、WSLg、Arch Mesa 和 Windows NVIDIA 驱动。
