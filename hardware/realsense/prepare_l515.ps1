@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$BindBusId = ""
+    [string]$ForceBindBusId = ""
 )
 
 Set-StrictMode -Version Latest
@@ -73,40 +73,75 @@ function Get-L515 {
 }
 
 
-function Invoke-ElevatedBind {
+function Get-UsbipdDeviceByBusId {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Devices,
+        [Parameter(Mandatory = $true)][string]$BusId
+    )
+    $matches = @(
+        $Devices | Where-Object {
+            ($null -ne $_.BusId) -and ([string]$_.BusId -eq $BusId)
+        }
+    )
+    if ($matches.Count -ne 1) {
+        throw "Expected exactly one USB device at bus ID $BusId, found $($matches.Count)."
+    }
+    return $matches[0]
+}
+
+
+function Invoke-ElevatedForceBind {
     param([Parameter(Mandatory = $true)][string]$BusId)
     if ($BusId -notmatch "^[0-9]+-[0-9]+(?:\.[0-9]+)*$") {
         throw "Invalid USB bus ID '$BusId'."
     }
     $powerShellPath = (Get-Process -Id $PID).Path
     $argumentList = (
-        '-NoProfile -ExecutionPolicy Bypass -File "{0}" -BindBusId "{1}"' -f
+        '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ForceBindBusId "{1}"' -f
         $PSCommandPath.Replace('"', '""'), $BusId
     )
-    Write-Host "Windows UAC confirmation is required to share L515."
+    Write-Host "Windows UAC confirmation is required to force-bind L515 for WSL."
     $process = Start-Process -FilePath $powerShellPath -Verb RunAs -ArgumentList $argumentList -Wait -PassThru
     if ($process.ExitCode -ne 0) {
-        throw "Elevated usbipd bind failed with exit code $($process.ExitCode)."
+        throw "Elevated usbipd force-bind failed with exit code $($process.ExitCode)."
     }
 }
 
 
 $script:UsbipdExecutable = Get-UsbipdExecutable
 
-if (-not [string]::IsNullOrWhiteSpace($BindBusId)) {
+if (-not [string]::IsNullOrWhiteSpace($ForceBindBusId)) {
     if (-not (Test-IsAdministrator)) {
-        throw "The bind-only mode must run with Administrator privileges."
+        throw "The force-bind mode must run with Administrator privileges."
     }
-    Invoke-Usbipd -Arguments @("bind", "--busid", $BindBusId)
+    $state = Get-UsbipdState
+    $device = Get-UsbipdDeviceByBusId -Devices $state.Devices -BusId $ForceBindBusId
+    if ($null -ne $device.ClientIPAddress) {
+        Invoke-Usbipd -Arguments @("detach", "--busid", $ForceBindBusId)
+        Start-Sleep -Milliseconds 500
+    }
+    if ($null -ne $device.PersistedGuid) {
+        Invoke-Usbipd -Arguments @("unbind", "--busid", $ForceBindBusId)
+        Start-Sleep -Milliseconds 500
+    }
+    Invoke-Usbipd -Arguments @("bind", "--force", "--busid", $ForceBindBusId)
     exit 0
 }
 
 $state = Get-UsbipdState
 $l515 = Get-L515 -Devices $state.Devices
-if ($null -eq $l515.PersistedGuid) {
-    Invoke-ElevatedBind -BusId ([string]$l515.BusId)
+if (-not [bool]$l515.IsForced) {
+    if ($null -ne $l515.ClientIPAddress) {
+        Write-Host "Detaching L515 before replacing the normal share with a force binding."
+        Invoke-Usbipd -Arguments @("detach", "--busid", [string]$l515.BusId)
+        Start-Sleep -Milliseconds 500
+    }
+    Invoke-ElevatedForceBind -BusId ([string]$l515.BusId)
     $state = Get-UsbipdState
     $l515 = Get-L515 -Devices $state.Devices
+    if (-not [bool]$l515.IsForced) {
+        throw "L515 force binding was not recorded by usbipd."
+    }
 }
 if ($null -ne $l515.ClientIPAddress) {
     Write-Host "L515 is already attached to a USB/IP client."

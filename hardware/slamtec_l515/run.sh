@@ -10,6 +10,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd -- "$script_dir/../.." && pwd)"
 realsense_dir="$(cd -- "$script_dir/../realsense" && pwd)"
 rsusb_prefix="$realsense_dir/.rsusb"
+l515_vendor_id="8086"
+l515_product_id="0b64"
+l515_enumeration_attempts=60
+l515_permission_attempts=20
+l515_enumeration_interval_s=0.25
 
 # 项目中的模型和 Ultralytics 权重均使用相对项目根目录的固定位置。
 cd "$project_root"
@@ -53,24 +58,48 @@ prepare_l515_usb() {
         -File "$windows_script_path"
 }
 
-check_l515_access() {
+find_l515_sysfs_device() {
     local candidate
-    local device=""
-    local usb_node
     for candidate in /sys/bus/usb/devices/*; do
         [[ -f "$candidate/idVendor" && -f "$candidate/idProduct" ]] || continue
-        if [[ "$(<"$candidate/idVendor")" == "8086" && \
-              "$(<"$candidate/idProduct")" == "0b64" ]]; then
-            device="$candidate"
-            break
+        if [[ "$(<"$candidate/idVendor")" == "$l515_vendor_id" && \
+              "$(<"$candidate/idProduct")" == "$l515_product_id" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
         fi
     done
+    return 1
+}
+
+check_l515_access() {
+    local attempt
+    local device=""
+    local usb_node
+
+    for ((attempt = 1; attempt <= l515_enumeration_attempts; attempt++)); do
+        if device="$(find_l515_sysfs_device)"; then
+            break
+        fi
+        if ((attempt == 1)); then
+            echo "正在等待 WSL 枚举 L515……"
+        fi
+        sleep "$l515_enumeration_interval_s"
+    done
     if [[ -z "$device" ]]; then
-        echo "USB 转发后仍未发现 L515（8086:0b64）。" >&2
+        echo "USB 转发后等待 15 秒仍未发现 L515（8086:0b64）。" >&2
         exit 1
     fi
     printf -v usb_node "/dev/bus/usb/%03d/%03d" \
         "$(<"$device/busnum")" "$(<"$device/devnum")"
+    if [[ ! -r "$usb_node" || ! -w "$usb_node" ]]; then
+        echo "正在等待 L515 udev 权限规则生效……"
+        for ((attempt = 1; attempt <= l515_permission_attempts; attempt++)); do
+            sleep "$l515_enumeration_interval_s"
+            if [[ -r "$usb_node" && -w "$usb_node" ]]; then
+                break
+            fi
+        done
+    fi
     if [[ ! -r "$usb_node" || ! -w "$usb_node" ]]; then
         echo "当前用户无 L515 USB 读写权限：$usb_node" >&2
         echo "请先运行：hardware/realsense/setup_usb_permissions.sh" >&2
