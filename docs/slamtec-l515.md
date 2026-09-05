@@ -225,12 +225,25 @@ Rerun 默认开启，使用 `--no-rerun` 关闭。主要图形含义：
 - 紫色：Hermes 返回的剩余规划路径。
 - 蓝色：机器人实际轨迹。
 
-右侧标签页显示 YOLO、SAM2、VLM 和状态详情。VLM 页面保留实际输入图、完整
-提示词、原始输出和解析结果。
+World 隐藏自动浮动标签；侧栏 `Live` 显示实时位姿和最近决策，`Frontiers` 表格
+显示编号与暂存顺序，编号链接到对应点。右侧其他标签页显示 YOLO、SAM2、VLM
+和状态详情。VLM 页面保留实际输入图、完整提示词、原始输出和解析结果。
+`Frontiers` 还列出被未知路径屏蔽的区域，状态栏用 `blocked` 显示数量。
 
 每次导航还会在 `data/run_logs/` 创建 JSONL 日志，记录每周期决策、候选摘要、
-世界目标和 Action 位姿反馈；图像、深度和完整地图仍只放在 Rerun。使用
-`--run-log <PATH>` 可以指定日志文件。
+世界目标和 Action 位姿反馈。使用 `--run-log <PATH>` 可以指定 JSONL 文件。
+取消结果的 `rejection_scope=region` 表示整片屏蔽，`rejected_path_world_xy`
+保存被拒绝路径；状态中的 `blocked_frontier_regions` 列出屏蔽记录摘要。
+
+Rerun 开启时，还会从启动开始持续写入 `data/run_logs/rerun-*.rrd`，保存图像、
+深度、完整地图、界面状态和默认布局，终端打印完整路径。
+`--rerun-save <PATH>` 可指定新文件，不覆盖已有文件；`--no-rerun` 同时关闭
+界面和录制。RRD 可用 Rerun 0.22.1 打开回放。
+
+Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB），WebSocket 服务缓存默认是
+系统总内存的 25%。内存淘汰旧帧不影响独立写入的 RRD，界面不会自动从磁盘
+补回旧帧。正常退出时 SDK 刷新并关闭录制；强制杀进程或断电可能丢失最后
+尚未写出的数据。磁盘文件会随运行持续增长。
 
 ## 常用参数
 
@@ -243,7 +256,8 @@ Rerun 默认开启，使用 `--no-rerun` 关闭。主要图形含义：
 | `--min-localization-quality` | 定位模式最低质量，默认 1 |
 | `--camera-serial` | 多台 RealSense 时选择 L515 |
 | `--debug-frontier` | 打印本轮 Frontier 评分明细 |
-| `--no-rerun` | 关闭 Rerun |
+| `--rerun-save` | 指定 RRD 录制路径，默认自动创建 |
+| `--no-rerun` | 关闭 Rerun 界面及录制 |
 
 完整参数以 `python -m robot_nav slamtec-l515 --help` 为准。
 

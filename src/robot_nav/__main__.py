@@ -505,7 +505,13 @@ def _add_navigation_arguments(
     parser.add_argument(
         "--no-rerun",
         action="store_true",
-        help="不启动 Rerun 实时可视化",
+        help="关闭 Rerun 实时可视化及自动录制",
+    )
+    parser.add_argument(
+        "--rerun-save",
+        type=Path,
+        metavar="PATH",
+        help="Rerun 录制路径；默认在 data/run_logs/ 自动创建 RRD，不覆盖已有文件",
     )
     parser.add_argument(
         "--debug-random-score",
@@ -1241,7 +1247,7 @@ def _build_visualization(args: argparse.Namespace):
 
     from .visualization import RerunVisualizer
 
-    visualizer = RerunVisualizer(args.target)
+    visualizer = RerunVisualizer(args.target, recording_path=args.rerun_save)
     return (
         visualizer.log_cycle,
         visualizer.log_motion_frame,

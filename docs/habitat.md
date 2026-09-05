@@ -67,7 +67,7 @@ env HABITAT_RENDERER=gpu sim/habitat/run.sh \
   --max-cycles 100
 ```
 
-该模式不调用模型，只能检查扫描、Frontier、路径规划、运动和回退，不能识别
+该模式不调用模型，只能检查扫描、Frontier、路径规划、运动和重新选点，不能识别
 目标。相同场景和 `--seed` 会使用相同随机起点。
 
 正式语义搜索先执行 `opencode auth login`，再去掉
@@ -84,9 +84,12 @@ env HABITAT_RENDERER=gpu sim/habitat/run.sh \
 
 ## Rerun
 
-导航默认打开 Rerun Web Viewer；未自动打开时访问：
+导航启动 Rerun Web 服务但不自动打开浏览器，请手动访问：
 
 [http://127.0.0.1:9090/?url=ws://127.0.0.1:9877](http://127.0.0.1:9090/?url=ws://127.0.0.1:9877)
+
+启动时依次显示服务启动、界面布局发送和 Viewer 地址，之后才初始化 Habitat。
+若尚未显示 Viewer 地址就停住，应先检查 Rerun 启动阶段。
 
 主要视图含义：
 
@@ -95,7 +98,30 @@ env HABITAT_RENDERER=gpu sim/habitat/run.sh \
 - 红色 Adapter 实际目标、紫色 navmesh 路径、蓝色机器人轨迹。
 - VLM 标签页中的实际输入图、提示词、原始输出和解析结果。
 
-使用 `--no-rerun` 可关闭界面。
+World 中不自动显示 Frontier 文字标签，避免遮挡轨迹。侧栏 `Live` 显示随运动帧
+更新的位姿和最近决策；`Frontiers` 表格显示候选编号、状态、暂存顺序、路径距离
+与分数，点击编号可选中对应点。完整决策详情位于 `Status` 标签页。
+
+开启界面时自动从启动开始持续录制到 `data/run_logs/rerun-*.rrd`，终端显示
+完整路径。`--rerun-save <PATH>` 可指定新文件，不覆盖已有文件；`--no-rerun`
+同时关闭界面和录制。录制包含图像、地图、状态及默认布局，可在 Rerun 0.22.1
+中打开回放。
+
+Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB）；WebSocket 服务端缓存另有
+系统总内存 25% 的上限。内存淘汰旧数据不影响独立写入的 RRD，但界面不会自动
+从磁盘补回已淘汰帧。正常退出时 SDK 刷新并关闭录制，强制杀进程或断电仍可能
+丢失最后尚未写出的数据；磁盘文件会随运行持续增长。
+
+前往 Frontier 时，黄色点与橙色命令指向同一个最终位置，等待本次移动结束后再决策。
+返回父节点时，橙色命令指向本次返回节点，`Live` 显示节点编号、分支深度与
+该节点暂存方向数。
+区域用 `region:N` 标识，状态面板显示局部 Frontier 待检查点与复用点数；首次
+环扫后，只补查含局部可见 Frontier 且覆盖不可复用的方向。`scan basis` 显示
+观察依据，具体规则见 [算法说明](algorithm.md)。
+`frontier choice` 的 `source=new` 表示优先探索新方向，`source=deferred` 表示
+新候选耗尽后逐个返回父节点，遇到仍有有效方向的节点再继续探索，对应 `backtrack.return` 与
+`backtrack.resume`；`--debug-frontier` 同时显示返回目标、新旧数量和暂存顺序。
+达到 `--max-cycles` 不代表搜索已完成。
 
 ## Adapter 行为
 
@@ -106,7 +132,10 @@ env HABITAT_RENDERER=gpu sim/habitat/run.sh \
 - 相对位姿目标先投影到 navmesh，再使用 `GreedyGeodesicFollower` 按 0.25 m
   前进和 10° 转向的离散动作执行。
 - 目标无法投影、没有路径或 follower 无法生成动作时，Adapter 报告可恢复运动
-  失败，核心算法会淘汰当前候选并继续。
+  失败；Frontier 移动会淘汰当前目标并继续，返回父节点失败则跳过该返回节点，
+  从实际位置重新观察，其有效 Frontier 继续作为候选。
+- 返回动作结束后距父节点须不超过 0.25 m；超出容差时以 `motion.backtrack_recovered`
+  记录原因并继续搜索，不重复发送同一失败节点的返回命令。
 - 动作中间帧会送入 Rerun，但不会额外推进算法状态或调用 VLM。
 
 ## 常见输出

@@ -242,8 +242,21 @@ Hermes 的 Frontier 与回退命令使用决策帧位姿还原固定的世界目
 
 - 终端输出的 `phase` 表示大阶段，`stage` 表示当前具体步骤。
 - `--debug-frontier` 在下发移动前打印候选坐标、跨度、路径距离、VLM 分数和
-  总分。
+  总分，以及新旧方向数量、选择来源和暂存顺序；返回时打印节点、返回目标、分支
+  深度与该节点暂存方向数。
 - Rerun 用于对照算法候选、实际命令、Adapter 目标、规划路径和机器人轨迹。
+  前往 Frontier 时黄色点与橙色命令指向同一个最终位置；`backtrack.return` 的
+  橙色命令指向当前返回节点，`Live` 显示节点、分支深度与该节点暂存方向数。
+  World 隐藏浮动标签，稳定区域 ID
+  与暂存顺序在侧栏 `Frontiers` 表格查看，实时位姿在 `Live` 查看。
+- 状态面板区分局部 Frontier 点、待检查点和复用点；`scan basis` 区分首次环扫、
+  Frontier 补查与当前位置场景确认。JSONL 记录实际相机位置、覆盖点数与时间戳。
+  Rerun 的 `navigation/status_text` 同时保留可查询的状态文本。
+- 探索动作的失败或停滞原因保留在移动历史中，下一周期可在 Rerun 状态面板查看。
+- `Frontiers` 面板列出因未知路径被屏蔽的区域；JSONL 的 `rejection_scope=region`
+  与 `blocked_frontier_regions` 可区分整片屏蔽和普通目标点失败。
+- 返回恢复日志记录 `issue_kind`、`skipped_backtrack_node_id` 与释放的 Frontier；
+  位置超差时还记录实际位置、父节点位置、距离和到达容差。
 - Hermes 每次正式导航还会写入 `data/run_logs/` 下的 JSONL 日志。
 
 所有距离使用米，角度使用弧度且逆时针为正。完整数据契约见

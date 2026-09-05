@@ -98,7 +98,8 @@ python -m pip install -e '.[visualization]'
   物体模式使用 YOLO-World + SAM2。
 - S100 + L515：可由 `slam_toolbox` 生成位姿和占用图，也保留小范围直接模式。
 - Rerun：显示 RGB、深度、地图、Frontier、机器人轨迹、算法目标、底盘目标和
-  规划路径。
+  规划路径，同时持续写入 `data/run_logs/rerun-*.rrd`。`--rerun-save <PATH>`
+  可指定新文件路径；`--no-rerun` 同时关闭界面和录制。
 - Hermes JSONL 日志：记录每周期决策、候选评分和 Action 反馈，供事后复盘。
 
 ## 主要目录

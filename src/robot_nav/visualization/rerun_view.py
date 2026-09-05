@@ -5,7 +5,10 @@ from __future__ import annotations
 import math
 import os
 import threading
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from uuid import uuid4
 
 import numpy as np
 
@@ -41,7 +44,6 @@ SELECTED_FRONTIER_RGB = (255, 210, 0)
 OBSERVATION_NODE_RGB = (245, 245, 245)
 SCAN_HEADING_RGB = (100, 170, 255)
 CURRENT_SCAN_HEADING_RGB = (255, 100, 180)
-WORLD_HUD_RGB = (210, 225, 235)
 SELECTED_FRONTIER_RADIUS_CELLS = 1
 
 FrontierMarker = Tuple[int, int, Tuple[int, int, int], int]
@@ -51,6 +53,7 @@ DIRECTION_COLORS = {
     SearchDirectionState.COMMITTED: (0, 170, 255),
     SearchDirectionState.EXPLORED: (130, 130, 130),
     SearchDirectionState.INVALIDATED: (255, 70, 70),
+    SearchDirectionState.STALLED: (255, 150, 40),
 }
 
 COMMAND_HEADING_LENGTH_M = 0.6
@@ -61,7 +64,6 @@ ROBOT_FRONT_M = 0.30
 ROBOT_REAR_M = 0.20
 ROBOT_HALF_WIDTH_M = 0.22
 ROBOT_LINE_RADIUS_M = 0.035
-WORLD_HUD_MARGIN_RATIO = 0.04
 OCCUPANCY_THRESHOLD = 0.5
 
 STATUS_IMAGE_WIDTH = 560
@@ -91,12 +93,18 @@ STATUS_FONT_CANDIDATES = (
 )
 
 _FONT_NOTICE_PRINTED = False
+RERUN_SERVER_MEMORY_LIMIT = "25%"
 
 
 class RerunVisualizer:
-    """显示传感器、地图、轨迹和算法状态的实时调试界面。"""
+    """把传感器、地图、轨迹和算法状态同时送往实时界面与 RRD 文件。"""
 
-    def __init__(self, target_text: str) -> None:
+    def __init__(
+        self,
+        target_text: str,
+        *,
+        recording_path: Optional[Path] = None,
+    ) -> None:
         try:
             import rerun as rr
         except ImportError as exc:
@@ -119,15 +127,69 @@ class RerunVisualizer:
         if self._panel_font is None:
             _print_font_notice_once()
         rr.init("robot-nav")
+        live_recording = rr.get_data_recording()
+        if live_recording is None:
+            raise RuntimeError("Rerun 未创建实时记录流")
+
+        if recording_path is None:
+            timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+            recording_path = Path("data/run_logs") / f"rerun-{timestamp}-{os.getpid()}.rrd"
+        recording_path = recording_path.expanduser().resolve()
+        recording_path.parent.mkdir(parents=True, exist_ok=True)
+        # save 会覆盖文件；先独占创建，拒绝覆盖用户已有的录制。
+        with recording_path.open("xb"):
+            pass
+        # 0.22.1 的 save / serve_web 会替换各自记录流的 sink。
+        # 用不同 ID 建立独立文件流，避免保存文件时关闭实时服务。
+        disk_recording = rr.new_recording("robot-nav", recording_id=uuid4())
+        rr.save(recording_path, recording=disk_recording)
+        self._recordings = (disk_recording, live_recording)
+        print(f"Rerun 自动录制文件：{recording_path}", flush=True)
+        # Rerun 0.22.1 的 serve_web 持有 GIL 等待 sink 切换完成；必须在
+        # 发送 blueprint / Arrow 数据前启动，避免后台释放数据时争用 GIL。
+        # 浏览器由用户手动打开，Rerun 启动不依赖 WSL 的浏览器调用。
+        print(
+            "正在启动 Rerun Web 服务；启动后请手动打开显示的地址。",
+            flush=True,
+        )
+        rr.serve_web(
+            open_browser=False,
+            web_port=9090,
+            ws_port=9877,
+            recording=live_recording,
+            server_memory_limit=RERUN_SERVER_MEMORY_LIMIT,
+        )
+        print("Rerun Web 服务已启动；正在发送界面布局。", flush=True)
         _send_default_blueprint(
             rr,
+            recordings=self._recordings,
             text_panels_as_images=self._panel_font is not None,
         )
-        rr.serve_web(open_browser=True, web_port=9090, ws_port=9877)
+        # 0.22.1 的 flush 位于记录流对象上；等待时会释放 GIL。
+        # 文件由 SDK 后台持续写入；SDK 的退出钩子负责刷新并关闭两个流。
+        for recording in self._recordings:
+            recording.flush(blocking=True)
         print(
             "Rerun Web Viewer 地址："
-            "http://127.0.0.1:9090/?url=ws://127.0.0.1:9877"
+            "http://127.0.0.1:9090/?url=ws://127.0.0.1:9877",
+            flush=True,
         )
+
+    def _log(
+        self,
+        entity_path: str,
+        entity: Any,
+        *extra: Any,
+        static: bool = False,
+    ) -> None:
+        """同一份可视化数据写入文件和实时流，不依赖 Viewer 是否保留旧帧。"""
+        for recording in self._recordings:
+            self._rr.log(entity_path, entity, *extra, static=static, recording=recording)
+
+    def _set_frame_time(self, sample_index: int) -> None:
+        """每个回调线程都为两个记录流设置相同的 frame 时间。"""
+        for recording in self._recordings:
+            self._rr.set_time_sequence("frame", sample_index, recording=recording)
 
     def log_cycle(
         self,
@@ -156,9 +218,9 @@ class RerunVisualizer:
         self._log_robot_pose(frame)
         self._log_command(frame, result)
         self._log_scan_plan(frame, result)
-        self._log_current_frontiers()
+        self._log_current_frontiers(result)
         self._log_history(result)
-        self._log_world_hud(frame, result)
+        self._log_motion_status(frame, result)
         self._log_status(frame, observation, result)
 
     def log_motion_frame(self, frame: NavigationFrame) -> None:
@@ -174,7 +236,7 @@ class RerunVisualizer:
         self._log_occupancy_map(frame)
         self._log_robot_pose(frame)
         if self._last_result is not None:
-            self._log_world_hud(frame, self._last_result)
+            self._log_motion_status(frame, self._last_result)
 
     def log_motion_plan(
         self,
@@ -186,7 +248,7 @@ class RerunVisualizer:
             if self._sample_index == 0:
                 self._begin_sample()
             else:
-                self._rr.set_time_sequence("frame", self._sample_index)
+                self._set_frame_time(self._sample_index)
             self._log_motion_plan(
                 target_world_xy,
                 remaining_path_world_xy,
@@ -198,15 +260,15 @@ class RerunVisualizer:
         remaining_path_world_xy: Tuple[Tuple[float, float], ...],
     ) -> None:
         if target_world_xy is None:
-            self._rr.log("world/motion_plan", self._rr.Clear(recursive=True))
-            self._rr.log(
+            self._log("world/motion_plan", self._rr.Clear(recursive=True))
+            self._log(
                 "map/occupancy/motion_plan",
                 self._rr.Clear(recursive=True),
             )
             return
 
         target_view = _world_to_view_point(target_world_xy)
-        self._rr.log(
+        self._log(
             "world/motion_plan/target",
             self._rr.Points2D(
                 [target_view],
@@ -215,7 +277,7 @@ class RerunVisualizer:
             ),
         )
         if len(remaining_path_world_xy) >= 2:
-            self._rr.log(
+            self._log(
                 "world/motion_plan/path",
                 self._rr.LineStrips2D(
                     [[
@@ -236,7 +298,7 @@ class RerunVisualizer:
         if target_pixel is None:
             self._clear("map/occupancy/motion_plan/target")
         else:
-            self._rr.log(
+            self._log(
                 "map/occupancy/motion_plan/target",
                 self._rr.Points2D(
                     [target_pixel],
@@ -256,7 +318,7 @@ class RerunVisualizer:
             len(path_pixels) >= 2
             and len(path_pixels) == len(remaining_path_world_xy)
         ):
-            self._rr.log(
+            self._log(
                 "map/occupancy/motion_plan/path",
                 self._rr.LineStrips2D(
                     [path_pixels],
@@ -279,7 +341,7 @@ class RerunVisualizer:
             if self._sample_index == 0:
                 self._begin_sample()
             else:
-                self._rr.set_time_sequence("frame", self._sample_index)
+                self._set_frame_time(self._sample_index)
             self._log_local_detection_image(frame, observation)
             self._log_sam2_result(frame, observation)
             confidence = (
@@ -297,7 +359,7 @@ class RerunVisualizer:
                 f"reason: {observation.reason or '-'}",
             )
             if self._panel_font is None:
-                self._rr.log(
+                self._log(
                     "model/yolo_world/status",
                     self._rr.TextDocument(
                         "\n".join(_ascii_only(line) for line in status_lines),
@@ -305,7 +367,7 @@ class RerunVisualizer:
                     ),
                 )
             else:
-                self._rr.log(
+                self._log(
                     "model/yolo_world/status",
                     self._rr.Image(
                         _render_status_image(self._panel_font, status_lines)
@@ -329,7 +391,7 @@ class RerunVisualizer:
             image = image.copy()
         if observation.bbox_norm is not None:
             _draw_bbox_outline(image, observation.bbox_norm, BBOX_RGB)
-        self._rr.log("model/yolo_world/latest", self._rr.Image(image))
+        self._log("model/yolo_world/latest", self._rr.Image(image))
 
     def log_vlm_interaction(
         self,
@@ -349,13 +411,13 @@ class RerunVisualizer:
                 self._begin_sample()
             sample_index = self._sample_index
             self._vlm_samples[interaction.interaction_id] = sample_index
-        self._rr.set_time_sequence("frame", sample_index)
+        self._set_frame_time(sample_index)
         self._log_vlm_card(interaction)
 
     def _log_vlm_card(self, interaction: VlmInteraction) -> None:
         """用本机 CJK 字体渲染单一卡片，避免 Rerun 中文字体问题。"""
         if self._panel_font is None:
-            self._rr.log(
+            self._log(
                 "model/interaction",
                 self._rr.TextDocument(
                     _ascii_only(_vlm_card_text(interaction)),
@@ -363,7 +425,7 @@ class RerunVisualizer:
                 ),
             )
             return
-        self._rr.log(
+        self._log(
             "model/interaction",
             self._rr.Image(
                 _render_vlm_interaction_card(
@@ -376,7 +438,7 @@ class RerunVisualizer:
     def _begin_sample(self) -> None:
         """让决策帧与运动帧共享同一条递增时间轴。"""
         self._sample_index += 1
-        self._rr.set_time_sequence("frame", self._sample_index)
+        self._set_frame_time(self._sample_index)
 
     def _log_rgb(
         self,
@@ -385,13 +447,13 @@ class RerunVisualizer:
     ) -> None:
         """记录 RGB，叠加 SAM2 掩码，并把检测框换算为像素框。"""
         if frame.rgb is None or len(frame.rgb) == 0 or len(frame.rgb[0]) == 0:
-            self._rr.log("camera/rgb", self._rr.Clear(recursive=True))
+            self._log("camera/rgb", self._rr.Clear(recursive=True))
             return
 
         image = _rgb_to_numpy(frame.rgb)
         if observation is not None and observation.target_mask is not None:
             image = _overlay_target_mask(image, observation.target_mask)
-        self._rr.log("camera/rgb", self._rr.Image(image))
+        self._log("camera/rgb", self._rr.Image(image))
         if observation is None or observation.bbox_norm is None:
             self._clear("camera/rgb/target")
             return
@@ -401,7 +463,7 @@ class RerunVisualizer:
             height=image.shape[0],
             width=image.shape[1],
         )
-        self._rr.log(
+        self._log(
             "camera/rgb/target",
             self._rr.Boxes2D(
                 mins=[box_min],
@@ -426,7 +488,7 @@ class RerunVisualizer:
         ]
         if observation.target_mask is None:
             status_lines.append("mask: not available in this observation")
-            self._rr.log(
+            self._log(
                 "model/sam2/status",
                 self._rr.TextDocument(
                     "\n".join(status_lines),
@@ -437,7 +499,7 @@ class RerunVisualizer:
 
         if frame.rgb is None or len(frame.rgb) == 0 or len(frame.rgb[0]) == 0:
             status_lines.append("mask: RGB image is unavailable")
-            self._rr.log(
+            self._log(
                 "model/sam2/status",
                 self._rr.TextDocument(
                     "\n".join(status_lines),
@@ -476,12 +538,12 @@ class RerunVisualizer:
                     "image: latest successful result is retained",
                 )
             )
-            self._rr.log(
+            self._log(
                 "model/sam2/latest_success",
                 self._rr.Image(result_image),
             )
 
-        self._rr.log(
+        self._log(
             "model/sam2/status",
             self._rr.TextDocument(
                 "\n".join(status_lines),
@@ -498,7 +560,7 @@ class RerunVisualizer:
         ):
             self._clear("camera/depth")
             return
-        self._rr.log(
+        self._log(
             "camera/depth",
             self._rr.DepthImage(_depth_to_numpy(frame.depth), meter=1.0),
         )
@@ -507,11 +569,11 @@ class RerunVisualizer:
         """显示占据栅格，并在对应格子直接叠加当前 Frontier。"""
         occupancy = frame.obstacle_map.occupancy
         if len(occupancy) == 0 or len(occupancy[0]) == 0:
-            self._rr.log("map/occupancy", self._rr.Clear(recursive=True))
+            self._log("map/occupancy", self._rr.Clear(recursive=True))
             return
         image = _occupancy_to_rgb_numpy(occupancy)
         _draw_frontier_markers(image, self._frontier_markers)
-        self._rr.log("map/occupancy", self._rr.Image(np.flipud(image).copy()))
+        self._log("map/occupancy", self._rr.Image(np.flipud(image).copy()))
 
     def _update_frontier_markers(self, result: NavigationResult) -> None:
         """保存当前决策的 Frontier，供随后运动帧继续显示。"""
@@ -551,7 +613,7 @@ class RerunVisualizer:
         """用朝向三角形在 world 和 map 中记录机器人实时位姿。"""
         world_position = (frame.pose.x_m, frame.pose.y_m)
         triangle_world = _robot_triangle_world(frame.pose)
-        self._rr.log(
+        self._log(
             "world/robot",
             self._rr.LineStrips2D(
                 [[_world_to_view_point(point) for point in triangle_world]],
@@ -563,7 +625,7 @@ class RerunVisualizer:
         if not self._trajectory_xy or world_position != self._trajectory_xy[-1]:
             self._trajectory_xy.append(world_position)
         if len(self._trajectory_xy) >= 2:
-            self._rr.log(
+            self._log(
                 "world/trajectory",
                 self._rr.LineStrips2D(
                     [[_world_to_view_point(point) for point in self._trajectory_xy]],
@@ -582,12 +644,12 @@ class RerunVisualizer:
             if pixel is not None
         )
         if len(triangle) != 4:
-            self._rr.log(
+            self._log(
                 "map/occupancy/robot", self._rr.Clear(recursive=True)
             )
             return
 
-        self._rr.log(
+        self._log(
             "map/occupancy/robot",
             self._rr.LineStrips2D(
                 [triangle],
@@ -606,7 +668,7 @@ class RerunVisualizer:
         if len(trajectory) < 2:
             self._clear("map/occupancy/trajectory")
             return
-        self._rr.log(
+        self._log(
             "map/occupancy/trajectory",
             self._rr.LineStrips2D(
                 [trajectory],
@@ -620,8 +682,8 @@ class RerunVisualizer:
         """在 world 和 map 中显示本周期平移目标与目标朝向。"""
         command = result.command
         if command is None:
-            self._rr.log("world/command", self._rr.Clear(recursive=True))
-            self._rr.log(
+            self._log("world/command", self._rr.Clear(recursive=True))
+            self._log(
                 "map/occupancy/command", self._rr.Clear(recursive=True)
             )
             return
@@ -630,7 +692,7 @@ class RerunVisualizer:
         world_vector = _command_world_vector(command, frame.pose)
         target = (origin[0] + world_vector[0], origin[1] + world_vector[1])
         view_origin = _world_to_view_point(origin)
-        self._rr.log(
+        self._log(
             "world/command/translation",
             self._rr.Arrows2D(
                 origins=[view_origin],
@@ -639,7 +701,7 @@ class RerunVisualizer:
                 radii=0.04,
             ),
         )
-        self._rr.log(
+        self._log(
             "world/command/heading",
             self._rr.Arrows2D(
                 origins=[view_origin],
@@ -657,7 +719,7 @@ class RerunVisualizer:
         origin_pixel = _world_to_map_pixel(origin, frame)
         target_pixel = _world_to_map_pixel(target, frame)
         if origin_pixel is None or target_pixel is None:
-            self._rr.log(
+            self._log(
                 "map/occupancy/command", self._rr.Clear(recursive=True)
             )
             return
@@ -665,7 +727,7 @@ class RerunVisualizer:
             target_pixel[0] - origin_pixel[0],
             target_pixel[1] - origin_pixel[1],
         )
-        self._rr.log(
+        self._log(
             "map/occupancy/command/translation",
             self._rr.Arrows2D(
                 origins=[origin_pixel],
@@ -675,7 +737,7 @@ class RerunVisualizer:
                 draw_order=32.0,
             ),
         )
-        self._rr.log(
+        self._log(
             "map/occupancy/command/heading",
             self._rr.Arrows2D(
                 origins=[target_pixel],
@@ -698,7 +760,7 @@ class RerunVisualizer:
         """显示本轮全部机器人扫描朝向，并突出下一个待执行朝向。"""
         headings = result.state.scan_headings_world_rad
         if not headings:
-            self._rr.log("world/scan", self._rr.Clear(recursive=True))
+            self._log("world/scan", self._rr.Clear(recursive=True))
             return
 
         origin = (frame.pose.x_m, frame.pose.y_m)
@@ -714,7 +776,7 @@ class RerunVisualizer:
             ]
             for heading in headings
         ]
-        self._rr.log(
+        self._log(
             "world/scan/planned",
             self._rr.LineStrips2D(
                 strips,
@@ -724,7 +786,7 @@ class RerunVisualizer:
         )
         current_index = result.state.next_scan_index
         current_heading = headings[current_index]
-        self._rr.log(
+        self._log(
             "world/scan/current",
             self._rr.Arrows2D(
                 origins=[view_origin],
@@ -738,16 +800,25 @@ class RerunVisualizer:
             ),
         )
 
-    def _log_current_frontiers(self) -> None:
-        """在 world 中显示当前有效 Frontier 的代表点和评分摘要。"""
+    def _log_current_frontiers(self, result: NavigationResult) -> None:
+        """World 只画候选点；编号、暂存顺序和分数在独立面板中显示。"""
+        self._log(
+            "navigation/frontiers",
+            self._rr.TextDocument(
+                _frontier_table_text(self._current_frontiers, self._selected_frontier_id, result),
+                media_type="text/markdown",
+            ),
+        )
         if not self._current_frontiers:
             self._clear("world/current_frontiers")
             return
 
         positions = []
         colors = []
+        labels = []
         for candidate in self._current_frontiers:
             candidate_id = str(candidate["candidate_id"])
+            labels.append(candidate_id)
             positions.append(
                 _world_to_view_point(
                     (
@@ -761,17 +832,19 @@ class RerunVisualizer:
                 if candidate_id == self._selected_frontier_id
                 else MAP_FRONTIER_RGB
             )
-        self._rr.log(
+        self._log(
             "world/current_frontiers",
             self._rr.Points2D(
                 positions,
                 colors=colors,
                 radii=0.14,
+                labels=labels,
+                show_labels=False,
             ),
         )
 
     def _log_history(self, result: NavigationResult) -> None:
-        """显示历史观测节点、候选点，以及两者之间的状态着色虚线。"""
+        """显示实际尝试过的停靠点；未选区域只在当前 Frontier 图层显示。"""
         node_positions = []
         candidate_positions = []
         candidate_colors = []
@@ -781,11 +854,11 @@ class RerunVisualizer:
             node_view_position = _world_to_view_point(node.position_world_xy)
             node_positions.append(node_view_position)
             for direction in node.directions:
-                if direction.candidate_world_xy is None:
+                if direction.command_world_xy is None:
                     continue
                 color = DIRECTION_COLORS[direction.state]
                 candidate_view_position = _world_to_view_point(
-                    direction.candidate_world_xy
+                    direction.command_world_xy
                 )
                 candidate_positions.append(candidate_view_position)
                 candidate_colors.append(color)
@@ -797,7 +870,7 @@ class RerunVisualizer:
                 link_colors.extend([color] * len(segments))
 
         if node_positions:
-            self._rr.log(
+            self._log(
                 "world/history/nodes",
                 self._rr.Points2D(
                     node_positions,
@@ -809,7 +882,7 @@ class RerunVisualizer:
             self._clear("world/history/nodes")
 
         if candidate_positions:
-            self._rr.log(
+            self._log(
                 "world/history/candidates",
                 self._rr.Points2D(
                     candidate_positions,
@@ -823,7 +896,7 @@ class RerunVisualizer:
         if not link_segments:
             self._clear("world/history/links")
             return
-        self._rr.log(
+        self._log(
             "world/history/links",
             self._rr.LineStrips2D(
                 link_segments,
@@ -832,40 +905,15 @@ class RerunVisualizer:
             ),
         )
 
-    def _log_world_hud(
+    def _log_motion_status(
         self,
         frame: NavigationFrame,
         result: NavigationResult,
     ) -> None:
-        """把简要决策信息合并为 world 左上角的一张标签。"""
-        view_points = [
-            _world_to_view_point(point)
-            for point in _world_hud_reference_points(
-                frame,
-                result,
-                self._trajectory_xy,
-                self._current_frontiers,
-            )
-        ]
-        x_values = [point[0] for point in view_points]
-        y_values = [point[1] for point in view_points]
-        span = max(
-            max(x_values) - min(x_values),
-            max(y_values) - min(y_values),
-            1.0,
-        )
-        margin = WORLD_HUD_MARGIN_RATIO * span
-        anchor = (min(x_values) + margin, min(y_values) + margin)
-        self._rr.log(
-            "world/hud",
-            self._rr.Points2D(
-                [anchor],
-                colors=[WORLD_HUD_RGB],
-                radii=0.01,
-                labels=[_world_hud_text(frame, result)],
-                show_labels=True,
-                draw_order=50.0,
-            ),
+        """在侧栏更新实时位姿与最近决策，不在 World 图形上叠加文字。"""
+        self._log(
+            "navigation/motion",
+            self._rr.TextDocument(_motion_status_text(frame, result)),
         )
 
     def _log_status(
@@ -876,8 +924,10 @@ class RerunVisualizer:
     ) -> None:
         """记录状态面板；有 CJK 字体时渲染为图像，否则回退为 ASCII 文本。"""
         lines = _status_lines(self._target_text, frame, observation, result)
+        # 始终保留可查询文本，离线分析 RRD 不必从中文状态图片做 OCR。
+        self._log("navigation/status_text", self._rr.TextDocument("\n".join(lines)))
         if self._panel_font is None:
-            self._rr.log(
+            self._log(
                 "navigation/status",
                 self._rr.TextDocument(
                     "\n".join(f"- {_ascii_only(line)}" for line in lines),
@@ -886,15 +936,16 @@ class RerunVisualizer:
             )
             return
         image = _render_status_image(self._panel_font, lines)
-        self._rr.log("navigation/status", self._rr.Image(image))
+        self._log("navigation/status", self._rr.Image(image))
 
     def _clear(self, path: str) -> None:
-        self._rr.log(path, self._rr.Clear(recursive=False))
+        self._log(path, self._rr.Clear(recursive=False))
 
 
 def _send_default_blueprint(
     rr: Any,
     *,
+    recordings: Tuple[Any, ...],
     text_panels_as_images: bool,
 ) -> None:
     """固定调试布局，避免 Rerun 为每个实体自动创建散乱视图。"""
@@ -914,6 +965,7 @@ def _send_default_blueprint(
         name="Navigation",
     )
     debug_views = rrb.Tabs(
+        rrb.TextDocumentView(origin="/navigation/frontiers", name="Frontiers"),
         panel_view(origin="/navigation/status", name="Status"),
         rrb.Spatial2DView(
             origin="/model/yolo_world/latest",
@@ -928,18 +980,24 @@ def _send_default_blueprint(
         active_tab=0,
         name="Debug",
     )
-    rr.send_blueprint(
-        rrb.Blueprint(
-            rrb.Horizontal(
-                main_views,
-                debug_views,
-                column_shares=[3, 2],
-            ),
-            auto_views=False,
-            auto_layout=False,
-            collapse_panels=True,
-        )
+    sidebar = rrb.Vertical(
+        rrb.TextDocumentView(origin="/navigation/motion", name="Live"),
+        debug_views,
+        row_shares=[1, 4],
+        name="Details",
     )
+    blueprint = rrb.Blueprint(
+        rrb.Horizontal(
+            main_views,
+            sidebar,
+            column_shares=[3, 2],
+        ),
+        auto_views=False,
+        auto_layout=False,
+        collapse_panels=True,
+    )
+    for recording in recordings:
+        rr.send_blueprint(blueprint, recording=recording)
 
 
 def _rgb_to_numpy(rgb: RgbImage) -> np.ndarray:
@@ -1328,64 +1386,98 @@ def _robot_triangle_world(
     )
 
 
-def _world_hud_reference_points(
-    frame: NavigationFrame,
-    result: NavigationResult,
-    trajectory: List[Tuple[float, float]],
-    current_frontiers: Tuple[Mapping[str, Any], ...],
-) -> Tuple[Tuple[float, float], ...]:
-    """收集 world 当前图形范围，用于把汇总标签放到左上角。"""
-    points = list(trajectory)
-    origin = (frame.pose.x_m, frame.pose.y_m)
-    points.extend(_robot_triangle_world(frame.pose))
-    if result.command is not None:
-        command_vector = _command_world_vector(result.command, frame.pose)
-        points.append(
-            (origin[0] + command_vector[0], origin[1] + command_vector[1])
-        )
-    points.extend(
-        (float(candidate["world_x_m"]), float(candidate["world_y_m"]))
-        for candidate in current_frontiers
-    )
-    for node in result.state.observation_history:
-        points.append(node.position_world_xy)
-        points.extend(
-            direction.candidate_world_xy
-            for direction in node.directions
-            if direction.candidate_world_xy is not None
-        )
-    points.extend(
-        _point_along_heading(origin, heading, SCAN_HEADING_LENGTH_M)
-        for heading in result.state.scan_headings_world_rad
-    )
-    return tuple(points)
-
-
-def _world_hud_text(
+def _motion_status_text(
     frame: NavigationFrame,
     result: NavigationResult,
 ) -> str:
-    """构造 world 角落使用的紧凑英文摘要，避免空间标签相互遮挡。"""
+    """构造侧栏实时摘要；位姿随运动帧更新，阶段来自最近一次决策。"""
     lines = [
-        f"{result.debug.stage} | {result.state.phase.value}",
+        f"decision: {result.debug.stage} | next: {result.state.phase.value}",
         (
             f"pose x={frame.pose.x_m:.2f} y={frame.pose.y_m:.2f} "
             f"yaw={math.degrees(frame.pose.yaw_rad):.1f}deg"
         ),
     ]
     headings = result.state.scan_headings_world_rad
-    if headings:
+    if headings and "scan_mode" in result.debug.details:
         scan_index = min(result.state.next_scan_index, len(headings) - 1)
         lines.append(
             f"scan {scan_index + 1}/{len(headings)} "
             f"yaw={math.degrees(headings[scan_index]):.1f}deg"
         )
+        lines.append(_scan_basis_text(result.debug.details["scan_mode"]))
     if result.command is not None:
         command = result.command
         lines.append(
             f"command move={math.hypot(command.forward_m, command.left_m):.2f}m "
             f"turn={math.degrees(command.yaw_rad):.1f}deg"
         )
+    selected_id = result.debug.details.get("candidate_id")
+    parent_id = result.debug.details.get("parent_node_id") or result.state.backtrack_node_id
+    if parent_id is not None:
+        lines.append(f"parent: {parent_id}")
+    if "branch_depth" in result.debug.details:
+        lines.append(
+            f"return depth: {result.debug.details['branch_depth']} | "
+            f"pending at parent: {result.debug.details['pending_direction_count']}"
+        )
+    if selected_id is not None:
+        lines.append(
+            f"frontier: {selected_id} ({result.debug.details.get('frontier_selection_source')})"
+        )
+    return "\n".join(lines)
+
+
+def _scan_basis_text(mode: str) -> str:
+    """说明本次观察由 Frontier、首次环扫还是当前位置场景确认触发。"""
+    basis = {
+        "initial": "initial 360 deg sweep",
+        "frontier": "unchecked local Frontier directions",
+        "scene_current_view": "scene check at current pose (no extra turn)",
+    }
+    return f"scan basis: {basis.get(mode, mode)}"
+
+
+def _frontier_table_text(
+    candidates: Tuple[Mapping[str, Any], ...],
+    selected_id: Optional[str],
+    result: NavigationResult,
+) -> str:
+    """表格行与 Points2D 实例顺序一致；编号链接到对应点，暂存状态取当前状态。"""
+    blocked_ids = ", ".join(
+        region.region_id for region in result.state.blocked_frontier_regions
+    )
+    blocked_text = (
+        f"Blocked regions (no retry during this run): {blocked_ids}."
+        if blocked_ids else "Blocked regions: none."
+    )
+    if not candidates:
+        return f"No current frontier candidates.\n\n{blocked_text}"
+    orders = {region.region_id: region.deferred_order for region in result.state.frontier_regions}
+    lines = [
+        "Click an ID to select its World point. Yellow = selected; green = candidate.",
+        "",
+        "| Frontier | State | Saved order | Path (m) | Score |",
+        "| --- | --- | --- | ---: | ---: |",
+    ]
+    for index, candidate in enumerate(candidates):
+        candidate_id = str(candidate["candidate_id"])
+        order = orders.get(candidate_id, candidate.get("deferred_order"))
+        state = "selected" if candidate_id == selected_id else "deferred" if order is not None else "new"
+        order_text = "-" if order is None else f"{order[0]}:{order[1]}"
+        label = f"[{candidate_id}](recording://world/current_frontiers[#{index}])"
+        lines.append(
+            f"| {label} | {state} | {order_text} | "
+            f"{float(candidate['path_distance_m']):.2f} | {float(candidate['score']):.2f} |"
+        )
+    lines.extend([
+        "",
+        blocked_text,
+        "",
+        "New directions rank by score. When they run out, return through the branch "
+        "one node at a time until a reached node has a remaining direction to explore.",
+        "Positions and distances are from the latest frontier update.",
+    ])
     return "\n".join(lines)
 
 
@@ -1609,14 +1701,29 @@ def _status_lines(
             f"{details.get('scan_heading_count')}, "
             f"target yaw={target_heading_deg:.1f} deg"
         )
+        lines.append(_scan_basis_text(details.get("scan_mode", "unknown")))
     if "frontier_scan_candidate_count" in details:
         lines.append(
-            "scan source: "
+            "frontier map: "
             f"clusters={details['frontier_scan_candidate_count']}, "
-            f"raw_cells={details['frontier_scan_cell_count']}"
+            f"candidate_cells={details['frontier_scan_cell_count']}"
+        )
+    if "local_observation_point_count" in details:
+        lines.append(
+            "frontier coverage: "
+            f"local_frontier_points={details.get('local_observation_point_count', 0)}, "
+            f"need_check={details.get('observation_point_count', 0)}, "
+            f"reused={details.get('reused_observation_point_count', 0)}, "
+            f"scan_skipped={details.get('scan_skipped', False)}"
         )
 
     candidates = details.get("frontier_candidates", ())
+    if "frontier_selection_source" in details:
+        lines.append(
+            f"frontier choice: source={details['frontier_selection_source']}, "
+            f"new={details['new_frontier_count']}, "
+            f"deferred={details['deferred_frontier_count']}"
+        )
     selected_id = details.get("candidate_id")
     if selected_id is not None:
         selected = next(
@@ -1641,13 +1748,14 @@ def _status_lines(
                 f"span={float(selected['frontier_span_m']):.2f} m, "
                 f"vlm={semantic_text}, "
                 f"semantic bonus={float(selected['semantic_bonus']):.2f}, "
+                f"deferred order={selected.get('deferred_order')}, "
                 f"score={float(selected['score']):.2f}"
             )
 
     context = [
         f"{key}={details[key]}"
-        for key in ("node_id", "direction_id", "reason")
-        if key in details
+        for key in ("node_id", "parent_node_id", "direction_id", "reason")
+        if details.get(key) is not None
     ]
     if context:
         lines.append("context: " + ", ".join(context))
@@ -1697,14 +1805,46 @@ def _status_lines(
         f"pending={direction_counts['pending']}, "
         f"committed={direction_counts['committed']}, "
         f"explored={direction_counts['explored']}, "
-        f"invalidated={direction_counts['invalidated']}"
+        f"invalidated={direction_counts['invalidated']}, "
+        f"stalled={direction_counts['stalled']}"
     )
+    lines.append(
+        f"regions={len(result.state.frontier_regions)}, "
+        f"blocked={len(result.state.blocked_frontier_regions)}, "
+        f"deferred={sum(region.deferred_order is not None for region in result.state.frontier_regions)}, "
+        f"active={result.state.active_frontier_id}, "
+        f"checked_views={len(result.state.observed_views)}, "
+        f"planned_frontier_points={len(result.state.scan_observation_points)}"
+    )
+    if result.state.observed_views:
+        view = result.state.observed_views[-1]
+        lines.append(
+            f"last checked view: visible_points={len(view.visible_world_xy)}, "
+            f"depth_coverage={view.depth_coverage_available}"
+        )
+    latest_issue = next(
+        (
+            (node.node_id, direction)
+            for node in reversed(result.state.observation_history)
+            for direction in node.directions
+            if direction.execution_reason
+        ),
+        None,
+    )
+    if latest_issue is not None:
+        node_id, direction = latest_issue
+        lines.append(
+            f"last exploration issue: {node_id}, {direction.state.value}, "
+            f"{direction.execution_reason}"
+        )
+    if "destination_world_xy" in details:
+        lines.append(f"exploration destination={details['destination_world_xy']}")
     lines.extend(
         (
             "map legend: robot=blue, frontier=green, selected=yellow, "
             "command=orange, adapter target=red, adapter path=purple",
             "history links: pending=yellow, committed=blue, explored=gray, "
-            "invalidated=red",
+            "invalidated=red, stalled=orange",
         )
     )
     return lines
