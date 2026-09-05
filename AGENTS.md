@@ -17,24 +17,6 @@
 - NVIDIA 驱动可用且报告 CUDA 13.3，但 CUDA Toolkit/nvcc 尚未安装。
 - Codex 受限沙箱可能隐藏 /dev/dxg，不能据此判断无 GPU/CUDA。
 
-## Agent 工作方式
-
-- 当前采用 Sol 主代理与 DeepSeek V4 Flash / OpenCode 子代理协作模式；Sol 留在
-  主对话中负责整体编排，DeepSeek 作为实现代理。
-- Sol 负责澄清需求、阅读项目文档与代码、确定修改边界和完成标准，并通过 Paseo
-  重新读取 `deepseek-coder` Profile 与 Provider 状态后再发起委派，不凭历史信息
-  猜测当前配置。
-- 需要代码实现时，Sol 原则上创建独立 worktree 工作区，并向 DeepSeek 明确提供
-  目标、涉及模块、输入输出、算法约束和完成标准；DeepSeek 只实现委派范围内的
-  改动，不自行扩展需求。
-- DeepSeek 完成后报告改动文件、关键实现和验证状态。Sol 检查 diff、架构边界、
-  算法数据流和文档一致性；发现问题时优先向同一子代理发送后续修改要求，审查
-  通过后再负责最终交付。
-- 接口或算法存在关键歧义时，DeepSeek 应停止猜测并反馈给 Sol，由 Sol 向用户
-  确认。规划保持简短，除非用户要求，不为每次任务新建设计文档。
-- Sol 与 DeepSeek 都必须遵守下方测试规则：除非用户明确要求，否则不编写、修改
-  或运行测试。
-
 ## 编码前流程
 
 - 每次编码前必须重新阅读 `AGENTS.md`、`README.md` 以及与本次任务直接相关的 `docs/` 文档；不得用对话记忆、历史总结或主观推测代替文档。
@@ -78,7 +60,7 @@
 
 ### 面向 Agent 的文档
 
-- `AGENTS.md` 只保存工作规则和索引，具体排错资料按需放在 `docs/agent/` 中。
+- `AGENTS.md` 只保存工作规则和索引，具体排错资料按需放在 `docs/agent/` 中，Agent 文档须在每次任务完成后由主代理更新。
 - Agent 文档服务于定位和修复问题，可记录代码路径与职责映射、输入输出、关键数据流、不变量、参数位置、运行命令和常见故障线索。
 - 使用简短列表、表格、准确路径和命令，指向源代码而不是复制大段实现。
 - 只记录经过确认、难以从代码直接推断并且会重复用于排错的信息；不要写推测、讨论过程或原始日志。
@@ -91,5 +73,6 @@
 - `docs/algorithm.md`：当前算法状态机、Frontier、VLM 调用与恢复规则。
 - `docs/chassis-interface.md`：Adapter 必须遵守的数据、坐标和执行契约。
 - `docs/habitat.md`：Habitat 环境、GPU 启动和仿真运行。
+- `docs/agent/habitat.md`：Habitat 启动顺序与 Rerun/GPU 快速隔离。
 - `docs/slamtec-l515.md`：Hermes + L515 安装、标定、运行和排错。
 - `docs/s100-l515.md`：S100 + L515 的 ROS SLAM 与直接模式。
