@@ -181,6 +181,10 @@
 
 ## 导航退出路径排查
 
+- Hermes 静止检测默认 8 秒，`__main__.py` 的 `--action-stall-timeout-s` 与
+  `SlamtecL515Config.action_stall_timeout_s` 必须同步。`_monitor_action` 仍按
+  默认 2 秒进度采样检查，另受帧采集与 REST 延迟影响，不能理解为精确第 8 秒取消。
+  MoveToAction 的有效进展仍是平移至少 2 cm，原地转向不重置其平移停滞计时。
 - `__main__.py::_run_navigation` 在目标完成、`FAILED`、非 `OK` 且非等待感知状态，
   或达到 `max_cycles` 时退出；`MISSING_DATA` 当前也立即退出。周期上限不能当作
   Frontier 耗尽，VLM/YOLO 推理失败通常已转为 `uncertain` 或几何评分降级。

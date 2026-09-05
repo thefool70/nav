@@ -59,7 +59,7 @@ class SlamtecL515Config:
     action_timeout_s: float = 120.0
     action_poll_interval_s: float = 0.2
     action_progress_interval_s: float = 2.0
-    action_stall_timeout_s: float = 15.0
+    action_stall_timeout_s: float = 8.0
     action_stall_translation_m: float = 0.02
     action_stall_rotation_rad: float = math.radians(1.0)
     motion_frame_interval_s: float = 0.5

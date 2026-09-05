@@ -206,7 +206,7 @@ L515 筛选后的算法地图，
 位移。启动前移、标定、扫描转向和目标接近不启用这项 Frontier 路径约束。
 
 - 单个 Action 默认总超时 120 秒。
-- `MoveToAction` 连续 15 秒平移不足 2 cm 时结束本次动作。
+- `MoveToAction` 连续 8 秒平移不足 2 cm 时结束本次动作。
 - `RotateToAction` 以 1° 为有效进展，进入目标朝向 5° 内即可结束。
 - Frontier 明确规划失败时淘汰当前方向并继续其他候选。
 - Frontier 路径经过算法未知区时，记录首个未知格坐标和被拒绝路径，取消并屏蔽整个区域。
@@ -214,7 +214,7 @@ L515 筛选后的算法地图，
 - 目标接近失败或停滞时，保留实际位置并重新检测目标。
 - 网络、相机、地图或健康状态异常仍会停止程序。
 
-VLM 推理发生在 Action 创建之前，因此模型等待时间不计入 15 秒静止门槛。
+VLM 推理发生在 Action 创建之前，因此模型等待时间不计入 8 秒静止门槛。
 
 ## Rerun 与日志
 
@@ -252,7 +252,7 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB），WebSocket 服务缓�
 | `--base-url` | Robot Agent 地址，默认 `http://192.168.11.1:1448` |
 | `--search-mode` | `object` 或 `scene`，默认 `object` |
 | `--action-timeout-s` | 单 Action 总超时，默认 120 秒 |
-| `--action-stall-timeout-s` | 连续静止门槛，默认 15 秒 |
+| `--action-stall-timeout-s` | 连续静止门槛，默认 8 秒 |
 | `--min-localization-quality` | 定位模式最低质量，默认 1 |
 | `--camera-serial` | 多台 RealSense 时选择 L515 |
 | `--debug-frontier` | 打印本轮 Frontier 评分明细 |

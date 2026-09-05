@@ -358,8 +358,8 @@ def _build_parser() -> argparse.ArgumentParser:
     slamtec.add_argument(
         "--action-stall-timeout-s",
         type=_positive_float,
-        default=15.0,
-        help="活跃 Action 无足够位姿变化的终止秒数，默认 15",
+        default=8.0,
+        help="活跃 Action 无足够位姿变化的终止秒数，默认 8",
     )
     slamtec.add_argument(
         "--run-log",
