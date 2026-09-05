@@ -10,6 +10,36 @@ from bisect import bisect_right
 from typing import Sequence, Tuple
 
 from .geometry import wrap_angle
+from .models import Pose2D
+from .observation_coverage import VIEW_EDGE_MARGIN_RAD
+
+
+HEADING_BIN_RAD = math.radians(2.0)
+
+
+def build_unobserved_scan_headings(
+    points_world_xy: Sequence[Tuple[float, float]],
+    pose: Pose2D,
+    camera_center_offset_rad: float,
+    horizontal_fov_rad: float,
+) -> Tuple[float, ...]:
+    """把局部待查区域合并为尽量少的机器人朝向；pose 使用光心位置和底盘 yaw。"""
+    headings = tuple(
+        math.atan2(y - pose.y_m, x - pose.x_m)
+        for x, y in points_world_xy
+        if math.hypot(x - pose.x_m, y - pose.y_m) > 1e-6
+    )
+    unchecked = {
+        round(wrap_angle(heading) / HEADING_BIN_RAD) * HEADING_BIN_RAD
+        for heading in headings
+    }
+    effective_fov = max(
+        horizontal_fov_rad / 2.0,
+        horizontal_fov_rad - 2.0 * VIEW_EDGE_MARGIN_RAD - HEADING_BIN_RAD,
+    )
+    return build_covering_scan_headings(
+        sorted(unchecked), pose.yaw_rad, camera_center_offset_rad, effective_fov
+    )
 
 
 def _require_finite_angle(value, name):

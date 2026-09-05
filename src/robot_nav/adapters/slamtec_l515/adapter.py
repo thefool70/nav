@@ -15,8 +15,10 @@ from ...core.models import (
     Pose2D,
     RelativePoseCommand,
 )
+from ...core.path_validation import first_unknown_path_cell
 from ..chassis import (
     MotionInterruptedError,
+    MotionPathUnknownError,
     MotionStalledError,
     RecoverableMotionError,
 )
@@ -229,18 +231,40 @@ class SlamtecL515Adapter:
         ) from error
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
+        """执行普通运动，用于启动、标定、转向和目标接近。"""
+        self._send_relative_pose(command)
+
+    def send_relative_pose_in_known_space(
+        self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
+        *, reference_pose: Pose2D,
+    ) -> None:
+        """按决策位姿固定探索／回退的世界目标，用决策地图约束实际路径。"""
+        self._send_relative_pose(
+            command, known_space_map=obstacle_map, reference_pose=reference_pose,
+        )
+
+    def _send_relative_pose(
+        self,
+        command: RelativePoseCommand,
+        known_space_map: Optional[ObstacleMap] = None,
+        reference_pose: Optional[Pose2D] = None,
+    ) -> None:
         """把机器人局部相对位姿转换为 Hermes 的全局规划与原地转向。"""
         _validate_command(command)
         self._require_motion_ready()
 
         start_pose = self._client.get_pose()
-        target_xy = _relative_target_world(start_pose, command)
-        target_yaw = _wrap_angle(start_pose.yaw_rad + command.yaw_rad)
-        translation = math.hypot(command.forward_m, command.left_m)
+        # 相对命令基于决策帧，不能再用运动后的朝向旋转一次，否则世界目标会漂移。
+        reference_pose = reference_pose if reference_pose is not None else start_pose
+        target_xy = _relative_target_world(reference_pose, command)
+        target_yaw = _wrap_angle(reference_pose.yaw_rad + command.yaw_rad)
+        translation = math.hypot(target_xy[0] - start_pose.x_m, target_xy[1] - start_pose.y_m)
         self._report_action_progress(
             "Hermes command: "
             f"start_pose=({start_pose.x_m:.3f}, {start_pose.y_m:.3f}, "
             f"{math.degrees(start_pose.yaw_rad):.2f}°), "
+            f"reference_pose=({reference_pose.x_m:.3f}, {reference_pose.y_m:.3f}, "
+            f"{math.degrees(reference_pose.yaw_rad):.2f}°), "
             f"relative=({command.forward_m:.3f}, "
             f"{command.left_m:.3f}, "
             f"{math.degrees(command.yaw_rad):.2f}°), "
@@ -254,6 +278,7 @@ class SlamtecL515Adapter:
                 self._move_to_action,
                 {"target": {"x": target_xy[0], "y": target_xy[1], "z": 0.0}},
                 target_world_xy=target_xy,
+                known_space_map=known_space_map,
             )
 
         should_restore_yaw = (
@@ -299,6 +324,7 @@ class SlamtecL515Adapter:
         action_name: str,
         options: Mapping[str, Any],
         target_world_xy: Optional[Tuple[float, float]] = None,
+        known_space_map: Optional[ObstacleMap] = None,
     ) -> None:
         """监控活跃 Action 的反馈和位姿；不计入 VLM 等待时间。"""
         action_id = self._client.create_action(action_name, options)
@@ -328,6 +354,7 @@ class SlamtecL515Adapter:
                 stage,
                 action_name == self._move_to_action,
                 target_world_xy,
+                known_space_map,
             )
 
         try:
@@ -342,6 +369,17 @@ class SlamtecL515Adapter:
             abort_error: Optional[RuntimeError] = None
             try:
                 self._client.abort_current_action()
+                if isinstance(exc, (
+                    MotionPathUnknownError, _ActionStalledError,
+                    _ActionInterruptedError, SlamtecActionError,
+                )):
+                    # 任何会恢复导航的结果都先确认终态，避免下一条命令覆盖未停动作。
+                    self._client.wait_for_action(
+                        action_id=action_id,
+                        timeout_s=self.config.request_timeout_s,
+                        poll_interval_s=self.config.action_poll_interval_s,
+                        require_success=False,
+                    )
             except RuntimeError as caught_abort_error:
                 abort_error = caught_abort_error
             self._report_motion_plan(None, ())
@@ -363,7 +401,7 @@ class SlamtecL515Adapter:
                     return
 
             if abort_error is not None:
-                detail = f"{detail}；终止 Action 失败：{abort_error}"
+                detail = f"{detail}；终止 Action 或确认结束失败：{abort_error}"
             outcome = (
                 "被实时目标检测中断"
                 if isinstance(exc, _ActionInterruptedError)
@@ -372,15 +410,16 @@ class SlamtecL515Adapter:
             self._report_action_progress(
                 f"Hermes Action #{action_id} {action_label} {outcome}：{detail}"
             )
+            if abort_error is not None:
+                raise RuntimeError(detail) from abort_error
+            if isinstance(exc, MotionPathUnknownError):
+                # 保留异常类型以触发整片屏蔽，路径仅用于记录取消原因。
+                raise
             if isinstance(exc, _ActionInterruptedError):
                 raise MotionInterruptedError(str(exc)) from exc
-            if action_name == self._move_to_action and isinstance(
-                exc, _ActionStalledError
-            ):
+            if isinstance(exc, _ActionStalledError):
                 raise MotionStalledError(str(exc)) from exc
-            if action_name == self._move_to_action and isinstance(
-                exc, SlamtecActionError
-            ):
+            if isinstance(exc, SlamtecActionError):
                 raise RecoverableMotionError(str(exc)) from exc
             raise
         self._report_motion_plan(None, ())
@@ -397,6 +436,11 @@ class SlamtecL515Adapter:
                 f"{math.degrees(final_pose.yaw_rad):.2f}°)，"
                 f"translated={translated_m:.3f} m"
             )
+            if target_world_xy is not None:
+                target_error_m = math.hypot(
+                    final_pose.x_m - target_world_xy[0], final_pose.y_m - target_world_xy[1],
+                )
+                completion_detail += f"，target_error={target_error_m:.3f} m"
             if translated_m < self.config.action_stall_translation_m:
                 self._report_action_progress(
                     "Hermes MoveToAction 已结束但没有有效平移："
@@ -437,9 +481,12 @@ class SlamtecL515Adapter:
         stage: str,
         requires_translation: bool,
         target_world_xy: Optional[Tuple[float, float]],
+        known_space_map: Optional[ObstacleMap] = None,
     ) -> None:
         """采样活跃 Action 位姿，定期报告并识别真正的底盘停滞。"""
         self._raise_continuous_frame_error()
+        if requires_translation and known_space_map is not None:
+            self._check_known_space_path(action_id, target_world_xy, known_space_map)
         self._publish_motion_frame()
         if (
             self._should_interrupt_motion is not None
@@ -473,7 +520,10 @@ class SlamtecL515Adapter:
             state.last_motion_pose = pose
             state.last_motion_s = now
 
-        if requires_translation and self._on_motion_plan is not None:
+        if (
+            requires_translation and known_space_map is None
+            and self._on_motion_plan is not None
+        ):
             remaining_path = self._read_remaining_path(state)
             self._report_motion_plan(
                 target_world_xy,
@@ -496,6 +546,30 @@ class SlamtecL515Adapter:
             raise _ActionStalledError(
                 f"Hermes Action {action_id} 已连续 {still_s:.1f} 秒"
                 "没有产生足够位姿变化"
+            )
+
+    def _check_known_space_path(
+        self,
+        action_id: int,
+        target_world_xy: Optional[Tuple[float, float]],
+        obstacle_map: ObstacleMap,
+    ) -> None:
+        """每次轮询复核当前路径；不依赖 Rerun，也不受进度输出间隔限制。"""
+        pose = self._client.get_pose()
+        # 检查所需路径读取失败属于系统错误，不能降级为仅隐藏可视化。
+        remaining_path = self._client.get_remaining_path()
+        self._report_motion_plan(target_world_xy, remaining_path)
+        if not remaining_path:
+            # 规划尚未发布路径时继续等待，不能据此判定目标不可达。
+            return
+        path_world_xy = ((pose.x_m, pose.y_m),) + remaining_path
+        unknown_cell = first_unknown_path_cell(path_world_xy, obstacle_map)
+        if unknown_cell is not None:
+            raise MotionPathUnknownError(
+                "本次 Frontier 目标当前不可达："
+                f"Hermes Action {action_id} 的路径经过算法未知区域或地图外部，"
+                f"首个未知格(row, col)={unknown_cell}。",
+                path_world_xy=path_world_xy,
             )
 
     def _read_remaining_path(

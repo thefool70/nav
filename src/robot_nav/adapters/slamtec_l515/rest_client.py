@@ -203,8 +203,9 @@ class SlamtecRestClient:
         timeout_s: float,
         poll_interval_s: float,
         on_poll: Optional[Callable[[int, str], None]] = None,
+        require_success: bool = True,
     ) -> None:
-        """轮询 Action；把执行状态和阶段交给调用方监控。"""
+        """等待 Action 结束；主动取消后可关闭成功要求，以确认已进入终态。"""
         if isinstance(action_id, bool) or not isinstance(action_id, int):
             raise ValueError("action_id 必须为整数")
         if not _is_positive_finite(timeout_s):
@@ -229,7 +230,7 @@ class SlamtecRestClient:
                 stage = ""
             if status == 4:
                 result = state.get("result")
-                if result == 0:
+                if result == 0 or not require_success:
                     return
                 reason = state.get("reason")
                 detail = reason if isinstance(reason, str) and reason else result

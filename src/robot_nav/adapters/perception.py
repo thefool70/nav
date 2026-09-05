@@ -82,7 +82,7 @@ class TargetObserver(Protocol):
         request: FrontierScoreRequest,
         goal: TargetSearchGoal,
     ) -> Mapping[str, float]:
-        """一次返回本轮全部 Frontier ID 到 0-1 分数的映射。"""
+        """一次返回请求中新 Frontier ID 到 0-1 分数的映射，暂存旧方向不在请求内。"""
         ...
 
     def assess_scene(

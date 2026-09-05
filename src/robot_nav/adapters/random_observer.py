@@ -1,6 +1,6 @@
 """调试用随机观察器：不感知视觉内容，批量生成随机 Frontier 分数。
 
-仅用于调试扫描、Frontier、移动和回退流程，不能识别或到达语义目标。
+仅用于调试扫描、Frontier、移动和重新选点流程，不能识别或到达语义目标。
 """
 
 from __future__ import annotations

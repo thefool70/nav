@@ -4,7 +4,9 @@ from typing import Callable, Optional, Tuple
 
 from .adapters.chassis import (
     ChassisInterface,
+    KnownSpaceChassisInterface,
     MotionInterruptedError,
+    MotionPathUnknownError,
     MotionStalledError,
     RecoverableMotionError,
 )
@@ -69,7 +71,7 @@ def run_navigation_cycle(
 
     if on_cycle is not None:
         on_cycle(frame, observation, result)
-    return _execute_command(chassis, result, observer)
+    return _execute_command(chassis, result, observer, frame)
 
 
 def _apply_target_observation(
@@ -183,8 +185,9 @@ def _execute_command(
     chassis: ChassisInterface,
     result: NavigationResult,
     observer: Optional[TargetObserver],
+    frame: NavigationFrame,
 ) -> NavigationResult:
-    """同步发送有效命令，并把可恢复运动结果映射回导航状态。"""
+    """等待整条目标位置命令结束，再返回下一周期状态；期间不重新选择 Frontier。"""
     if result.status is not NavigationStatus.OK or result.command is None:
         return result
 
@@ -198,7 +201,15 @@ def _execute_command(
             result.debug.stage != "target.approach"
         )
     try:
-        chassis.send_relative_pose(result.command)
+        stage = result.debug.details.get("next_stage", result.debug.stage)
+        if stage in ("explore.select", "backtrack.return", "backtrack.resume") and isinstance(
+            chassis, KnownSpaceChassisInterface,
+        ):
+            chassis.send_relative_pose_in_known_space(
+                result.command, frame.obstacle_map, reference_pose=frame.pose,
+            )
+        else:
+            chassis.send_relative_pose(result.command)
     except MotionInterruptedError as exc:
         continued = continue_after_target_detection(result, str(exc))
         if continued is None:
@@ -209,6 +220,13 @@ def _execute_command(
         if continued is None:
             raise
         return continued
+    except MotionPathUnknownError as exc:
+        recovered = recover_from_motion_failure(
+            result, str(exc), rejected_path_world_xy=exc.path_world_xy,
+        )
+        if recovered is None:
+            raise
+        return recovered
     except RecoverableMotionError as exc:
         recovered = recover_from_motion_failure(result, str(exc))
         if recovered is None:
@@ -224,7 +242,8 @@ def _scan_observation_context(
     result: NavigationResult,
 ) -> Optional[ScanObservationContext]:
     """仅扫描观测帧需要编号，供整轮场景判断和 Frontier 评分。"""
-    if result.debug.stage != "scan.observe":
+    stage = result.debug.details.get("next_stage", result.debug.stage)
+    if stage != "scan.observe":
         return None
     count = result.debug.details.get("scan_heading_count")
     if not isinstance(count, int):

@@ -57,8 +57,16 @@ ChassisInterface ──► NavigationFrame
 | 物体搜索 | Hermes 使用 YOLO-World + SAM2 持续检测；其他环境使用通用视觉观察器 | 多个 Frontier 的批量评分；接近候选后的最终确认 | VLM 确认候选就是目标 |
 | 场景搜索 | 每轮扫描后拼接全部 RGB | 判断是否已经位于目的场景；否则批量评分 Frontier | VLM 判断已经到达目的场景 |
 
-两种模式都只在占用图的可达自由区内选择 Frontier，并在当前分支走完后回到仍有
-候选方向的历史观测点。
+两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，动作结束后
+再观察和选择下一目标。新出现的 Frontier 优先探索，未选方向暂存；新候选耗尽
+后，沿当前分支逐个返回父节点，直到到达仍有有效探索方向的节点，再继续寻找。
+首次环扫后，仅补查局部可见且尚未检查的 Frontier 方向；返回父节点不额外环扫。
+地图已知与视觉已检查分别记录，场景模式仍需用当前画面确认所在场景。
+返回节点未完成时保留实际位置，跳过该返回节点并重新检查有效方向，不直接结束搜索。
+
+Hermes 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
+未知区则取消动作，在本次运行中持续屏蔽整个连通 Frontier 区域并转向其他候选，
+避免在同一片边界内换点反复取消。
 
 ## 运行环境
 
@@ -98,6 +106,8 @@ python -m pip install -e '.[visualization]'
 | 路径 | 职责 |
 | --- | --- |
 | `src/robot_nav/core/` | 状态机、Frontier、扫描、定位、历史和数据契约 |
+| `src/robot_nav/core/observation_coverage.py` | 局部 Frontier 观察点、RGB-D 覆盖记录和跨位置复用 |
+| `src/robot_nav/core/path_validation.py` | 检查实际规划路径是否经过算法未知区 |
 | `src/robot_nav/adapters/habitat/` | Habitat Adapter |
 | `src/robot_nav/adapters/slamtec_l515/` | Hermes + L515 Adapter |
 | `src/robot_nav/adapters/s100_l515/` | S100 + L515 Adapter |

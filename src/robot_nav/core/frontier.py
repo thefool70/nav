@@ -16,6 +16,7 @@ GridValues = Tuple[Tuple[Optional[float], ...], ...]
 PATH_DISTANCE_SCORE_WEIGHT = 0.05
 SEMANTIC_SCORE_WEIGHT = 1.5
 FRONTIER_CLEARANCE_SEARCH_M = 0.75
+FRONTIER_FRAGMENT_GAP_M = 0.30
 
 
 def is_world_point_reachable(
@@ -45,7 +46,7 @@ def find_frontier_candidates(
     min_frontier_span_m: float = 0.5,
     min_goal_distance_m: float = 0.35,
 ) -> Tuple[FrontierCandidate, ...]:
-    """返回可达 Frontier，并优先选择远离占据格的聚类代表点。"""
+    """保留完整连续边界，排除已尝试位置后，为每个有效区域选择一个可达代表点。"""
     grid = _normalize_grid(obstacle_map)
     resolution = _positive_finite(obstacle_map.resolution_m, "resolution_m")
     minimum_span = _non_negative_finite(
@@ -75,7 +76,7 @@ def find_frontier_candidates(
     )
     candidate_groups = tuple(
         component
-        for component in _connected_components(frontier_cells)
+        for component in _merge_frontier_fragments(frontier_cells, grid, resolution)
         if _frontier_span_m(component, resolution) >= minimum_span
     )
 
@@ -83,18 +84,25 @@ def find_frontier_candidates(
     candidates = []
     for cells in candidate_groups:
         frontier_span = _frontier_span_m(cells, resolution)
+        eligible_cells = {
+            cell for cell in cells
+            if reachable_distance[cell] * resolution >= minimum_distance
+            and not _is_excluded(
+                grid_cell_center_to_world(*cell, obstacle_map),
+                excluded_points,
+                excluded_radius,
+            )
+        }
+        if not eligible_cells:
+            continue
         row, col = _safest_frontier_cell(
-            cells,
+            eligible_cells,
             grid,
             reachable_distance,
             clearance_search_steps,
         )
         path_distance = reachable_distance[(row, col)] * resolution
-        if path_distance < minimum_distance:
-            continue
         world_xy = grid_cell_center_to_world(row, col, obstacle_map)
-        if _is_excluded(world_xy, excluded_points, excluded_radius):
-            continue
         candidate_id = f"frontier:{row}:{col}"
         heading = math.atan2(world_xy[1] - pose.y_m, world_xy[0] - pose.x_m)
         score = frontier_span - PATH_DISTANCE_SCORE_WEIGHT * path_distance
@@ -125,6 +133,63 @@ def find_frontier_candidates(
         )
     )
     return tuple(candidates)
+
+
+def _merge_frontier_fragments(
+    cells: Set[Cell], grid: GridValues, resolution: float,
+) -> Tuple[Set[Cell], ...]:
+    """合并未知侧朝向相近、自由区短路径不超过 0.30 m 的断段，不穿越障碍。"""
+    components = _connected_components(cells)
+    owners = {cell: index for index, part in enumerate(components) for cell in part}
+    normals = tuple(_unknown_side_normal(part, grid) for part in components)
+    free = _free_cells(grid)
+    steps = int(FRONTIER_FRAGMENT_GAP_M / resolution)
+    links = set()
+    for index, part in enumerate(components):
+        visited = set(part)
+        queue = deque((cell, 0) for cell in sorted(part))
+        while queue:
+            cell, distance = queue.popleft()
+            other = owners.get(cell, index)
+            if other > index:
+                first, second = normals[index], normals[other]
+                if first[0] * second[0] + first[1] * second[1] >= math.cos(math.pi / 4):
+                    links.add((index, other))
+            if distance >= steps:
+                continue
+            for neighbor in _four_neighbors(*cell):
+                if neighbor in free and neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, distance + 1))
+
+    groups = {index: set(part) for index, part in enumerate(components)}
+    parents = list(range(len(components)))
+    for first, second in sorted(links):
+        while parents[first] != first:
+            first = parents[first]
+        while parents[second] != second:
+            second = parents[second]
+        if first == second:
+            continue
+        groups[first].update(groups[second])
+        del groups[second]
+        parents[second] = first
+    return tuple(groups[index] for index in sorted(groups))
+
+
+def _unknown_side_normal(component: Set[Cell], grid: GridValues) -> Tuple[float, float]:
+    """用邻接未知格方向的均值区分边界朝向；方向不明确时不跨断口合并。"""
+    dr_sum = dc_sum = 0
+    for row, col in component:
+        for near_row, near_col in _eight_neighbors(row, col):
+            if (
+                0 <= near_row < len(grid) and 0 <= near_col < len(grid[0])
+                and grid[near_row][near_col] is None
+            ):
+                dr_sum += near_row - row
+                dc_sum += near_col - col
+    magnitude = math.hypot(dr_sum, dc_sum)
+    return (dr_sum / magnitude, dc_sum / magnitude) if magnitude else (0.0, 0.0)
 
 
 def _frontier_span_m(component: Set[Cell], resolution_m: float) -> float:
@@ -224,7 +289,7 @@ def _find_frontier_cells(grid: GridValues, reachable: Set[Cell]) -> Set[Cell]:
 
 
 def _connected_components(cells: Set[Cell]) -> Tuple[Set[Cell], ...]:
-    """按八邻接拆分 Frontier 连通段。"""
+    """按八邻接提取完整的 Frontier 连通段。"""
     remaining = set(cells)
     components = []
     while remaining:

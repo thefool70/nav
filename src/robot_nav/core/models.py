@@ -167,6 +167,24 @@ class SceneAssessmentResult:
 
 
 @dataclass(frozen=True)
+class ObservationView:
+    """实际采集的水平视角；进入 observed_views 后才代表图像已完成语义检查。
+
+    map_visible_world_xy 是地图可见视锥，仅原地复用；visible_world_xy 进一步
+    经过深度遮挡检查，用于跨位置复用。坐标单位米。
+    """
+
+    pose: Pose2D
+    camera_heading_world_rad: float
+    horizontal_fov_rad: float
+    timestamp_s: float
+    camera_world_xy: Optional[Tuple[float, float]] = None
+    visible_world_xy: Tuple[Tuple[float, float], ...] = ()
+    map_visible_world_xy: Tuple[Tuple[float, float], ...] = ()
+    depth_coverage_available: bool = False
+
+
+@dataclass(frozen=True)
 class ScanEvidence:
     """一次扫描中单个方向的采集证据。
 
@@ -175,6 +193,7 @@ class ScanEvidence:
 
     heading_world_rad: float
     visibility: TargetVisibility
+    view: Optional[ObservationView] = None
 
 
 @dataclass(frozen=True)
@@ -184,7 +203,7 @@ class FrontierCandidate:
     系方向（弧度）；frontier_cells 保存该前沿包含的全部栅格；
     frontier_cell_count 为其栅格数；frontier_span_m 为聚类完整栅格包围框的
     对角跨度（米）；path_distance_m 为沿路径到该点的距离（米）；
-    score 为探索优先级。"""
+    score 为新候选之间的探索优先级；deferred_order 非空时按暂存顺序恢复。"""
 
     candidate_id: str
     row: int
@@ -197,11 +216,35 @@ class FrontierCandidate:
     path_distance_m: float
     score: float
     semantic_score: Optional[float] = None
+    deferred_order: Optional[Tuple[int, int]] = None
+
+
+@dataclass(frozen=True)
+class FrontierRegion:
+    """跨地图更新关联的 Frontier 区域，边界使用世界坐标。
+
+    deferred_order 为暂存时的（观测节点序号，本轮排名）；None 表示可优先探索。
+    暂存方向按节点从新到旧、同节点排名从小到大恢复。"""
+
+    region_id: str
+    boundary_world_xy: Tuple[Tuple[float, float], ...]
+    deferred_order: Optional[Tuple[int, int]] = None
+
+
+@dataclass(frozen=True)
+class BlockedFrontierRegion:
+    """因未知路径被屏蔽的整片边界，独立于当前候选及其编号保存。
+
+    boundary_world_xy 保留已关联的区域边界；本次运行中不自动解除屏蔽。
+    """
+
+    region_id: str
+    boundary_world_xy: Tuple[Tuple[float, float], ...]
 
 
 @dataclass(frozen=True)
 class FrontierScoreRequest:
-    """一次批量语义评分所要覆盖的全部 Frontier 候选。"""
+    """本轮允许参与语义评分的新 Frontier 候选，暂存旧方向不参与。"""
 
     candidates: Tuple[FrontierCandidate, ...]
 
@@ -252,22 +295,27 @@ class SearchDirectionState(Enum):
     COMMITTED = "committed"
     EXPLORED = "explored"
     INVALIDATED = "invalidated"
+    STALLED = "stalled"
 
 
 @dataclass(frozen=True)
 class SearchDirection:
     """一次已记录的搜索方向。heading_world_rad 为世界坐标系下的朝向（弧度），
-    candidate_world_xy 为可选的目标候选点（米），state 为方向状态。"""
+    candidate_world_xy 为最终 Frontier，command_world_xy 为提交给底盘的位置（米）；
+    当前探索命令直接使用最终位置。
+    state 记录本次移动结果，execution_reason 保留执行异常原因。"""
 
     direction_id: str
     heading_world_rad: float
     candidate_world_xy: Optional[Tuple[float, float]] = None
     state: SearchDirectionState = SearchDirectionState.PENDING
+    command_world_xy: Optional[Tuple[float, float]] = None
+    execution_reason: str = ""
 
 
 @dataclass(frozen=True)
 class ObservationNode:
-    """一次观测时机器人所在位置及其在该位置记录的方向序列。"""
+    """一次探索移动的出发位置和实际目标；也是本轮暂存方向的父节点。"""
 
     node_id: str
     position_world_xy: Tuple[float, float]
@@ -279,21 +327,34 @@ class SearchState:
     """语义目标搜索的周期状态。scan_headings_world_rad 为世界系扫描朝向
     序列，next_scan_index 为下一个待扫描朝向的下标，observation_history
     按时间顺序保存观测节点，scan_evidence 保存最近一次扫描的逐方向观测
-    证据；initial_scan_complete 区分首次 8×45° 环扫与后续 Frontier 视场扫描；
-    active_node_id 为当前活跃观测节点，target_approach_attempts 为已尝试接近
-    目标的次数；pending_target_world_xy 是等待最终确认的目标位置，
-    rejected_target_world_xy 保存已被 VLM 否决的位置。"""
+    证据；observed_views 只记录已完成语义检查的视角，场景采集须等 VLM 判断成功。
+    scan_observation_points 保存本轮局部待检查 Frontier 边界点，随扫描计划冻结；
+    scan_local_point_count 是复用已检查覆盖前的局部可见 Frontier 点数。
+    frontier_regions 保存当前有效区域及旧方向的暂存顺序；active_frontier_id
+    标识最近选择的区域，扫描转向不改变新旧方向的优先级。
+    blocked_frontier_regions 保留因未知路径被取消的完整区域，防止换代表点重试。
+    branch_node_ids 按根到叶保存当前分支的出发节点；逐个返回，已退完节点出栈。
+    backtrack_node_id 是正在返回的栈顶父节点，到达后才检查该节点的暂存方向。
+    pending_target_world_xy 与 rejected_target_world_xy 用于目标最终确认。"""
 
     phase: SearchPhase = SearchPhase.SCANNING
     scan_headings_world_rad: Tuple[float, ...] = ()
     next_scan_index: int = 0
     observation_history: Tuple[ObservationNode, ...] = ()
     scan_evidence: Tuple[ScanEvidence, ...] = ()
-    active_node_id: Optional[str] = None
+    frontier_regions: Tuple[FrontierRegion, ...] = ()
+    next_frontier_region_id: int = 0
+    active_frontier_id: Optional[str] = None
+    observed_views: Tuple[ObservationView, ...] = ()
+    scan_observation_points: Tuple[Tuple[float, float], ...] = ()
+    scan_local_point_count: int = 0
     target_approach_attempts: int = 0
     initial_scan_complete: bool = False
     pending_target_world_xy: Optional[Tuple[float, float]] = None
     rejected_target_world_xy: Tuple[Tuple[float, float], ...] = ()
+    blocked_frontier_regions: Tuple[BlockedFrontierRegion, ...] = ()
+    backtrack_node_id: Optional[str] = None
+    branch_node_ids: Tuple[str, ...] = ()
 
 
 class NavigationStatus(Enum):

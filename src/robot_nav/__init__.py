@@ -1,14 +1,17 @@
 """robot_nav：机器人导航算法的最小 Python 框架。"""
 
 from .core.models import (
+    BlockedFrontierRegion,
     CameraIntrinsics,
     FrontierCandidate,
+    FrontierRegion,
     FrontierScoreRequest,
     NavigationDebug,
     NavigationFrame,
     NavigationResult,
     NavigationStatus,
     ObservationNode,
+    ObservationView,
     ObstacleMap,
     Pose2D,
     RelativePoseCommand,
@@ -30,14 +33,17 @@ from .core.models import (
 from .core.navigator import navigate
 
 __all__ = [
+    "BlockedFrontierRegion",
     "CameraIntrinsics",
     "FrontierCandidate",
+    "FrontierRegion",
     "FrontierScoreRequest",
     "NavigationDebug",
     "NavigationFrame",
     "NavigationResult",
     "NavigationStatus",
     "ObservationNode",
+    "ObservationView",
     "ObstacleMap",
     "Pose2D",
     "RelativePoseCommand",

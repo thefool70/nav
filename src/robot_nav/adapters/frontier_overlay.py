@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Mapping, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from ..core.models import (
     CameraIntrinsics,
@@ -176,7 +176,7 @@ def build_frontier_score_sheet(
     scan_images: Mapping[int, BufferedScanImage],
     candidates: Sequence[FrontierCandidate],
 ) -> Tuple[VlmInputImage, Tuple[FrontierImageMarker, ...]]:
-    """每个候选只标在最接近其方位的扫描帧上，再拼成一张图。"""
+    """只标注能投影到本轮图像内的候选；未拍摄方向不伪装成画面边缘目标。"""
     if not scan_images:
         raise ValueError("没有可用的扫描 RGB")
     if not candidates:
@@ -186,10 +186,16 @@ def build_frontier_score_sheet(
     assignments: Dict[int, list] = {index: [] for index, _ in ordered_frames}
     markers = []
     for marker_index, candidate in enumerate(candidates, start=1):
-        frame_index, source_x = _best_scan_frame(candidate, ordered_frames)
+        projection = _best_scan_frame(candidate, ordered_frames)
+        if projection is None:
+            continue
+        frame_index, source_x = projection
         label = str(marker_index)
         assignments[frame_index].append((label, source_x))
         markers.append(FrontierImageMarker(label, candidate.candidate_id))
+
+    if not markers:
+        raise ValueError("本轮图像没有覆盖任何 Frontier 方位")
 
     used_frames = tuple(
         (index, frame)
@@ -252,7 +258,7 @@ def _compose_sheet(
 def _best_scan_frame(
     candidate: FrontierCandidate,
     frames: Sequence[Tuple[int, BufferedScanImage]],
-) -> Tuple[int, float]:
+) -> Optional[Tuple[int, float]]:
     """选择候选水平方位最靠近画面中心的扫描帧。"""
     choices = []
     for frame_index, frame in frames:
@@ -274,17 +280,7 @@ def _best_scan_frame(
         _, frame_index, source_x = min(choices)
         return frame_index, source_x
 
-    fallback = []
-    for frame_index, frame in frames:
-        delta_x = candidate.world_xy[0] - frame.pose.x_m
-        delta_y = candidate.world_xy[1] - frame.pose.y_m
-        world_heading = math.atan2(delta_y, delta_x)
-        camera_heading = frame.pose.yaw_rad + frame.camera_yaw_rad
-        relative_heading = _wrap_angle(world_heading - camera_heading)
-        edge_x = 12.0 if relative_heading > 0.0 else frame.width_px - 13.0
-        fallback.append((abs(relative_heading), frame_index, edge_x))
-    _, frame_index, source_x = min(fallback)
-    return frame_index, source_x
+    return None
 
 
 def _resize_rgb(

@@ -1,15 +1,18 @@
 """核心导航算法与数据契约，不依赖 ROS、底盘 SDK、文件系统或 adapters。"""
 
 from .models import (
+    BlockedFrontierRegion,
     CameraExtrinsics,
     CameraIntrinsics,
     FrontierCandidate,
+    FrontierRegion,
     FrontierScoreRequest,
     NavigationDebug,
     NavigationFrame,
     NavigationResult,
     NavigationStatus,
     ObservationNode,
+    ObservationView,
     ObstacleMap,
     Pose2D,
     RelativePoseCommand,
@@ -31,14 +34,17 @@ from .models import (
 from .navigator import navigate
 
 __all__ = [
+    "BlockedFrontierRegion",
     "CameraIntrinsics",
     "FrontierCandidate",
+    "FrontierRegion",
     "FrontierScoreRequest",
     "NavigationDebug",
     "NavigationFrame",
     "NavigationResult",
     "NavigationStatus",
     "ObservationNode",
+    "ObservationView",
     "ObstacleMap",
     "Pose2D",
     "RelativePoseCommand",

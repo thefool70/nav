@@ -17,6 +17,7 @@ from .core.models import (
     NavigationFrame,
     NavigationResult,
     ObservationNode,
+    ObservationView,
     Pose2D,
     RelativePoseCommand,
     SearchState,
@@ -336,23 +337,22 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
         "committed": 0,
         "explored": 0,
         "invalidated": 0,
+        "stalled": 0,
     }
     for node in state.observation_history:
         for direction in node.directions:
             direction_counts[direction.state.value] += 1
 
-    active_node = next(
-        (
-            node
-            for node in state.observation_history
-            if node.node_id == state.active_node_id
-        ),
-        None,
-    )
     latest_node = (
         state.observation_history[-1]
         if state.observation_history
         else None
+    )
+    deferred_regions = sorted(
+        (region for region in state.frontier_regions if region.deferred_order is not None),
+        key=lambda region: (
+            -region.deferred_order[0], region.deferred_order[1], region.region_id,
+        ),
     )
     return {
         "phase": state.phase.value,
@@ -371,9 +371,50 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
         "rejected_target_world_xy": state.rejected_target_world_xy,
         "history_node_count": len(state.observation_history),
         "history_direction_counts": direction_counts,
-        "active_node_id": state.active_node_id,
-        "active_node": _node_summary(active_node),
+        "active_frontier_id": state.active_frontier_id,
+        "backtrack_node_id": state.backtrack_node_id,
+        "branch_node_ids": state.branch_node_ids,
+        "frontier_region_ids": tuple(region.region_id for region in state.frontier_regions),
+        "blocked_frontier_regions": tuple(
+            {
+                "region_id": region.region_id,
+                "boundary_point_count": len(region.boundary_world_xy),
+            }
+            for region in state.blocked_frontier_regions
+        ),
+        "deferred_frontiers": tuple(
+            {"region_id": region.region_id, "deferred_order": region.deferred_order}
+            for region in deferred_regions
+        ),
+        "checked_view_count": len(state.observed_views),
+        "scan_observation_point_count": len(state.scan_observation_points),
+        "scan_local_point_count": state.scan_local_point_count,
+        "covered_point_count": len({
+            tuple(point) for view in state.observed_views for point in view.visible_world_xy
+        }),
+        "last_checked_view": (
+            _observation_view_summary(state.observed_views[-1])
+            if state.observed_views else None
+        ),
+        "scan_views": tuple(
+            _observation_view_summary(evidence.view)
+            for evidence in state.scan_evidence if evidence.view is not None
+        ),
         "latest_node": _node_summary(latest_node),
+    }
+
+
+def _observation_view_summary(view: ObservationView) -> Mapping[str, Any]:
+    """记录覆盖所对应的真实相机位置与采集时刻，不重复写入全部采样点。"""
+    return {
+        "pose": _pose_summary(view.pose),
+        "camera_world_xy": view.camera_world_xy,
+        "camera_heading_world_rad": view.camera_heading_world_rad,
+        "horizontal_fov_rad": view.horizontal_fov_rad,
+        "timestamp_s": view.timestamp_s,
+        "visible_point_count": len(view.visible_world_xy),
+        "map_visible_point_count": len(view.map_visible_world_xy),
+        "depth_coverage_available": view.depth_coverage_available,
     }
 
 
@@ -390,6 +431,8 @@ def _node_summary(
                 "direction_id": direction.direction_id,
                 "heading_world_rad": direction.heading_world_rad,
                 "candidate_world_xy": direction.candidate_world_xy,
+                "command_world_xy": direction.command_world_xy,
+                "execution_reason": direction.execution_reason,
                 "state": direction.state.value,
             }
             for direction in node.directions

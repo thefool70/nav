@@ -1,12 +1,24 @@
 """外部系统适配层。当前仅定义最薄的底盘接口协议，不包含厂商实现。"""
 
-from typing import Protocol
+from typing import Protocol, Tuple, runtime_checkable
 
-from ..core.models import NavigationFrame, RelativePoseCommand
+from ..core.models import NavigationFrame, ObstacleMap, Pose2D, RelativePoseCommand
 
 
 class RecoverableMotionError(RuntimeError):
     """目标点被规划器拒绝或无法到达，算法可淘汰该候选后继续。"""
+
+
+class MotionPathUnknownError(RecoverableMotionError):
+    """路径经过算法未知区；确认停止后向核心传递被拒绝的世界坐标路径。"""
+
+    def __init__(
+        self,
+        message: str,
+        path_world_xy: Tuple[Tuple[float, float], ...],
+    ) -> None:
+        super().__init__(message)
+        self.path_world_xy = tuple(path_world_xy)
 
 
 class MotionStalledError(RuntimeError):
@@ -31,4 +43,16 @@ class ChassisInterface(Protocol):
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
         """同步执行命令；可恢复的不可达或停滞使用对应显式异常。"""
+        ...
+
+
+@runtime_checkable
+class KnownSpaceChassisInterface(Protocol):
+    """可检查实际规划路径的底盘扩展，当前由 Hermes 实现。"""
+
+    def send_relative_pose_in_known_space(
+        self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
+        *, reference_pose: Pose2D,
+    ) -> None:
+        """用决策位姿还原世界目标，按选点地图检查路径；未知路径确认取消后抛异常。"""
         ...
