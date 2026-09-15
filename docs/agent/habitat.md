@@ -15,6 +15,36 @@
   遇到此错误先核对 traceback 的解释器路径和扩展文件名，再选择匹配的环境；
   不要直接在 Habitat 环境安装另一套 RealSense 库。
 
+## 仿真与真机差异的回归定位
+
+- 当前三个 CLI 入口都使用 `QueuedSemanticObserver`；仅
+  `__main__.py::_build_slamtec_observer` 的正常物体模式传入 YOLO/SAM2
+  `local_observer`。队列本身满足 `ContinuousTargetObserver` 协议，不能仅凭
+  `isinstance` 判断本地检测已启用。Hermes 本地检测走接近与确认；后台线索
+  在三个入口都走返回拍摄位姿。直接使用同步观察器的 API 仍保留同步状态分支。
+- S100 的沿途帧来自 `adapters/s100_l515/adapter.py::_publish_stopped_frame`：
+  每个最多 0.20 m 的平移小段停止后取帧；Habitat 在每个离散动作后取帧，Hermes
+  另有连续采集线程。共用预采样器不表示三个 Adapter 的采集时机相同。
+- S100 `adapters/s100_l515/planner.py::plan_known_free_path` 禁止未知格，
+  无路时抛普通 `RuntimeError`；Adapter 未转换为 `RecoverableMotionError`，
+  因而不会进入 `app.py::_execute_command` 的普通运动失败恢复。比较返回失败
+  行为时先查异常类型，不能仅凭共用状态机推断 S100 会自动尝试下一条线索。
+- 检测链先检查 `__main__.py::_run_habitat` 与 `_build_slamtec_observer`，不能仅凭
+  共用 `core/navigator.py` 判断算法一致。`a99543a`（2026-08-26）首次只在 Hermes
+  入口包装 SAM2；其父版本两边均调用 `_build_observer`。`c16e919` 仅提供 SAM2
+  实现，入口实际启用点是 `a99543a`。
+- `89129dd`（2026-08-26）只给 Hermes 接入 YOLO+SAM2 持续检测、运动中断与
+  启动前移 1 m；Habitat 的运动循环没有对应目标中断入口。
+- 地图输入从 Hermes 接入的 `33d8cd5`（2026-08-25）起就不等价：当时直接转换
+  厂商地图，Habitat 已按局部视场和视线公开地图。`e42900e` 加入 Hermes 的
+  L515 地图筛选与膨胀，`c7a27ed`（2026-09-04）又移除深度截断，改为理论 FOV。
+  排查 Frontier 数量差异时先比较两边实际 `NavigationFrame.obstacle_map`。
+- `9ab3402` / `c7a27ed`（2026-09-04）增加共用的 object/scene 状态与入口；
+  场景模式本身不需要 YOLO+SAM2，不能把模式差异误判为环境差异。
+- `87a1f24`（2026-09-05）在 `app.py::_execute_command` 引入已知区路径扩展，
+  仅 Hermes 实现；未知路径取消与区域屏蔽没有在 Habitat 中同等触发。
+  历史日期为 Git 提交日期；可用 `git show <commit> -- <path>` 核对实际接入位置。
+
 ## 快速隔离 Rerun
 
 - 给原命令增加 `--no-rerun`，其余参数保持不变。
@@ -83,7 +113,7 @@
   `_recover_backtrack_issue(issue_kind="not_arrived")` 返回 `OK + SCANNING`，
   不得直接置为 `FAILED`，也不重复下发同一失败节点。起点已在容差内则直接恢复。
   没有有效暂存方向则出栈；若到达位置显露新候选则重新选点，否则只返回上一层。
-  即使全局候选为空，也先逐级退完当前分支才 `explore.exhausted`。返回开始时清空本轮
+  即使全局候选为空，也先逐级退完当前分支，再等待视觉队列，才 `explore.exhausted`。返回开始时清空本轮
   `scan_evidence` 与扫描计划，避免在父节点沿用分支末端图像评分；`observed_views` 仍保留。
 - 地图更新造成旧区域自然分裂时，子区域继承暂存顺序；合并时保留最先恢复的顺序。
   实际边界重叠优先于一格邻域匹配，避免相邻旧区域把当前分支一起暂存。
@@ -96,7 +126,7 @@
   `app.py::_execute_command` 等待同步动作结束后才允许下一周期决策；
   排查途中改目标时先核对 Adapter 完成反馈。
 - Hermes 的 `KnownSpaceChassisInterface` 扩展在 `explore.select`、
-  `backtrack.return` 和 `backtrack.resume` 使用。
+  `backtrack.return`、`backtrack.resume` 和 `target.revisit` 使用。
   `app.py` 将本周期 `frame.obstacle_map` 和 `reference_pose=frame.pose` 显式传给
   `send_relative_pose_in_known_space`；启动、标定和目标接近仍走普通接口，
   Habitat/S100 当前未实现该扩展。
@@ -152,7 +182,7 @@
   屏蔽整片区域。Rerun `Frontiers` 与 JSONL `blocked_frontier_regions` 可查屏蔽记录。
 - `SearchState.scan_observation_points` 来自本轮有效 Frontier 的全部边界格，
   新候选和暂存候选均参与；观察点与朝向在整轮扫描期间冻结，不因途中边界消失
-  而重排。`observed_views` 只在有效物体观测或成功场景判断后增加；相机采集、
+  而重排。`observed_views` 只在有效本地观测或成功后台目标判断后增加；相机采集、
   地图公开和 Rerun 运动帧均不代表 VLM 已检查。
 - 扫描未指向 Frontier 代表点时，先检查 `observation_coverage.py` 的
   `frontier_observation_points`：只保留光心距离大于 0.10 m、至多 4 m 且地图
@@ -172,7 +202,8 @@
   跨位置复用。新暴露区域、超过 30° 的观察角度变化或明显接近会触发补查。
   `depth_coverage_available=False` 时不得扩大原地复用范围来消除重复扫描。
 - JSONL 的 `scan_views` 与 `last_checked_view` 记录真实光心位置、时间戳和
-  覆盖点数。场景采集的覆盖须等 `assess_scene` 成功后才加入全局已检查记录。
+  覆盖点数。异步的 `PENDING` 证据不代表已检查；要结合全局 `observed_views`
+  和 `pending_observation_view_count` 判断。同步场景仍须等 `assess_scene` 成功。
 - `--seed` 只传给 Habitat；随机观察器使用独立、未设种子的 `random.Random()`。
   随机评分运行可检查状态流，不能据单轮轨迹归因 VLM 效果或衡量算法改进。
 - 排查“没有优先向前”时检查 `navigator.py::_select_exploration_target`：当前排序
@@ -181,13 +212,111 @@
   扫描结束时的车头 yaw 不参与分层。`frontier_selection_source` 为 `new` 或
   `deferred`；提交 Frontier 移动时，新旧数量是本次选择前的数量；
   JSONL 状态的 `deferred_frontiers` 是选择后的暂存队列，Rerun 同样显示来源与队列数量。
-- 场景判断 `uncertain` 时保留本轮采集；不要提前清除观察器图像缓冲。物体模式
-  全部覆盖可复用时跳过扫描及评分，避免使用上一位置遗留图像；场景模式仍采集
-  当前画面判断所在位置。局部扫描未拍到的 Frontier 方位不投影到图片边缘。
+- 同步场景判断 `uncertain` 时保留本轮采集；异步目标返回只核对位置和朝向。物体模式
+  全部覆盖可复用时跳过扫描，异步选点仍可查询严格匹配的评分缓存；场景模式仍采集
+  当前画面入队。局部扫描未拍到的 Frontier 方位不投影到图片边缘。
 - `INVALIDATED` 表示执行失败，`STALLED` 表示停滞；二者均不证明 navmesh
   不连通。有紫色路径但无运动帧时，继续检查 Habitat `_follow_path()` 的动作生成。
   周期回调发生在执行前，异常原因通过历史方向的 `execution_reason` 保留，
   下一周期 Rerun 的 `last exploration issue` 显示最近一次异常及其节点编号。
+
+## 异步视觉队列
+
+- 连接故障先读 `semantic-*/job-*/result.json` 的 `detection_error`，区分 HTTP
+  状态码与收到响应前断开。已确认 2026-09-07 的 `semantic-cri8lcr5` 共完成
+  34 批：7 批成功、27 批连接失败（25 次 RemoteDisconnected、1 次 Broken pipe、
+  1 次 SSL EOF）；job-000004～000010 成功，job-000011 起连续失败。
+  此类日志不能直接证明密钥失效、额度耗尽或 Qwen 全局宕机。
+  `_post_json` 使用默认 urllib opener，会继承启动进程的 HTTP(S) 代理设置；
+  排查 OpenCode Go 链路时核对该进程的代理环境，不用当前工具进程环境替代历史证据。
+  不输出凭据值，也不要把连接失败当作“未检测到目标”。
+- `VlmInteraction.context` 与 `SemanticAnalyzer.analyze_views(trace_context=...)`
+  只增加记录来源，不参与提示词或 HTTP payload；不能为了显示关联关系串用
+  `_scan_images` 或共享可变的当前任务 ID。后台目标返回不另发视觉请求；本地或
+  同步物体定位请求记录其前置可见性请求 `parent_request_id`。
+- `QueuedSemanticObserver._score_origins` 随评分缓存保留 J/R 来源；
+  `semantic_received_jobs` 是该周期接收结果，`semantic_score_sources` 是传给
+  排序的有效缓存输入。两者不是同一件事，返回有效分数不等于已用于导航。
+- `adapters/queued_semantics.py::QueuedSemanticObserver` 是 CLI 的默认观察器。
+  扫描线程冻结画面；运动回调只提交最新原始帧，由独立采样线程处理；单个分析
+  线程按 FIFO 调用 `OpenAICompatibleTargetObserver.analyze_views`，不使用
+  `_scan_images`。设备只由 Adapter 读取，核心状态只由主循环更新。
+- `data/run_logs/semantic-*/job-*` 保存 `view-N.rgb.gz`、`snapshot.json` 和
+  `result.json`。快照中的 `snapshot:批次:序号` 与 `source_region_id` 分别是
+  请求内候选 ID 和原区域 ID；分数缓存必须同时匹配地图 frame、原区域 ID、
+  世界目标坐标，不能只按新分配的预览 ID 套用。预览不提交核心区域编号。
+- 扫描中出现连续单图批次时，先检查 `snapshot.json.source`。`_capture_scan`
+  正常只在 `context.index + 1 >= context.count` 时提交整轮，不按新 Frontier
+  提前拆批。被打断或重建计划时，`sync_state` / 下一轮开始处仍提交未送出的
+  部分画面；后续局部扫描本身可能只有一图，不能只凭图数判断是否重复请求。
+- `app.py::_execute_command` 单独调用 `set_motion_prefetch_enabled`：仅允许
+  explore.select / backtrack.return / backtrack.resume，且命令
+  必须有非零平移；在 finally 关闭。`set_motion_interrupt_enabled` 只转发本地
+  检测中断开关，不能再控制 VLM 预采样，否则 scan.turn 会额外产生单图 motion。
+  target.revisit 不启用预采样。动作期间已接收的帧保留其原始状态快照，允许
+  采样线程稍后完成处理。
+- `frontier_overlay.py::build_semantic_analysis_sheet` 保留所有输入图像，包含
+  没有 Frontier 的视角；V/F 编号在图外，F 用单像素引线连到图内 3×3 锚点。
+  评分失效不能删除未检测任务。RGB 最大宽度 320；V 蓝底白字用连续笔画抗锯齿，
+  不依赖系统字体。页眉 28px，页脚按标签分配 0–3 行、每行 30px；每排按最高
+  tile 对齐，间距 2px。无 F 时不得恢复固定 96px 空页脚。
+  `core/vision.py::parse_semantic_analysis_response` 分别校验线索列表和评分。
+- `core/frontier_projection.py::project_frontier_ground_points` 在采集时将候选
+  `world_xy` 按局部地面 z=0 投影；变换为 `grounding._camera_point_to_robot` 的
+  逆变换（撤销 yaw/pitch/roll）。中心有效、3×3 至少三点有效，中位值及中心
+  光轴深度误差 ≤0.15 m，近处遮挡会过滤。不要用欧氏距离比较深度。
+- `BufferedScanImage.frontier_projections` 与完整相机外参写入 `snapshot.json`；
+  `_read_snapshot` 还原为元组。锚点按同一世界坐标匹配，不依赖队列重命名的
+  candidate ID。拼图选择已通过深度检查的视角；没有可靠锚点或页脚容量不足
+  就省略该候选评分，不能恢复旧的画面边缘兜底。
+- `has_frontier_direction_in_view` 只决定运动帧采样触发；可见方位没有可靠地面
+  锚点时仍提交画面检测目标，不能因评分不可用而删除这次检测。入队候选只含
+  有锚点者，避免为未请求的评分占用在途缓存键。
+- 已确认 `semantic-5zgxc5zj` 的前 16 个完成任务均为 `candidates=[]`、
+  `frontier_projections=[]`、`frontier_scores={}`。对应
+  `slamtec-l515-20260906-182020-217885.jsonl` 前 33 个决策的 70 条候选记录均无
+  语义分；不能归因于界面将请求拆开。前两批 source=motion 说明采样前有可见
+  Frontier 方位，评分入口随后被地面投影/深度检查过滤。现有快照不记录淘汰
+  原因，尚不能区分投影出界、无效深度、地面不符或外参问题；不要直接断言阈值过严。
+- `build_frontier_score_sheet` 保留旧同步 API 的数字方向标注；默认 FIFO 联合
+  分析走 `build_semantic_analysis_sheet` 的地面锚点。排查时先确认实际请求 task。
+- Habitat `_build_navigation_frame` 显式填写 `CameraExtrinsics(height_m=sensor_height_m)`；
+  不得再使用默认零高度，否则地面锚点无法生成。采集分辨率没有提升。
+- Rerun 的 F 记录新增 `view_id`、`source_pixel_xy`，后者是缩放前 RGB 像素；
+  用快照 `camera_depth_m` / `observed_depth_m` 追查过滤，不能拿返回时的新深度核对。
+- 提示词 `_frontier_scoring_rules` 为联合分析和旧批量评分共用；0.5 表示缺少线索，
+  `target.view_ids=[]` 不自动压低评分，模型不计算导航距离/可达性。模型输出
+  `target.view_ids` 有序整数列表，不再输出 `target.found` / `target.view_id`。
+  `SemanticAnalysis.target_view_ids` 空元组是有效无线索，None 才是检测失败；
+  越界、布尔值、重复编号、非列表均判为检测失败，仍保留有效分数。
+  列表只包含检测匹配的画面；到位后没有二次视觉确认，不能再提示模型将模糊猜测
+  留给现场复查。Rerun 的 `Return order` 是模型返回顺序，非新的世界候选编号。
+- `prepare_cycle` 接收结果：检测有效才登记覆盖，评分失败仍可保留目标线索。
+  `_pending_coverage` 在结果被主循环接收前一直保留；失败后移除，不冒充已检查。
+  `pending_semantic_jobs` 还含采样、待接收结果、部分扫描和排队线索，不是 HTTP 数。
+- `TargetClue.pose` 是拍摄时机器人位姿。`target.revisit` 返回后恢复拍摄朝向，
+  `_continue_target_clue(frame, state)` 在位置误差 ≤0.25m、朝向误差 ≤5° 时直接
+  返回 COMPLETE / target.revisit_complete，细节保留拍摄位姿目标与剩余误差。
+  不进入 VERIFYING_SCENE 或 LOCALIZING_TARGET，也不再调用新帧复查接口。
+  `prepare_cycle` 按列表原顺序入队，
+  位姿去重不重新排序；批次仍按 FIFO。`_discard_target_clue` 返回无命令状态，
+  返回失败时以 target.revisit_failed 让下一周期优先取下一条，COMPLETE 不再取线索。
+  `navigate` 的 active_target_clue 分支优先于视觉处理；`app.py` 跳过返回期间
+  的目标观测，同时禁用 target.revisit / target.revisit_turn 的本地检测中断。
+- `QueuedSemanticObserver.sync_state` 在提交残余扫描前更新 `_background_paused`：
+  有待查线索、active_target_clue、目标返回/本地定位/确认阶段或导航终态时暂停。
+  `_worker_loop` 与 `_capture_loop` 等待暂停解除；`submit_motion_frame` 不接收
+  新预采样帧。`prepare_cycle` 根据传入状态与待查线索决定是否接收完成结果，
+  暂停期间保留 `_completed` 与 `_pending_coverage`，不抢占当前线索。
+  两条线索之间不恢复后台工作；现有线索都无法返回、回到普通搜索时 notify_all 恢复。
+  已开始的请求/采样可以完成并保存结果；暂停不是取消已发送的 HTTP 请求。
+  `semantic_background_paused` 进入周期诊断，Rerun 简表显示普通队列暂停提示。
+- `QueuedSemanticObserver.assess_scene` 仅满足通用观察器协议，正常异步导航不调用；
+  场景判断由联合检测完成。同步观察器仍可用 `assess_scene(goal)` 判断扫描拼图；
+  本地物体检测保留接近与最终确认，后台线索不进入这条路径。
+- 分数只在下一次决策读取，不修改执行中的目标；本地 YOLO 中断逻辑仍保留。
+  `_wait_for_semantics_or_finish` 必须等待任务与线索耗尽；失败检测计数单独报告。
+  `close` 停止继续出队，已落盘数据保留，当前没有恢复队列或磁盘限额机制。
 
 ## 导航退出路径排查
 
@@ -197,23 +326,36 @@
   MoveToAction 的有效进展仍是平移至少 2 cm，原地转向不重置其平移停滞计时。
 - `__main__.py::_run_navigation` 在目标完成、`FAILED`、非 `OK` 且非等待感知状态，
   或达到 `max_cycles` 时退出；`MISSING_DATA` 当前也立即退出。周期上限不能当作
-  Frontier 耗尽，VLM/YOLO 推理失败通常已转为 `uncertain` 或几何评分降级。
+  Frontier 耗尽；`OK + WAITING_FOR_SEMANTICS` 每次最多等待结果 1 秒，不消耗决策
+  额度。普通模型失败记为失败批次、评分降级；本地物体最终确认失败沿用 `uncertain` 重试。
 - `core/navigator.py::recover_from_motion_failure` / `continue_after_motion_stall`
-  尚未处理 `scan.turn`。Hermes 转向失败或停滞且未达到朝向容差时，Adapter 抛出的
-  可恢复异常会在 `app.py::_execute_command` 因恢复返回 `None` 而重新抛出并退出。
+  对 `scan.turn` 使用 `_recover_scan_turn`，清除扫描计划后按真实朝向重新规划，
+  不登记失败方向的覆盖。首次扫描尚未完成时仍按首次环扫规则重建。
 - `__main__.py::_move_slamtec_forward_on_start` 在 `_run_navigation` 之前直接调用
-  底盘；启动前移 1 m 的规划失败或停滞未进入算法恢复流程，会直接结束启动。
-- `slamtec_l515/adapter.py::_execute_action` 的 `create_action`、随后读取起始
-  位姿与首次进度回调均在监控 `try` 之外。Action 已创建后上述步骤异常时，
-  不进入取消分支；`close()` / `__exit__()` 仅关闭采集，不兜底取消底盘动作。
-  排查异常退出后的底盘状态时，不能假定退出 Python 就已取消 Action。
-- `app.py::run_navigation_cycle` 的 `on_cycle`、Hermes `_publish_motion_frame`、
-  `_report_action_progress` 直接调用回调；JSONL `_write` 的写入/flush 异常也未隔离。
-  Rerun 决策/运动帧或日志异常可传播到导航；VLM 交互、YOLO 检测事件与路径显示的
-  回调已有旁路异常保护，不能把所有可视化回调视为同一种处理。
+  底盘；前移 1 m 的可恢复失败/停滞在确认动作结束后继续启动，其他异常仍停止。
+- `slamtec_l515/adapter.py::_execute_action` 将 Action 创建、起始位姿读取和监控
+  放在同一异常范围；`_cancel_active_action` 与 `close` 负责取消遗留动作。已获得
+  ID 时还要确认终态；创建请求失败而没有 ID 时只能尝试取消，原异常仍终止运行。
+- CLI 的 `_optional_callback` 停用失败的 Rerun 周期/运动回调；Hermes 进度回调
+  与 JSONL `_write` 也隔离记录错误。直接调用 `run_navigation_cycle(on_cycle=...)`
+  的自定义回调仍由调用方负责。采集、路径检查、健康错误仍停止并收尾动作。
+- 正式扫描的快照落盘失败仍传播并停止；运动预采样失败记录 `prefetch_skipped`，
+  不登记已检查。`snapshot_failed` 与普通日志丢失不同；结果落盘失败时内存结果
+  仍交给主循环。队列停止后运行中的 HTTP 可能完成，退出不自动续跑剩余任务。
 
 ## 离线读取 RRD
 
+- `visualization/vlm_trace.py` 只保存轻量摘要，`rerun_view.py` 写完整卡片和 World
+  叠加。`model/vlm/summary` 是简表，`model/interaction` 是最新完整事件；
+  `model/vlm/requests/R000001` 保留单次会话，`/text` 保留不依赖字体的完整文本，
+  `model/vlm/jobs/J000001` 保留任务事件与接收／排序周期。
+- VLM 请求、返回及队列事件均调用 `_begin_sample`，不能恢复旧 `_vlm_samples`
+  的请求帧回写方式，否则会在回放中提前出现未来结果。`frame` 现在包含模型和
+  队列事件，不等于导航周期；简表的 C 是决策回调序号。旧录制没有新增的来源信息。
+- `world/vlm/captures` / `headings` 是最新返回请求的拍摄机器人位置与相机 yaw；
+  `frontiers` / `frontier_outlines` 是该请求的候选快照，不做当前有效性声明。
+  `capture_link` 是位置对照线，不得作为底盘规划路径解释。图层按最近返回请求
+  更新，地图 frame 不匹配时递归清空；V/F 表格实例顺序须与点序列一致。
 - 使用现有环境的 `rerun.dataframe.load_recording(path)`，按 `frame` 时间线查询。
   `navigation/motion:Text` 包含最近决策和实时位姿（旧记录为 `world/hud:Text`）；
   `world/robot:LineStrip2D` 可恢复更精确位姿。
