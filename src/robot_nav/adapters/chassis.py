@@ -1,6 +1,6 @@
 """外部系统适配层。当前仅定义最薄的底盘接口协议，不包含厂商实现。"""
 
-from typing import Protocol, Tuple, runtime_checkable
+from typing import Optional, Protocol, Tuple, runtime_checkable
 
 from ..core.models import NavigationFrame, ObstacleMap, Pose2D, RelativePoseCommand
 
@@ -10,15 +10,22 @@ class RecoverableMotionError(RuntimeError):
 
 
 class MotionPathUnknownError(RecoverableMotionError):
-    """路径经过算法未知区；确认停止后向核心传递被拒绝的世界坐标路径。"""
+    """未知路径长度超过允许值；确认停止后传递路径和测量值。"""
 
     def __init__(
         self,
         message: str,
         path_world_xy: Tuple[Tuple[float, float], ...],
+        *,
+        unknown_length_m: Optional[float] = None,
+        limit_m: Optional[float] = None,
+        total_path_length_m: Optional[float] = None,
     ) -> None:
         super().__init__(message)
         self.path_world_xy = tuple(path_world_xy)
+        self.unknown_length_m = unknown_length_m
+        self.limit_m = limit_m
+        self.total_path_length_m = total_path_length_m
 
 
 class MotionStalledError(RuntimeError):
@@ -54,5 +61,5 @@ class KnownSpaceChassisInterface(Protocol):
         self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
         *, reference_pose: Pose2D,
     ) -> None:
-        """用决策位姿还原世界目标，按选点地图检查路径；未知路径确认取消后抛异常。"""
+        """按选点地图检查路径未知长度；超出 Adapter 允许值后确认取消并抛异常。"""
         ...

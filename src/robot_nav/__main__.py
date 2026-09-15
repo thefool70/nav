@@ -362,6 +362,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="活跃 Action 无足够位姿变化的终止秒数，默认 8",
     )
     slamtec.add_argument(
+        "--max-unknown-path-m",
+        type=_non_negative_float,
+        default=1.5,
+        help="当前剩余路径允许经过未知区的累计长度（米），超过才取消，默认 1.5",
+    )
+    slamtec.add_argument(
         "--run-log",
         help=(
             "Hermes 导航 JSONL 日志路径；默认自动保存到 "
@@ -656,6 +662,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             camera_extrinsics_in_robot=_slamtec_extrinsics_from_args(args),
             action_timeout_s=args.action_timeout_s,
             action_stall_timeout_s=args.action_stall_timeout_s,
+            max_unknown_path_m=args.max_unknown_path_m,
             minimum_localization_quality=args.min_localization_quality,
         )
         action_progress = (
@@ -764,6 +771,7 @@ def _build_slamtec_run_logger(
             "rerun_enabled": not args.no_rerun,
             "action_timeout_s": args.action_timeout_s,
             "action_stall_timeout_s": args.action_stall_timeout_s,
+            "max_unknown_path_m": args.max_unknown_path_m,
             "startup_forward_m": SLAMTEC_STARTUP_FORWARD_M,
             "minimum_localization_quality": args.min_localization_quality,
             "sam2_enabled": (
@@ -1277,6 +1285,13 @@ def _positive_float(value: str) -> float:
     number = _finite_float(value)
     if number <= 0.0:
         raise argparse.ArgumentTypeError("必须是正数")
+    return number
+
+
+def _non_negative_float(value: str) -> float:
+    number = _finite_float(value)
+    if number < 0.0:
+        raise argparse.ArgumentTypeError("必须是不小于 0 的数字")
     return number
 
 

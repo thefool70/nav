@@ -108,14 +108,24 @@
   当时仍有有效暂存候选 `region:4`（顺序 `1:1`）和 12 个回退节点，不能归因于
   `explore.exhausted`；已屏蔽的 3 个区域不计入有效待探索候选。
   这不能仅靠放宽 0.25 m 容差掩盖；平移完成的 `target_error` 仅相对底盘收到的目标。
-- `core/path_validation.py::first_unknown_path_cell` 逐段遍历路径栅格，格角交叉
-  检查两侧；`None` 和地图外算未知。Hermes `_check_known_space_path` 将当前位置
+- `core/path_validation.py::measure_unknown_path_length` 按格边交点切分每段路径，
+  累加未知部分的实际长度；`None` 和地图外算未知。只触碰格角长度为零，沿格边
+  行走时任一侧未知即计入一次。不能用格数×分辨率代替斜线/部分穿格的长度。
+  Hermes `_check_known_space_path` 将当前位置
   加在剩余路径前，使用选点地图快照；不能改用原始 Hermes 地图、最新运动帧地图，
   或仅检查离散路径点，否则会漏掉未知绕行。
+- `SlamtecL515Config.max_unknown_path_m` 与 CLI `--max-unknown-path-m` 默认均为
+  1.5 m，非负有限数。只在未知长度 > 上限时取消（比较保留 1e-9 m 浮点容差）；
+  多段未知区累加，不取最长连续段，不累加不同轮询或已走过的路。0 禁止正长度
+  未知段；地图快照仍固定到选点时刻，不能改成运动中扩展的可见地图。
+- Action 进度 `unknown_path=长度/上限` 为当前轮询测量；取消异常保留
+  `unknown_length_m`、`limit_m`、`total_path_length_m`，`app.py` 将其写入
+  `unknown_path_length_m`、`unknown_path_limit_m`、`checked_path_length_m`。
+  这些诊断不改变超限后的区域屏蔽、返回恢复和线索放弃流程。
 - Hermes 路径检查在 `_monitor_action` 的图像采集和进度节流之前执行，不能受
   `on_motion_plan` 或 `path_error_reported` 控制。空路径继续轮询，路径读取错误
   则取消并停止运行，不能用可视化路径读取的容错分支掩盖检查失败。
-- 未知路径、Action 执行失败、停滞或目标检测中断触发取消后，均用
+- 未知路径长度超限、Action 执行失败、停滞或目标检测中断触发取消后，均用
   `wait_for_action(require_success=False)` 确认 Action 进入终态；确认超时使用
   `request_timeout_s`（默认 5 秒）。取消或
   确认失败不得转换为可恢复异常，否则下一目标可能覆盖仍在执行的动作。成功后
@@ -126,7 +136,7 @@
   `SearchState.blocked_frontier_regions`。取消结果记录 `rejection_scope=region`、
   `rejected_path_world_xy`；首个未知格仍保存在 Action 日志和历史 `execution_reason`。
   这适用于 `explore.select` / `backtrack.resume`；`backtrack.return` 的执行失败、
-  停滞或未知路径均调用 `_recover_backtrack_issue`，不能据返回失败屏蔽未尝试的区域。
+  停滞或未知路径长度超限均调用 `_recover_backtrack_issue`，不能据返回失败屏蔽未尝试的区域。
   恢复从 `branch_node_ids` 弹出失败节点，将其所属区域的 `deferred_order` 清为
   `None`，保留边界和整片屏蔽记录，再由下一周期按实际帧重新检查。日志
   `motion.backtrack_recovered` 记录失败种类、跳过节点、释放区域及可用的位置误差。

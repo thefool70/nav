@@ -15,7 +15,7 @@ from ...core.models import (
     Pose2D,
     RelativePoseCommand,
 )
-from ...core.path_validation import first_unknown_path_cell
+from ...core.path_validation import UnknownPathMeasurement, measure_unknown_path_length
 from ..chassis import (
     MotionInterruptedError,
     MotionPathUnknownError,
@@ -62,6 +62,7 @@ class SlamtecL515Config:
     action_stall_timeout_s: float = 8.0
     action_stall_translation_m: float = 0.02
     action_stall_rotation_rad: float = math.radians(1.0)
+    max_unknown_path_m: float = 1.5
     motion_frame_interval_s: float = 0.5
     minimum_localization_quality: int = 1
     position_tolerance_m: float = 0.03
@@ -76,6 +77,7 @@ class _ActionMonitorState:
     last_motion_s: float
     last_motion_pose: Pose2D
     path_error_reported: bool = False
+    unknown_path_length_m: Optional[float] = None
 
 
 class _ActionStalledError(RuntimeError):
@@ -486,7 +488,8 @@ class SlamtecL515Adapter:
         """采样活跃 Action 位姿，定期报告并识别真正的底盘停滞。"""
         self._raise_continuous_frame_error()
         if requires_translation and known_space_map is not None:
-            self._check_known_space_path(action_id, target_world_xy, known_space_map)
+            measurement = self._check_known_space_path(action_id, target_world_xy, known_space_map)
+            state.unknown_path_length_m = measurement.unknown_length_m if measurement is not None else None
         self._publish_motion_frame()
         if (
             self._should_interrupt_motion is not None
@@ -533,12 +536,16 @@ class SlamtecL515Adapter:
         elapsed_s = now - state.started_s
         still_s = now - state.last_motion_s
         stage_text = stage or "-"
+        unknown_detail = (
+            f", unknown_path={state.unknown_path_length_m:.3f}/{self.config.max_unknown_path_m:.3f} m"
+            if state.unknown_path_length_m is not None else ""
+        )
         self._report_action_progress(
             f"Hermes Action #{action_id} {action_label}: "
             f"status={_action_status_text(status)}, "
             f"elapsed={elapsed_s:.1f}s, still={still_s:.1f}s, "
             f"pose=({pose.x_m:.2f}, {pose.y_m:.2f}, "
-            f"{math.degrees(pose.yaw_rad):.1f}°), stage={stage_text}"
+            f"{math.degrees(pose.yaw_rad):.1f}°), stage={stage_text}{unknown_detail}"
         )
         state.last_sample_s = now
 
@@ -553,8 +560,8 @@ class SlamtecL515Adapter:
         action_id: int,
         target_world_xy: Optional[Tuple[float, float]],
         obstacle_map: ObstacleMap,
-    ) -> None:
-        """每次轮询复核当前路径；不依赖 Rerun，也不受进度输出间隔限制。"""
+    ) -> Optional[UnknownPathMeasurement]:
+        """每次轮询独立计算当前位置及剩余路径的未知长度，超过配置上限才取消。"""
         pose = self._client.get_pose()
         # 检查所需路径读取失败属于系统错误，不能降级为仅隐藏可视化。
         remaining_path = self._client.get_remaining_path()
@@ -563,14 +570,21 @@ class SlamtecL515Adapter:
             # 规划尚未发布路径时继续等待，不能据此判定目标不可达。
             return
         path_world_xy = ((pose.x_m, pose.y_m),) + remaining_path
-        unknown_cell = first_unknown_path_cell(path_world_xy, obstacle_map)
-        if unknown_cell is not None:
+        measurement = measure_unknown_path_length(path_world_xy, obstacle_map)
+        limit_m = self.config.max_unknown_path_m
+        # 只吸收纳米量级的浮点误差；恰好达到上限时仍允许继续。
+        if measurement.unknown_length_m > limit_m + 1e-9:
             raise MotionPathUnknownError(
-                "本次 Frontier 目标当前不可达："
-                f"Hermes Action {action_id} 的路径经过算法未知区域或地图外部，"
-                f"首个未知格(row, col)={unknown_cell}。",
+                f"Hermes Action {action_id} 的剩余路径未知长度超限："
+                f"未知区域及地图外累计 {measurement.unknown_length_m:.3f} m，"
+                f"允许上限 {limit_m:.3f} m，路径总长 {measurement.total_length_m:.3f} m，"
+                f"首个未知格(row, col)={measurement.first_unknown_cell}。",
                 path_world_xy=path_world_xy,
+                unknown_length_m=measurement.unknown_length_m,
+                limit_m=limit_m,
+                total_path_length_m=measurement.total_length_m,
             )
+        return measurement
 
     def _read_remaining_path(
         self,
@@ -792,6 +806,8 @@ def _validate_config(config: SlamtecL515Config) -> None:
         if not _is_finite(value) or float(value) <= 0.0:
             raise ValueError(f"{name} 必须为正有限数")
     quality = config.minimum_localization_quality
+    if not _is_finite(config.max_unknown_path_m) or config.max_unknown_path_m < 0.0:
+        raise ValueError("max_unknown_path_m 必须为非负有限米数")
     if (
         isinstance(quality, bool)
         or not isinstance(quality, int)

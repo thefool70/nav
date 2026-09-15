@@ -159,7 +159,7 @@ def recover_from_motion_failure(
     *,
     rejected_path_world_xy: Tuple[Tuple[float, float], ...] = (),
 ) -> Optional[NavigationResult]:
-    """Frontier 普通失败淘汰目标点；路径经过未知区时屏蔽整个连通区域。"""
+    """Frontier 普通失败淘汰目标点；未知路径长度超限时屏蔽整个连通区域。"""
     target_recovery = _reobserve_target_after_motion_issue(
         result,
         reason,
@@ -230,7 +230,7 @@ def recover_from_motion_failure(
             next_state,
             "motion.frontier_rejected",
             (
-                "路径经过未知区，已屏蔽整个 Frontier 区域，本次运行中不再重试该区域。"
+                "路径中的未知长度超限，已屏蔽整个 Frontier 区域，本次运行中不再重试该区域。"
                 if rejected_path_world_xy
                 else "本次探索动作执行失败，先检查当前位置，再重新选择区域。"
             ),

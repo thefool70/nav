@@ -65,7 +65,7 @@ ChassisInterface ──► NavigationFrame
 返回节点未完成时保留实际位置，跳过该返回节点并重新检查有效方向，不直接结束搜索。
 
 Hermes 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
-未知区则取消动作，在本次运行中持续屏蔽整个连通 Frontier 区域并转向其他候选，
+未知区的累计长度超过 1.5 m 才取消动作，在本次运行中持续屏蔽整个连通 Frontier 区域并转向其他候选，
 避免在同一片边界内换点反复取消。
 
 ## 运行环境
@@ -108,7 +108,7 @@ python -m pip install -e '.[visualization]'
 | --- | --- |
 | `src/robot_nav/core/` | 状态机、Frontier、扫描、定位、历史和数据契约 |
 | `src/robot_nav/core/observation_coverage.py` | 局部 Frontier 观察点、RGB-D 覆盖记录和跨位置复用 |
-| `src/robot_nav/core/path_validation.py` | 检查实际规划路径是否经过算法未知区 |
+| `src/robot_nav/core/path_validation.py` | 测量实际规划路径在算法未知区内的累计长度 |
 | `src/robot_nav/adapters/habitat/` | Habitat Adapter |
 | `src/robot_nav/adapters/slamtec_l515/` | Hermes + L515 Adapter |
 | `src/robot_nav/adapters/s100_l515/` | S100 + L515 Adapter |

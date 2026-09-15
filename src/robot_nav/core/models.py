@@ -233,7 +233,7 @@ class FrontierRegion:
 
 @dataclass(frozen=True)
 class BlockedFrontierRegion:
-    """因未知路径被屏蔽的整片边界，独立于当前候选及其编号保存。
+    """因未知路径长度超限被屏蔽的整片边界，独立于当前候选及其编号保存。
 
     boundary_world_xy 保留已关联的区域边界；本次运行中不自动解除屏蔽。
     """
@@ -332,7 +332,7 @@ class SearchState:
     scan_local_point_count 是复用已检查覆盖前的局部可见 Frontier 点数。
     frontier_regions 保存当前有效区域及旧方向的暂存顺序；active_frontier_id
     标识最近选择的区域，扫描转向不改变新旧方向的优先级。
-    blocked_frontier_regions 保留因未知路径被取消的完整区域，防止换代表点重试。
+    blocked_frontier_regions 保留因未知路径长度超限被取消的完整区域，防止换代表点重试。
     branch_node_ids 按根到叶保存当前分支的出发节点；逐个返回，已退完节点出栈。
     backtrack_node_id 是正在返回的栈顶父节点，到达后才检查该节点的暂存方向。
     pending_target_world_xy 与 rejected_target_world_xy 用于目标最终确认。"""

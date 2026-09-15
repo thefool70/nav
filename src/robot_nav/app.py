@@ -1,5 +1,6 @@
 """顶层单周期入口，串联底盘读取与导航算法。"""
 
+from dataclasses import replace
 from typing import Callable, Optional, Tuple
 
 from .adapters.chassis import (
@@ -226,7 +227,12 @@ def _execute_command(
         )
         if recovered is None:
             raise
-        return recovered
+        return replace(recovered, debug=replace(recovered.debug, details={
+            **recovered.debug.details,
+            "unknown_path_length_m": exc.unknown_length_m,
+            "unknown_path_limit_m": exc.limit_m,
+            "checked_path_length_m": exc.total_path_length_m,
+        }))
     except RecoverableMotionError as exc:
         recovered = recover_from_motion_failure(result, str(exc))
         if recovered is None:
