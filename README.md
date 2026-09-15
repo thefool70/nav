@@ -5,7 +5,7 @@
 
 当前支持两种任务：
 
-- `object`：寻找并接近一个具体物体。
+- `object`：寻找一个具体物体。
 - `scene`：寻找一个目的场景，例如洗手间或电梯厅。
 
 ## 从哪里开始读
@@ -54,15 +54,24 @@ ChassisInterface ──► NavigationFrame
 
 | 模式 | 发现目标 | VLM 的作用 | 完成条件 |
 | --- | --- | --- | --- |
-| 物体搜索 | Hermes 使用 YOLO-World + SAM2 持续检测；其他环境使用通用视觉观察器 | 多个 Frontier 的批量评分；接近候选后的最终确认 | VLM 确认候选就是目标 |
-| 场景搜索 | 每轮扫描后拼接全部 RGB | 判断是否已经位于目的场景；否则批量评分 Frontier | VLM 判断已经到达目的场景 |
+| 物体搜索 | Hermes 保留 YOLO-World + SAM2 持续检测；后台也检查固定画面 | 联合检测目标与评分 Frontier；本地检测保留接近后确认 | 后台检测：返回拍摄位姿；本地检测：接近后最终确认 |
+| 场景搜索 | 后台检查扫描和移动中采集的固定画面 | 同一次请求判断场景与评分 Frontier | 返回检测画面的拍摄位置和朝向 |
 
 两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，动作结束后
 再观察和选择下一目标。新出现的 Frontier 优先探索，未选方向暂存；新候选耗尽
 后，沿当前分支逐个返回父节点，直到到达仍有有效探索方向的节点，再继续寻找。
 首次环扫后，仅补查局部可见且尚未检查的 Frontier 方向；返回父节点不额外环扫。
-地图已知与视觉已检查分别记录，场景模式仍需用当前画面确认所在场景。
+地图已知与视觉已检查分别记录，场景模式仍采集当前画面检查所在场景。
 返回节点未完成时保留实际位置，跳过该返回节点并重新检查有效方向，不直接结束搜索。
+
+命令行默认使用异步 FIFO 视觉队列。每轮扫描收齐后，将全部画面拼成一张图，
+在同一次请求中提取目标线索并评分 Frontier。扫描转向不额外提交单图，探索和分支回退的
+平移动作途中保留提前采样。缺少语义分时按几何分继续走，评分只在下一次决策生效。
+后台检测到目标后，按模型给出的顺序选择拍摄位姿，返回位置并对齐朝向后即结束。
+返回失败才尝试下一条，不再进行到场视觉复查。
+处理目标线索期间暂停普通后台分析和采样，已有请求的迟到结果先暂存；现有线索
+均无法返回后才恢复普通队列。
+有效探索方向耗尽后先等待队列，模型失败不冒充“已经检查”。
 
 Hermes 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
 未知区的累计长度超过 1.5 m 才取消动作，在本次运行中持续屏蔽整个连通 Frontier 区域并转向其他候选，
@@ -100,7 +109,11 @@ python -m pip install -e '.[visualization]'
 - Rerun：显示 RGB、深度、地图、Frontier、机器人轨迹、算法目标、底盘目标和
   规划路径，同时持续写入 `data/run_logs/rerun-*.rrd`。`--rerun-save <PATH>`
   可指定新文件路径；`--no-rerun` 同时关闭界面和录制。
+  `VLM summary` 简要关联任务、请求与导航使用；`VLM full` 保留完整会话信息。
+  World 中青色拍摄位姿和粉色候选快照对应最近一次返回结果。
 - Hermes JSONL 日志：记录每周期决策、候选评分和 Action 反馈，供事后复盘。
+- 视觉快照：`data/run_logs/semantic-*/job-*` 保存图片、位姿、候选和分析结果；
+  普通任务按 FIFO 处理。目录在退出后保留，当前不自动恢复上次队列。
 
 ## 主要目录
 
@@ -108,12 +121,14 @@ python -m pip install -e '.[visualization]'
 | --- | --- |
 | `src/robot_nav/core/` | 状态机、Frontier、扫描、定位、历史和数据契约 |
 | `src/robot_nav/core/observation_coverage.py` | 局部 Frontier 观察点、RGB-D 覆盖记录和跨位置复用 |
+| `src/robot_nav/core/frontier_projection.py` | Frontier 地面点投影与对齐深度核对，供 VLM 图片标注 |
 | `src/robot_nav/core/path_validation.py` | 测量实际规划路径在算法未知区内的累计长度 |
 | `src/robot_nav/adapters/habitat/` | Habitat Adapter |
 | `src/robot_nav/adapters/slamtec_l515/` | Hermes + L515 Adapter |
 | `src/robot_nav/adapters/s100_l515/` | S100 + L515 Adapter |
 | `src/robot_nav/adapters/realsense/` | 共用 L515 采集与外参标定 |
 | `src/robot_nav/adapters/openai_compatible.py` | VLM 请求与结构化结果解析 |
+| `src/robot_nav/adapters/queued_semantics.py` | 快照落盘、FIFO 联合分析、提前采样与迟到结果接收 |
 | `src/robot_nav/adapters/yolo_world_sam2.py` | YOLO-World + SAM2 持续目标检测 |
 | `src/robot_nav/visualization/` | Rerun 调试界面 |
 | `sim/habitat/` | Habitat 环境与启动脚本 |

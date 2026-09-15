@@ -6,6 +6,8 @@ import base64
 import json
 import math
 import struct
+import threading
+import time
 import zlib
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -16,10 +18,12 @@ from urllib.request import Request, urlopen
 
 from ..core.models import (
     FrontierScoreRequest,
+    FrontierCandidate,
     NavigationFrame,
     SceneAssessment,
     SceneAssessmentResult,
     SearchMode,
+    SemanticAnalysis,
     TargetConfirmation,
     TargetConfirmationResult,
     TargetObservation,
@@ -27,6 +31,8 @@ from ..core.models import (
     TargetVisibility,
 )
 from ..core.vision import (
+    build_semantic_analysis_prompt,
+    parse_semantic_analysis_response,
     build_frontier_scores_prompt,
     build_scene_assessment_prompt,
     build_target_confirmation_prompt,
@@ -44,6 +50,7 @@ from .frontier_overlay import (
     buffer_scan_image,
     build_frontier_score_sheet,
     build_scan_contact_sheet,
+    build_semantic_analysis_sheet,
     pack_rgb_image,
 )
 from .perception import (
@@ -88,7 +95,57 @@ class OpenAICompatibleTargetObserver:
         self._config = config
         self._on_vlm_interaction = on_vlm_interaction
         self._interaction_index = 0
+        self._interaction_lock = threading.Lock()
         self._scan_images: Dict[int, BufferedScanImage] = {}
+
+    def analyze_views(
+        self,
+        images: Mapping[int, BufferedScanImage],
+        candidates: Tuple[FrontierCandidate, ...],
+        goal: TargetSearchGoal,
+        *, trace_context: Optional[Mapping[str, Any]] = None,
+    ) -> SemanticAnalysis:
+        """只读取本次快照，一次请求同时检查全部画面并评分可见 Frontier。"""
+        try:
+            image, markers = build_semantic_analysis_sheet(images, candidates)
+            labels = tuple(marker.label for marker in markers)
+            prompt = build_semantic_analysis_prompt(goal.target_text, labels, tuple(images), goal.search_mode)
+        except Exception as exc:
+            return SemanticAnalysis(None, detection_error=_failure_reason("联合分析输入无效", exc))
+        context = dict(trace_context or {})
+        regions = context.get("region_ids", {})
+        positions = {item.candidate_id: item.world_xy for item in candidates}
+        context["markers"] = tuple({
+            "label": marker.label, "candidate_id": marker.candidate_id,
+            "region_id": regions.get(marker.candidate_id, marker.candidate_id),
+            "world_xy": positions[marker.candidate_id],
+            "view_id": marker.view_id, "source_pixel_xy": marker.source_pixel_xy,
+        } for marker in markers)
+        interaction = self._begin_interaction("semantic_analysis", prompt, image, context=context)
+        assistant_text, response_json = "", ""
+        try:
+            payload, response_json = self._request_model(prompt, image)
+            assistant_text = self._response_text(payload)
+            parsed = parse_semantic_analysis_response(assistant_text, labels, tuple(images))
+        except Exception as exc:
+            self._finish_interaction(interaction, assistant_text, response_json, error=_exception_text(exc))
+            return SemanticAnalysis(
+                None, detection_error=_failure_reason("联合分析失败", exc),
+                interaction_id=interaction.interaction_id,
+            )
+        result = replace(parsed, interaction_id=interaction.interaction_id, frontier_scores={
+            marker.candidate_id: parsed.frontier_scores[marker.label]
+            for marker in markers if marker.label in parsed.frontier_scores
+        })
+        self._finish_interaction(
+            interaction, assistant_text, response_json,
+            parsed_result=json.dumps({
+                "target_view_ids": result.target_view_ids,
+                "frontier_scores": result.frontier_scores,
+            }, ensure_ascii=False),
+            error="; ".join(value for value in (result.detection_error, result.scoring_error) if value),
+        )
+        return result
 
     def observe(
         self,
@@ -127,6 +184,7 @@ class OpenAICompatibleTargetObserver:
             "target_visibility",
             prompt,
             image,
+            context=_frame_trace_context(frame, "current_view"),
         )
         assistant_text = ""
         response_json = ""
@@ -158,7 +216,9 @@ class OpenAICompatibleTargetObserver:
 
         if visibility is TargetVisibility.NOT_VISIBLE:
             return TargetObservation(visibility=TargetVisibility.NOT_VISIBLE)
-        return self._observe_visible_target(goal, image)
+        return self._observe_visible_target(
+            goal, image, context={**interaction.context, "parent_request_id": interaction.interaction_id},
+        )
 
     def score_frontiers(
         self,
@@ -237,7 +297,6 @@ class OpenAICompatibleTargetObserver:
                 SceneAssessment.UNCERTAIN,
                 _failure_reason("目的场景输入准备失败", exc),
             )
-
         interaction = self._begin_interaction(
             "scene_assessment",
             prompt,
@@ -311,6 +370,7 @@ class OpenAICompatibleTargetObserver:
             prompt,
             image,
             bbox_norm=observation.bbox_norm,
+            context=_frame_trace_context(frame, "target_confirmation"),
         )
         assistant_text = ""
         response_json = ""
@@ -358,6 +418,7 @@ class OpenAICompatibleTargetObserver:
         self,
         goal: TargetSearchGoal,
         image: VlmInputImage,
+        *, context: Optional[Mapping[str, Any]] = None,
     ) -> TargetObservation:
         """目标可见时取得目标框；没有可靠目标框时不允许导航接近。"""
         prompt = build_target_grounding_prompt(goal.target_text)
@@ -365,6 +426,7 @@ class OpenAICompatibleTargetObserver:
             "target_grounding",
             prompt,
             image,
+            context=context,
         )
         assistant_text = ""
         response_json = ""
@@ -438,11 +500,14 @@ class OpenAICompatibleTargetObserver:
         prompt: str,
         image: VlmInputImage,
         bbox_norm: Optional[Tuple[float, float, float, float]] = None,
+        *, context: Optional[Mapping[str, Any]] = None,
     ) -> VlmInteraction:
         """在请求发出前记录完整输入，使慢请求期间也能在 Rerun 查看。"""
-        self._interaction_index += 1
+        with self._interaction_lock:
+            self._interaction_index += 1
+            interaction_id = self._interaction_index
         interaction = VlmInteraction(
-            interaction_id=self._interaction_index,
+            interaction_id=interaction_id,
             phase="request",
             task=task,
             endpoint_url=self._config.endpoint_url.strip(),
@@ -453,6 +518,8 @@ class OpenAICompatibleTargetObserver:
             prompt=prompt,
             image=image,
             bbox_norm=bbox_norm,
+            context=dict(context or {}),
+            started_monotonic_s=time.monotonic(),
         )
         self._emit_interaction(interaction)
         return interaction
@@ -476,6 +543,7 @@ class OpenAICompatibleTargetObserver:
                 parsed_result=parsed_result,
                 bbox_norm=bbox_norm,
                 error=error,
+                elapsed_s=max(0.0, time.monotonic() - interaction.started_monotonic_s),
             )
         )
 
@@ -520,6 +588,16 @@ class OpenAICompatibleTargetObserver:
         except URLError as exc:
             raise RuntimeError(f"API 连接失败：{exc.reason}") from exc
         return response_payload
+
+
+def _frame_trace_context(frame: NavigationFrame, source: str) -> Mapping[str, Any]:
+    """仅用于记录来源，不发送给模型，也不参与目标判断。"""
+    return {"source": source, "views": ({
+        "view_id": 1, "timestamp_s": frame.timestamp_s,
+        "pose": {"x_m": frame.pose.x_m, "y_m": frame.pose.y_m, "yaw_rad": frame.pose.yaw_rad},
+        "heading_world_rad": frame.pose.yaw_rad + frame.camera_extrinsics_in_robot.yaw_rad,
+        "map_frame_id": frame.obstacle_map.frame_id,
+    },)}
 
 
 def _chat_completions_payload(

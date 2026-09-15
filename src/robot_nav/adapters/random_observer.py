@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import random
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional, Tuple
 
 from .perception import ScanObservationContext
+from .frontier_overlay import BufferedScanImage
 from ..core.models import (
     FrontierScoreRequest,
+    FrontierCandidate,
     NavigationFrame,
     SceneAssessment,
     SceneAssessmentResult,
+    SemanticAnalysis,
     TargetConfirmation,
     TargetConfirmationResult,
     TargetObservation,
@@ -45,6 +48,16 @@ class RandomScoreTargetObserver:
                 "无法找到或到达语义目标。"
             ),
         )
+
+    def analyze_views(
+        self, images: Mapping[int, BufferedScanImage],
+        candidates: Tuple[FrontierCandidate, ...], goal: TargetSearchGoal,
+        *, trace_context: Optional[Mapping[str, Any]] = None,
+    ) -> SemanticAnalysis:
+        """走同一队列，但不调用模型；图像中永远不报告目标。"""
+        return SemanticAnalysis((), frontier_scores={
+            candidate.candidate_id: self._random.random() for candidate in candidates
+        })
 
     def score_frontiers(
         self,

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import math
 import os
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .adapters.chassis import ChassisInterface
+from .adapters.chassis import ChassisInterface, MotionStalledError, RecoverableMotionError
 from .adapters.habitat import HabitatChassisAdapter, HabitatConfig
 from .adapters.openai_compatible import (
     OpenAIApiFormat,
@@ -18,10 +19,12 @@ from .adapters.openai_compatible import (
 )
 from .adapters.perception import (
     ContinuousTargetObserver,
+    SemanticAnalyzer,
     LocalPerceptionEvent,
     TargetObserver,
 )
 from .adapters.random_observer import RandomScoreTargetObserver
+from .adapters.queued_semantics import QueuedSemanticObserver
 from .adapters.realsense import L515Config
 from .adapters.sam2_observer import (
     DEFAULT_SAM2_CHECKPOINT_PATH,
@@ -539,8 +542,9 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
         on_vlm_interaction,
         _,
         on_motion_plan,
+        on_semantic_event,
     ) = _build_visualization(args)
-    observer = _build_observer(
+    analyzer = _build_observer(
         args.debug_random_score,
         api_key,
         on_vlm_interaction,
@@ -550,9 +554,11 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
         seed=args.seed,
         gpu_device_id=args.gpu_device_id,
     )
-    with HabitatChassisAdapter(
+    with QueuedSemanticObserver(analyzer, on_event=on_semantic_event) as observer, HabitatChassisAdapter(
         config,
-        on_motion_frame=on_motion_frame,
+        on_motion_frame=_continuous_perception_frame_callback(
+            on_motion_frame, observer, TargetSearchGoal(args.target, SearchMode(args.search_mode)),
+        ),
         on_motion_plan=on_motion_plan,
     ) as chassis:
         return _run_navigation(
@@ -574,6 +580,7 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
         on_vlm_interaction,
         _,
         _,
+        on_semantic_event,
     ) = _build_visualization(args)
     config = S100L515Config(
         serial=S100SerialConfig(port=args.serial_port),
@@ -585,10 +592,17 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
             else None
         ),
     )
-    with S100L515Adapter(
-        config,
-        on_motion_frame=on_motion_frame,
-    ) as chassis:
+    with ExitStack() as stack:
+        observer = None
+        motion_callback = on_motion_frame
+        if not args.preflight_only:
+            observer = stack.enter_context(QueuedSemanticObserver(_build_observer(
+                args.debug_random_score, api_key, on_vlm_interaction,
+            ), on_event=on_semantic_event))
+            motion_callback = _continuous_perception_frame_callback(
+                on_motion_frame, observer, TargetSearchGoal(args.target, SearchMode(args.search_mode)),
+            )
+        chassis = stack.enter_context(S100L515Adapter(config, on_motion_frame=motion_callback))
         if args.preflight_only:
             frame = chassis.read_frame()
             print(
@@ -599,11 +613,6 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
             )
             return 0
 
-        observer = _build_observer(
-            args.debug_random_score,
-            api_key,
-            on_vlm_interaction,
-        )
         return _run_navigation(
             chassis,
             args.target,
@@ -628,6 +637,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             on_vlm_interaction,
             on_local_perception,
             on_motion_plan,
+            on_semantic_event,
         ) = _build_visualization(args)
         if not args.preflight_only:
             on_local_perception = _local_perception_callback(
@@ -639,6 +649,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
                 api_key,
                 on_vlm_interaction,
                 on_local_perception,
+                on_semantic_event=_semantic_queue_callback(on_semantic_event, run_logger),
             )
         continuous_observer = (
             observer
@@ -742,9 +753,10 @@ def _move_slamtec_forward_on_start(chassis: SlamtecL515Adapter) -> None:
         "Hermes 启动动作：先沿当前朝向前移 "
         f"{SLAMTEC_STARTUP_FORWARD_M:.1f} m，再开始语义搜索。"
     )
-    chassis.send_relative_pose(
-        RelativePoseCommand(forward_m=SLAMTEC_STARTUP_FORWARD_M)
-    )
+    try:
+        chassis.send_relative_pose(RelativePoseCommand(forward_m=SLAMTEC_STARTUP_FORWARD_M))
+    except (MotionStalledError, RecoverableMotionError) as exc:
+        print(f"启动前移未完成，动作已结束，从实际位置开始搜索：{exc}", flush=True)
 
 
 def _build_slamtec_run_logger(
@@ -1025,7 +1037,11 @@ def _run_navigation(
     """重复执行环境无关的单周期入口，直到完成、失败或达到上限。"""
     goal = TargetSearchGoal(target_text, search_mode)
     state = None
-    for cycle_index in range(1, max_cycles + 1):
+    cycle_index = 0
+    decision_cycles = 0
+    on_cycle = _optional_callback(on_cycle, "导航可视化")
+    while decision_cycles < max_cycles:
+        cycle_index += 1
         cycle_callback = _with_frontier_debug(on_cycle, debug_frontier)
         if run_logger is not None:
             cycle_callback = _with_run_log(
@@ -1045,6 +1061,12 @@ def _run_navigation(
             run_logger.log_cycle_result(cycle_index, result)
         _print_cycle(cycle_index, result)
 
+        if result.status is NavigationStatus.OK and state.phase is SearchPhase.WAITING_FOR_SEMANTICS:
+            if isinstance(observer, QueuedSemanticObserver):
+                observer.wait_for_result()
+            continue
+        decision_cycles += 1
+
         if state.phase is SearchPhase.COMPLETE:
             return 0
         if result.status in {
@@ -1062,7 +1084,7 @@ def _run_navigation(
         ):
             return 1
 
-    print(f"达到最大导航周期数 {max_cycles}，搜索尚未结束。")
+    print(f"达到最大导航决策周期数 {max_cycles}（不含队列等待），搜索尚未结束。")
     return 1
 
 
@@ -1165,7 +1187,7 @@ def _build_observer(
     debug_random_score: bool,
     api_key: str,
     on_vlm_interaction=None,
-) -> TargetObserver:
+) -> SemanticAnalyzer:
     if debug_random_score:
         print(
             "调试随机感知模式：不调用视觉模型，只用于调试扫描、Frontier、"
@@ -1192,21 +1214,22 @@ def _build_slamtec_observer(
     api_key: str,
     on_vlm_interaction=None,
     on_local_perception=None,
-) -> TargetObserver:
-    """按搜索模式选择整轮场景 VLM，或 YOLO+SAM2 物体观察器。"""
+    on_semantic_event=None,
+) -> QueuedSemanticObserver:
+    """组装联合分析队列，物体模式额外保留 YOLO+SAM2 持续检测。"""
     semantic_advisor = _build_observer(
         args.debug_random_score,
         api_key,
         on_vlm_interaction,
     )
     if args.debug_random_score:
-        return semantic_advisor
+        return QueuedSemanticObserver(semantic_advisor, on_event=on_semantic_event)
     if args.search_mode == SearchMode.SCENE.value:
         print(
-            "目的场景搜索已启用：整轮扫描后由 VLM 判断当前位置，"
+            "目的场景搜索已启用：后台联合判断场景和评分 Frontier，"
             "不加载 YOLO-World 或 SAM2。"
         )
-        return semantic_advisor
+        return QueuedSemanticObserver(semantic_advisor, on_event=on_semantic_event)
     if not isinstance(semantic_advisor, OpenAICompatibleTargetObserver):
         raise RuntimeError("当前 VLM 观察器不支持 Frontier 评分与最终确认")
 
@@ -1216,7 +1239,7 @@ def _build_slamtec_observer(
         f"class={args.yolo_class or args.target}，"
         f"SAM2={args.sam2_checkpoint} ({args.sam2_device})。"
     )
-    return YoloWorldSam2TargetObserver(
+    local_observer = YoloWorldSam2TargetObserver(
         semantic_advisor,
         YoloWorldSam2Config(
             class_text=args.yolo_class or args.target,
@@ -1232,6 +1255,7 @@ def _build_slamtec_observer(
         ),
         on_local_perception=on_local_perception,
     )
+    return QueuedSemanticObserver(semantic_advisor, local_observer=local_observer, on_event=on_semantic_event)
 
 
 def _continuous_perception_frame_callback(
@@ -1239,19 +1263,53 @@ def _continuous_perception_frame_callback(
     observer: ContinuousTargetObserver,
     goal: TargetSearchGoal,
 ):
-    """导航全程把最新帧送往本地推理队列，并旁路记录到 Rerun。"""
+    """把最新帧送往本地检测和语义预采样，并旁路记录到 Rerun。"""
+
+    visualization = _optional_callback(on_motion_frame, "运动帧可视化")
 
     def callback(frame) -> None:
         observer.submit_motion_frame(frame, goal)
-        if on_motion_frame is not None:
-            on_motion_frame(frame)
+        if visualization is not None:
+            visualization(frame)
+
+    return callback
+
+
+def _optional_callback(callback, description):
+    """可视化失败后停用该回调，保持感知与导航运行。"""
+    if callback is None:
+        return None
+    enabled = True
+
+    def invoke(*args):
+        nonlocal enabled
+        if not enabled:
+            return
+        try:
+            callback(*args)
+        except Exception as exc:
+            enabled = False
+            print(f"{description}已停用：{exc}", flush=True)
+
+    return invoke
+
+
+def _semantic_queue_callback(on_event, run_logger: Optional[NavigationRunLogger]):
+    """队列事件分别送往 Rerun 和 JSONL，显示故障不影响日志。"""
+    visualization = _optional_callback(on_event, "VLM 队列可视化")
+
+    def callback(event):
+        if run_logger is not None:
+            run_logger.log_semantic_queue_event(event)
+        if visualization is not None:
+            visualization(event)
 
     return callback
 
 
 def _build_visualization(args: argparse.Namespace):
     if args.no_rerun or getattr(args, "preflight_only", False):
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     from .visualization import RerunVisualizer
 
@@ -1262,6 +1320,7 @@ def _build_visualization(args: argparse.Namespace):
         visualizer.log_vlm_interaction,
         visualizer.log_local_perception,
         visualizer.log_motion_plan,
+        visualizer.log_semantic_queue_event,
     )
 
 

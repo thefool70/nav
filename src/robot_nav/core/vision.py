@@ -12,10 +12,102 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from .models import (
     SceneAssessment,
+    SemanticAnalysis,
     SearchMode,
     TargetConfirmation,
     TargetVisibility,
 )
+
+
+def build_semantic_analysis_prompt(
+    target_text: str,
+    marker_labels: Sequence[str],
+    view_ids: Sequence[int],
+    search_mode: SearchMode,
+) -> str:
+    """一次检查所有画面并评分可见候选；画面编号和候选编号使用不同前缀。"""
+    target = _target_json(target_text)
+    detection = (
+        "List views whose capture positions are already within the destination scene. "
+        "Use the surrounding layout and fixtures as evidence. Seeing the scene through "
+        "an entrance, a sign, or a related object alone does not mean arrival. "
+        "A destination sign outside an entrance can support a high exploration score "
+        "without placing that view in the target list."
+        if search_mode is SearchMode.SCENE else
+        "List views where the described object is visible. "
+        "Inspect all views, including edges and partially occluded objects. "
+        "Require direct visual evidence of the object; "
+        "room type alone does not prove presence."
+    )
+    template = {
+        "target": {"view_ids": []},
+        "scores": {label: 0.5 for label in marker_labels},
+    }
+    return (
+        f"Target: {target}.\n"
+        f"Inputs: captured RGB views {list(view_ids)}, identified by V headers. "
+        "Treat each view at its capture position, not at the robot's current position; "
+        "do not infer a trajectory from tile order. Each F footer label is connected "
+        "by a thin line to a small pink ground-plane Frontier anchor in its own view. "
+        "Use that anchor's surroundings and the space beyond it; labels and lines "
+        "are overlays, not scene evidence.\n"
+        f"Task 1 - target detection: {detection} Check every view, including those without F labels. "
+        "Return all matching integer view IDs in target.view_ids, ordered from strongest "
+        "to weakest evidence, without duplicates. Do not keep only the best view. "
+        "Return [] when no view meets the target condition. The robot will return to "
+        "a listed capture position and heading and finish navigation on arrival, "
+        "without another visual check.\n"
+        "Task 2 - exploration scoring: " + _frontier_scoring_rules() + "\n"
+        "Output: return every listed F exactly once; with no F labels return empty scores. "
+        "Return JSON only, without explanations or Markdown: "
+        + json.dumps(template, ensure_ascii=False)
+    )
+
+
+def _frontier_scoring_rules() -> str:
+    """缺少语义线索给中性分；模型不重复计算核心负责的距离和可达性。"""
+    return (
+        "Independently score each marked direction from 0 to 1 for its semantic "
+        "promise of leading to the target. Use 0.5 when evidence is insufficient, "
+        "above 0.5 for supporting cues and below 0.5 for contrary cues. "
+        "Not seeing the target now is not contrary evidence for future exploration. "
+        "Do not force score differences or normalize scores to sum to 1. "
+        "Do not score distance, travel cost or reachability; navigation handles those."
+    )
+
+
+def parse_semantic_analysis_response(
+    text: str, marker_labels: Sequence[str], view_ids: Sequence[int],
+) -> SemanticAnalysis:
+    """分别校验检测和分数；某一部分损坏不丢弃另一部分的有效信息。"""
+    payload = _extract_json_mapping(text, "联合视觉分析")
+    target = payload.get("target")
+    target_view_ids = None
+    detection_error = ""
+    raw_views = target.get("view_ids") if isinstance(target, Mapping) else None
+    if not isinstance(raw_views, list):
+        detection_error = "联合分析缺少列表 target.view_ids"
+    elif any(isinstance(item, bool) or not isinstance(item, int) or item not in view_ids
+             for item in raw_views):
+        detection_error = "目标线索包含无效的拍摄画面编号"
+    elif len(set(raw_views)) != len(raw_views):
+        detection_error = "目标线索列表含有重复画面编号"
+    else:
+        target_view_ids = tuple(raw_views)
+    scores = {}
+    invalid_labels = []
+    raw_scores = payload.get("scores")
+    for label in marker_labels:
+        raw = raw_scores.get(label) if isinstance(raw_scores, Mapping) else None
+        value = None if isinstance(raw, bool) else _finite_float(raw)
+        if value is None or not 0.0 <= value <= 1.0:
+            invalid_labels.append(label)
+        else:
+            scores[label] = value
+    return SemanticAnalysis(
+        target_view_ids, scores, detection_error,
+        f"候选分数缺失或无效：{', '.join(invalid_labels)}" if invalid_labels else "",
+    )
 
 
 def build_target_visibility_prompt(target_text: str) -> str:
@@ -46,7 +138,7 @@ def build_frontier_scores_prompt(
         or len(set(labels)) != len(labels)
     ):
         raise ValueError("Frontier 标记必须是不重复的非空字符串")
-    score_template = {label: 0.0 for label in labels}
+    score_template = {label: 0.5 for label in labels}
     if search_mode is SearchMode.SCENE:
         scoring_rule = (
             f"The destination scene description is {target}. For every marker, "
@@ -61,7 +153,7 @@ def build_frontier_scores_prompt(
     prompt_body = (
         "The image is a multi-view RGB contact sheet from one robot scan. Each "
         "colored numeric marker denotes a Frontier exploration direction. "
-        f"{scoring_rule}, where 0 is the lowest likelihood and 1 is the highest. "
+        f"{scoring_rule}. " + _frontier_scoring_rules() + " "
         "Return every marker exactly once. Return JSON only, with no reasons, "
         "explanation, or Markdown: "
         + json.dumps({"scores": score_template}, ensure_ascii=False)
@@ -243,11 +335,13 @@ def _finite_float(value: Any) -> Optional[float]:
 __all__ = [
     "build_frontier_scores_prompt",
     "build_scene_assessment_prompt",
+    "build_semantic_analysis_prompt",
     "build_target_confirmation_prompt",
     "build_target_grounding_prompt",
     "build_target_visibility_prompt",
     "parse_frontier_scores_response",
     "parse_scene_assessment_response",
+    "parse_semantic_analysis_response",
     "parse_target_confirmation_response",
     "parse_target_grounding_response",
     "parse_target_visibility_response",

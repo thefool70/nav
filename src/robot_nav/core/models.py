@@ -110,11 +110,12 @@ class TargetSearchGoal:
 
 
 class TargetVisibility(Enum):
-    """感知输出可见或不可见；UNCERTAIN 仅表示内部感知失败。"""
+    """可见性结果；UNCERTAIN 表示感知失败，PENDING 表示采集后等待分析。"""
 
     VISIBLE = "visible"
     NOT_VISIBLE = "not_visible"
     UNCERTAIN = "uncertain"
+    PENDING = "pending"
 
 
 @dataclass(frozen=True)
@@ -151,7 +152,7 @@ class TargetConfirmationResult:
 
 
 class SceneAssessment(Enum):
-    """VLM 对整轮扫描是否已经位于目的场景的判断。"""
+    """VLM 根据当前画面判断是否已经位于目的场景。"""
 
     MATCHED = "matched"
     NOT_MATCHED = "not_matched"
@@ -164,6 +165,27 @@ class SceneAssessmentResult:
 
     assessment: SceneAssessment
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class SemanticAnalysis:
+    """检测到目标的有序画面与评分；view_ids 空元组表示未检测到，None 表示检测失败。"""
+
+    target_view_ids: Optional[Tuple[int, ...]]
+    frontier_scores: Mapping[str, float] = field(default_factory=dict)
+    detection_error: str = ""
+    scoring_error: str = ""
+    interaction_id: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class TargetClue:
+    """检测画面对应的返回位姿；pose 是拍摄时的机器人位姿，不是物体位置。"""
+
+    clue_id: str
+    pose: Pose2D
+    timestamp_s: float
+    map_frame_id: str
 
 
 @dataclass(frozen=True)
@@ -284,6 +306,8 @@ class SearchPhase(Enum):
     VERIFYING_TARGET = "verifying_target"
     EXPLORING = "exploring"
     BACKTRACKING = "backtracking"
+    WAITING_FOR_SEMANTICS = "waiting_for_semantics"
+    REVISITING_TARGET = "revisiting_target"
     COMPLETE = "complete"
     FAILED = "failed"
 
@@ -327,7 +351,9 @@ class SearchState:
     """语义目标搜索的周期状态。scan_headings_world_rad 为世界系扫描朝向
     序列，next_scan_index 为下一个待扫描朝向的下标，observation_history
     按时间顺序保存观测节点，scan_evidence 保存最近一次扫描的逐方向观测
-    证据；observed_views 只记录已完成语义检查的视角，场景采集须等 VLM 判断成功。
+    证据；observed_views 只记录已完成语义检查的视角。
+    pending_observation_views 单独保存待分析覆盖，仅用于避免重复采集。
+    pending_semantic_jobs 含在途、待接收结果、采样和排队线索，不是 HTTP 请求数。
     scan_observation_points 保存本轮局部待检查 Frontier 边界点，随扫描计划冻结；
     scan_local_point_count 是复用已检查覆盖前的局部可见 Frontier 点数。
     frontier_regions 保存当前有效区域及旧方向的暂存顺序；active_frontier_id
@@ -355,6 +381,11 @@ class SearchState:
     blocked_frontier_regions: Tuple[BlockedFrontierRegion, ...] = ()
     backtrack_node_id: Optional[str] = None
     branch_node_ids: Tuple[str, ...] = ()
+    asynchronous_perception: bool = False
+    pending_semantic_jobs: int = 0
+    failed_semantic_jobs: int = 0
+    active_target_clue: Optional[TargetClue] = None
+    pending_observation_views: Tuple[ObservationView, ...] = ()
 
 
 class NavigationStatus(Enum):

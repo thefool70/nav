@@ -3,17 +3,24 @@
 它不属于底盘 Adapter；具体模型、图像标注和请求方式由感知侧负责。
 """
 
-from dataclasses import dataclass
-from typing import Mapping, Optional, Protocol, Tuple, runtime_checkable
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, TYPE_CHECKING, Mapping, Optional, Protocol, Tuple, runtime_checkable
 
 from ..core.models import (
     FrontierScoreRequest,
+    FrontierCandidate,
     NavigationFrame,
     SceneAssessmentResult,
+    SemanticAnalysis,
     TargetConfirmationResult,
     TargetObservation,
     TargetSearchGoal,
 )
+
+if TYPE_CHECKING:
+    from .frontier_overlay import BufferedScanImage
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,9 @@ class VlmInteraction:
     parsed_result: str = ""
     bbox_norm: Optional[Tuple[float, float, float, float]] = None
     error: str = ""
+    context: Mapping[str, Any] = field(default_factory=dict)
+    started_monotonic_s: float = 0.0
+    elapsed_s: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +112,20 @@ class TargetObserver(Protocol):
         ...
 
 
+class SemanticAnalyzer(TargetObserver, Protocol):
+    """冻结画面返回有序目标检测和评分，不读取可变扫描缓存。"""
+
+    def analyze_views(
+        self,
+        images: Mapping[int, BufferedScanImage],
+        candidates: Tuple[FrontierCandidate, ...],
+        goal: TargetSearchGoal,
+        *,
+        trace_context: Optional[Mapping[str, Any]] = None,
+    ) -> SemanticAnalysis:
+        ...
+
+
 @runtime_checkable
 class ContinuousTargetObserver(TargetObserver, Protocol):
     """运动期间可接收最新帧并请求中断当前动作的本地观察器。"""
@@ -131,6 +155,7 @@ __all__ = [
     "ContinuousTargetObserver",
     "LocalPerceptionEvent",
     "ScanObservationContext",
+    "SemanticAnalyzer",
     "TargetObserver",
     "VlmInputImage",
     "VlmInteraction",

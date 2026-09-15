@@ -22,6 +22,9 @@
 - `NavigationFrame.pose` 在进入 core 前必须已转换到
   `NavigationFrame.obstacle_map.frame_id` 坐标系，core 内部不做坐标转换；
   该转换由适配层负责。
+- Frontier 图像锚点采用机器人脚下局部地面 `z=0`；相机 `height_m` 须对应其
+  离地高度，并提供实际平移、yaw、pitch、roll。对齐深度单位为米，表示光轴
+  方向距离。缺少有效高度或深度时不生成地面锚点，不用零外参猜测图像位置。
 
 ## 执行契约
 
@@ -35,7 +38,7 @@
 设备离线、健康异常、数据读取失败等系统错误必须使用普通异常，仍然终止运行。
 
 提供实际规划路径的 Adapter 可实现 `KnownSpaceChassisInterface` 扩展。
-`app.py` 对 Frontier 探索、返回父节点与恢复暂存方向调用其
+`app.py` 对 Frontier 探索、返回父节点、恢复暂存方向与返回目标线索位置调用其
 `send_relative_pose_in_known_space(command, obstacle_map, *, reference_pose)`，
 显式传入命令、决策地图与 `frame.pose`。Adapter 必须用该参考位姿还原世界目标，
 不能用发送时重新读取的位姿解释同一条相对命令；
@@ -57,6 +60,7 @@
 检查不得依赖可视化回调，也不得用运动中扩展的可见地图替换本次决策快照。
 测量按线段与栅格的交点计算实际长度，不按未知格数量乘分辨率估算；只接触格角
 不增加长度，沿格边行走时任一侧未知即计入一次。碰撞与车体净空仍由底盘负责。
+目标线索返回失败时尝试下一条，线索耗尽后恢复搜索，不屏蔽 Frontier 区域。
 
 如果移动只是因连续静止达到门槛而主动终止、但当前位姿和传感器仍可继续使用，
 Adapter 抛出 `MotionStalledError`。Frontier 探索不会把它当作规划失败，而是以
@@ -79,6 +83,18 @@ Hermes 的平移、转向执行失败、停滞和目标检测中断，均须取�
 外参放进 `NavigationFrame`；目标检测、场景判断和 Frontier 评分不应写进
 `ChassisInterface`。持续检测器可以在底盘运动期间读取 Adapter 提供的新帧，但
 最终结果仍通过 `TargetObservation` 进入核心状态机。
+
+命令行的 `QueuedSemanticObserver` 将选取的扫描和运动画面冻结落盘，由单个
+后台线程按 FIFO 联合检查目标与评分。采样线程使用 Adapter 已提供的帧，不自行
+读取设备；网络线程不操作底盘或修改搜索状态。`app.py` 在下一周期接收结果，
+再决定移动，底盘的同步执行契约不变。
+
+`TargetVisibility.PENDING` 表示已采集、等待分析；它不表示目标不存在。待处理
+覆盖与已检查覆盖分别存入 `SearchState`。后台检测到目标后，以对应画面的拍摄
+位置和朝向构造 `TargetClue`；核心按列表顺序返回，到位即结束，不再请求新图确认。
+返回期间不新增运动采样，也不允许本地检测中断返回动作；位置误差不超过 0.25 m、
+朝向误差不超过 5° 才算完成。返回失败时尝试下一条。有效探索方向耗尽且仍有工作时进入
+`WAITING_FOR_SEMANTICS`，不发送运动命令。
 
 ## 真机接入必须确认
 

@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional, Tuple
 
 from ..chassis import RecoverableMotionError
 from ...core.models import (
+    CameraExtrinsics,
     CameraIntrinsics,
     NavigationFrame,
     ObstacleMap,
@@ -216,6 +217,7 @@ class HabitatChassisAdapter:
             depth=_convert_depth(observations["depth_sensor"]),
             rgb=_convert_rgb(observations["color_sensor"]),
             camera_intrinsics=self._camera_intrinsics(),
+            camera_extrinsics_in_robot=CameraExtrinsics(height_m=self.config.sensor_height_m),
         )
 
     def _camera_intrinsics(self) -> CameraIntrinsics:

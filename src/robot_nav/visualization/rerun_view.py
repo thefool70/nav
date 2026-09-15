@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 import os
 import threading
 from datetime import datetime
@@ -26,6 +27,7 @@ from ..core.models import (
     SearchDirectionState,
     TargetObservation,
 )
+from .vlm_trace import VlmTraceHistory, context_text, job_path, request_path
 
 
 UNKNOWN_RGB = (90, 90, 90)
@@ -41,6 +43,8 @@ SAM2_MASK_RGB = (255, 60, 180)
 SAM2_MASK_ALPHA = 0.38
 MAP_FRONTIER_RGB = (0, 220, 100)
 SELECTED_FRONTIER_RGB = (255, 210, 0)
+VLM_CAPTURE_RGB = (0, 220, 220)
+VLM_SNAPSHOT_RGB = (255, 100, 190)
 OBSERVATION_NODE_RGB = (245, 245, 245)
 SCAN_HEADING_RGB = (100, 170, 255)
 CURRENT_SCAN_HEADING_RGB = (255, 100, 180)
@@ -122,7 +126,7 @@ class RerunVisualizer:
         self._selected_frontier_id: Optional[str] = None
         self._last_result: Optional[NavigationResult] = None
         self._last_frame: Optional[NavigationFrame] = None
-        self._vlm_samples: Dict[int, int] = {}
+        self._vlm_trace = VlmTraceHistory()
         self._panel_font = _load_panel_font()
         if self._panel_font is None:
             _print_font_notice_once()
@@ -210,6 +214,13 @@ class RerunVisualizer:
         self._begin_sample()
         self._last_frame = frame
         self._last_result = result
+        self._vlm_trace.record_cycle(result, self._sample_index)
+        updated_jobs = {
+            item["job_id"] for name in ("semantic_received_jobs", "semantic_score_sources")
+            for item in result.debug.details.get(name, ())
+        }
+        for job_id in sorted(updated_jobs):
+            self._log_vlm_job(job_id)
         self._update_frontier_markers(result)
         self._log_rgb(frame, observation)
         self._log_sam2_result(frame, observation)
@@ -222,6 +233,8 @@ class RerunVisualizer:
         self._log_history(result)
         self._log_motion_status(frame, result)
         self._log_status(frame, observation, result)
+        self._log_vlm_overview()
+        self._log_vlm_world()
 
     def log_motion_frame(self, frame: NavigationFrame) -> None:
         """记录 Adapter 执行动作后的传感器帧，不推进算法状态。"""
@@ -237,6 +250,7 @@ class RerunVisualizer:
         self._log_robot_pose(frame)
         if self._last_result is not None:
             self._log_motion_status(frame, self._last_result)
+        self._log_vlm_world()
 
     def log_motion_plan(
         self,
@@ -397,7 +411,7 @@ class RerunVisualizer:
         self,
         interaction: VlmInteraction,
     ) -> None:
-        """把一次 VLM 请求和回应收纳到同一张交互卡片。"""
+        """完整卡片按真实到达时刻记录，简表和归档通过请求编号关联。"""
         with self._log_lock:
             self._log_vlm_interaction(interaction)
 
@@ -405,38 +419,108 @@ class RerunVisualizer:
         self,
         interaction: VlmInteraction,
     ) -> None:
-        sample_index = self._vlm_samples.get(interaction.interaction_id)
-        if sample_index is None:
-            if self._sample_index == 0:
-                self._begin_sample()
-            sample_index = self._sample_index
-            self._vlm_samples[interaction.interaction_id] = sample_index
-        self._set_frame_time(sample_index)
-        self._log_vlm_card(interaction)
+        self._begin_sample()
+        self._vlm_trace.record_interaction(interaction, self._sample_index)
+        self._log_vlm_card(interaction, "model/interaction", request_path(interaction.interaction_id))
+        self._log(request_path(interaction.interaction_id) + "/text", self._rr.TextDocument(
+            _vlm_card_text(interaction), media_type="text/plain",
+        ))
+        self._log_vlm_overview()
+        if interaction.phase == "response":
+            self._log_vlm_world()
+            if self._last_frame is not None and self._last_result is not None:
+                self._log_motion_status(self._last_frame, self._last_result)
 
-    def _log_vlm_card(self, interaction: VlmInteraction) -> None:
+    def _log_vlm_card(self, interaction: VlmInteraction, *paths: str) -> None:
         """用本机 CJK 字体渲染单一卡片，避免 Rerun 中文字体问题。"""
         if self._panel_font is None:
-            self._log(
-                "model/interaction",
-                self._rr.TextDocument(
-                    _ascii_only(_vlm_card_text(interaction)),
-                    media_type="text/plain",
-                ),
+            entity = self._rr.TextDocument(
+                _ascii_only(_vlm_card_text(interaction)), media_type="text/plain",
             )
+        else:
+            entity = self._rr.Image(_render_vlm_interaction_card(self._panel_font, interaction))
+        for path in paths:
+            self._log(path, entity)
+
+    def log_semantic_queue_event(self, event: Mapping[str, Any]) -> None:
+        """接收 FIFO 生命周期事件；任务编号与模型请求编号分别显示。"""
+        with self._log_lock:
+            self._begin_sample()
+            self._vlm_trace.record_queue_event(event, self._sample_index)
+            job_id = event.get("job_id")
+            job_ids = (job_id,) if job_id is not None else event.get("job_ids", ())
+            for key in job_ids:
+                self._log_vlm_job(key)
+            self._log_vlm_overview()
+
+    def _log_vlm_job(self, job_id: int) -> None:
+        self._log(job_path(job_id), self._rr.TextDocument(
+            json.dumps(self._vlm_trace.jobs[job_id], ensure_ascii=False, indent=2), media_type="text/plain",
+        ))
+
+    def _log_vlm_overview(self) -> None:
+        self._log("model/vlm/summary", self._rr.TextDocument(
+            self._vlm_trace.overview(), media_type="text/markdown",
+        ))
+
+    def _log_vlm_world(self) -> None:
+        """只显示最近返回请求的来源，保持旧输入快照与实时导航点的区别。"""
+        latest = self._vlm_trace.latest_response
+        frame = self._last_frame
+        if latest is None or frame is None:
             return
-        self._log(
-            "model/interaction",
-            self._rr.Image(
-                _render_vlm_interaction_card(
-                    self._panel_font,
-                    interaction,
-                )
-            ),
-        )
+        views = latest["context"].get("views", ())
+        if not views or any(view["map_frame_id"] != frame.obstacle_map.frame_id for view in views):
+            self._log("world/vlm", self._rr.Clear(recursive=True))
+            return
+        positions = [_world_to_view_point((view["pose"]["x_m"], view["pose"]["y_m"])) for view in views]
+        labels = [f"R{latest['request_id']}/V{view['view_id']}" for view in views]
+        self._log("world/vlm/captures", self._rr.Points2D(
+            positions, colors=[VLM_CAPTURE_RGB] * len(positions), radii=0.09, labels=labels, show_labels=False,
+        ))
+        self._log("world/vlm/headings", self._rr.Arrows2D(
+            origins=positions,
+            vectors=[_world_yaw_to_view_vector(view.get("heading_world_rad", view["pose"]["yaw_rad"]), 0.55) for view in views],
+            colors=[VLM_CAPTURE_RGB] * len(positions), radii=0.016, show_labels=False,
+        ))
+        markers = latest["context"].get("markers", ())
+        if markers:
+            marker_positions = [_world_to_view_point(item["world_xy"]) for item in markers]
+            self._log("world/vlm/frontiers", self._rr.Points2D(
+                marker_positions, colors=[VLM_SNAPSHOT_RGB] * len(markers), radii=0.025,
+                labels=[f"R{latest['request_id']}/{item['label']} {item['region_id']}" for item in markers], show_labels=False,
+            ))
+            outlines = [[(x - 0.12, y - 0.12), (x + 0.12, y - 0.12), (x + 0.12, y + 0.12),
+                         (x - 0.12, y + 0.12), (x - 0.12, y - 0.12)] for x, y in marker_positions]
+            self._log("world/vlm/frontier_outlines", self._rr.LineStrips2D(
+                outlines, colors=[VLM_SNAPSHOT_RGB] * len(markers), radii=0.014,
+            ))
+        else:
+            self._clear("world/vlm/frontiers")
+            self._clear("world/vlm/frontier_outlines")
+        target_views = latest["result"].get("target_view_ids") or ()
+        target_view = target_views[0] if target_views else None
+        reference = next((view for view in views if view["view_id"] == target_view), views[-1])
+        start = _world_to_view_point((frame.pose.x_m, frame.pose.y_m))
+        end = _world_to_view_point((reference["pose"]["x_m"], reference["pose"]["y_m"]))
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        distance = math.hypot(dx, dy)
+        if distance <= 0.10:
+            self._clear("world/vlm/capture_link")
+            return
+        strips = []
+        offset = 0.0
+        while offset < distance:
+            stop = min(distance, offset + 0.12)
+            strips.append([(start[0] + dx * offset / distance, start[1] + dy * offset / distance),
+                           (start[0] + dx * stop / distance, start[1] + dy * stop / distance)])
+            offset += 0.24
+        self._log("world/vlm/capture_link", self._rr.LineStrips2D(
+            strips, colors=[VLM_CAPTURE_RGB] * len(strips), radii=0.009,
+        ))
 
     def _begin_sample(self) -> None:
-        """让决策帧与运动帧共享同一条递增时间轴。"""
+        """决策、运动与模型事件共享递增时间轴，迟到结果不能写回旧帧。"""
         self._sample_index += 1
         self._set_frame_time(self._sample_index)
 
@@ -911,9 +995,16 @@ class RerunVisualizer:
         result: NavigationResult,
     ) -> None:
         """在侧栏更新实时位姿与最近决策，不在 World 图形上叠加文字。"""
+        text = _motion_status_text(frame, result)
+        latest = self._vlm_trace.latest_response
+        if latest is not None:
+            job_id = latest["context"].get("job_id")
+            text += f"\nVLM World: R{latest['request_id']}"
+            text += f" / J{job_id}" if job_id is not None else " / direct"
+            text += "\ncyan = capture; pink squares = snapshot Frontier"
         self._log(
             "navigation/motion",
-            self._rr.TextDocument(_motion_status_text(frame, result)),
+            self._rr.TextDocument(text),
         )
 
     def _log_status(
@@ -975,7 +1066,8 @@ def _send_default_blueprint(
             origin="/model/sam2/latest_success",
             name="SAM2 mask",
         ),
-        panel_view(origin="/model/interaction", name="VLM"),
+        rrb.TextDocumentView(origin="/model/vlm/summary", name="VLM summary"),
+        panel_view(origin="/model/interaction", name="VLM full"),
         rrb.Spatial2DView(origin="/camera/depth", name="Depth"),
         active_tab=0,
         name="Debug",
@@ -1117,6 +1209,7 @@ def _vlm_request_metadata(interaction: VlmInteraction) -> str:
             f"api_format: {interaction.api_format}",
             f"reasoning_effort: {reasoning}",
             f"max_output_tokens: {interaction.max_output_tokens}",
+            f"request_elapsed_s: {interaction.elapsed_s if interaction.elapsed_s is not None else 'in flight'}",
             (
                 "image: "
                 f"{interaction.image.width_px}x"
@@ -1131,6 +1224,7 @@ def _vlm_card_sections(
 ) -> Tuple[Tuple[str, str], ...]:
     """按请求顺序组织卡片文本，不丢弃模型原始回应。"""
     sections = [
+        ("来源与编号对应", context_text(interaction.context)),
         ("请求参数", _vlm_request_metadata(interaction)),
         ("完整输入提示词", interaction.prompt or "<empty>"),
     ]
@@ -1156,7 +1250,7 @@ def _vlm_card_status(interaction: VlmInteraction) -> str:
     if interaction.phase == "request":
         return "等待模型返回"
     if interaction.error:
-        return "请求或解析失败"
+        return "已返回（含请求或解析错误，查看有效结果）"
     return "已完成"
 
 
@@ -1164,7 +1258,7 @@ def _vlm_card_text(interaction: VlmInteraction) -> str:
     """构造单卡片的文本回退内容。"""
     parts = [
         (
-            f"VLM #{interaction.interaction_id} | "
+            f"VLM R{interaction.interaction_id} | "
             f"{interaction.task} | {_vlm_card_status(interaction)}"
         )
     ]
@@ -1232,7 +1326,7 @@ def _render_vlm_interaction_card(
     draw.text(
         (VLM_CARD_PADDING_PX, y),
         (
-            f"VLM #{interaction.interaction_id} | "
+            f"VLM R{interaction.interaction_id} | "
             f"{interaction.task} | {_vlm_card_status(interaction)}"
         ),
         font=font,
@@ -1399,6 +1493,14 @@ def _motion_status_text(
         ),
     ]
     headings = result.state.scan_headings_world_rad
+    if result.state.asynchronous_perception:
+        lines.append(
+            f"semantic pending={result.state.pending_semantic_jobs} "
+            f"failed={result.state.failed_semantic_jobs} "
+            f"queued views={len(result.state.pending_observation_views)}"
+        )
+    if result.state.active_target_clue is not None:
+        lines.append(f"target clue: {result.state.active_target_clue.clue_id}")
     if headings and "scan_mode" in result.debug.details:
         scan_index = min(result.state.next_scan_index, len(headings) - 1)
         lines.append(
@@ -1690,6 +1792,15 @@ def _status_lines(
         )
 
     details = result.debug.details
+    if result.state.asynchronous_perception:
+        lines.append(
+            "semantic queue: "
+            f"pending={result.state.pending_semantic_jobs}, "
+            f"finished={details.get('semantic_finished', 0)}, "
+            f"failed={result.state.failed_semantic_jobs}, "
+            f"active={details.get('semantic_active_job')}, "
+            f"pending views={len(result.state.pending_observation_views)}"
+        )
     if "scan_heading_count" in details:
         target_heading_deg = math.degrees(
             float(details.get("target_heading_world_rad", 0.0))

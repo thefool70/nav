@@ -50,6 +50,7 @@ from .models import (
     SearchMode,
     SearchState,
     TargetConfirmation,
+    TargetClue,
     TargetConfirmationResult,
     TargetObservation,
     TargetSearchGoal,
@@ -119,6 +120,8 @@ def navigate(
             "failed",
             "语义搜索已经结束，当前状态没有可继续的方向。",
         )
+    if working_state.active_target_clue is not None:
+        return _continue_target_clue(frame, working_state)
     if working_state.phase is SearchPhase.VERIFYING_SCENE:
         return _continue_scene_assessment(
             frame,
@@ -141,6 +144,14 @@ def navigate(
         return _approach_visible_target(frame, goal, working_state, observation)
     if working_state.phase is SearchPhase.LOCALIZING_TARGET:
         return _continue_target_approach(frame, goal, working_state, observation)
+    if working_state.phase is SearchPhase.WAITING_FOR_SEMANTICS:
+        try:
+            working_state, candidates = _refresh_frontier_regions(frame, working_state)
+        except ValueError as exc:
+            return _invalid_result(working_state, str(exc))
+        if candidates:
+            return _continue_scanning(frame, goal, _reset_scan_after_move(working_state), observation)
+        return _wait_for_semantics_or_finish(working_state)
     if working_state.phase is SearchPhase.BACKTRACKING:
         return _continue_backtracking(frame, working_state)
     if working_state.phase is SearchPhase.EXPLORING:
@@ -169,6 +180,10 @@ def recover_from_motion_failure(
     if target_recovery is not None:
         return target_recovery
 
+    if result.debug.details.get("next_stage", result.debug.stage) == "scan.turn":
+        return _recover_scan_turn(result, reason)
+    if result.debug.details.get("next_stage", result.debug.stage) in ("target.revisit", "target.revisit_turn"):
+        return _discard_target_clue(result.state, reason)
     if result.debug.details.get("next_stage", result.debug.stage) == "backtrack.return":
         return _recover_backtrack_issue(
             result.state, reason,
@@ -260,6 +275,10 @@ def continue_after_motion_stall(
     if target_recovery is not None:
         return target_recovery
 
+    if result.debug.details.get("next_stage", result.debug.stage) == "scan.turn":
+        return _recover_scan_turn(result, reason)
+    if result.debug.details.get("next_stage", result.debug.stage) in ("target.revisit", "target.revisit_turn"):
+        return _discard_target_clue(result.state, reason)
     if result.debug.details.get("next_stage", result.debug.stage) == "backtrack.return":
         return _recover_backtrack_issue(result.state, reason, issue_kind="stalled")
     if result.debug.details.get("next_stage", result.debug.stage) not in (
@@ -322,6 +341,16 @@ def continue_after_target_detection(
             "released_direction_id": released_direction_id,
             "reason": str(reason),
         },
+    )
+
+
+def _recover_scan_turn(result: NavigationResult, reason: str) -> NavigationResult:
+    """转向已停止后按下一帧真实朝向重建剩余观察，不假装该方向已检查。"""
+    state = _reset_scan_after_move(result.state)
+    return _result(
+        NavigationStatus.OK, state, "motion.scan_recovered",
+        "扫描转向未完成，按实际朝向和已有观察记录重新规划剩余视角。",
+        details={"reason": str(reason)},
     )
 
 
@@ -416,7 +445,7 @@ def _continue_scanning(
             working_state, candidates = _refresh_frontier_regions(frame, working_state)
             local_points = frontier_observation_points(frame, candidates)
             points = unobserved_observation_points(
-                local_points, frame, working_state.observed_views,
+                local_points, frame, working_state.observed_views + working_state.pending_observation_views,
             )
             headings = ()
             if not working_state.initial_scan_complete:
@@ -532,7 +561,7 @@ def _advance_scan(
     )
     evidence = ScanEvidence(
         heading_world_rad=target_heading,
-        visibility=TargetVisibility.NOT_VISIBLE,
+        visibility=observation.visibility,
         view=checked_view,
     )
     next_index = state.next_scan_index + 1
@@ -542,7 +571,8 @@ def _advance_scan(
         next_scan_index=min(next_index, len(state.scan_headings_world_rad) - 1),
         observed_views=(
             state.observed_views + (checked_view,)
-            if goal.search_mode is SearchMode.OBJECT else state.observed_views
+            if goal.search_mode is SearchMode.OBJECT and observation.visibility is not TargetVisibility.PENDING
+            else state.observed_views
         ),
     )
     if next_index < len(state.scan_headings_world_rad):
@@ -566,12 +596,12 @@ def _finish_scan(
         state,
         phase=(
             SearchPhase.VERIFYING_SCENE
-            if goal.search_mode is SearchMode.SCENE
+            if goal.search_mode is SearchMode.SCENE and not state.asynchronous_perception
             else SearchPhase.EXPLORING
         ),
         initial_scan_complete=True,
     )
-    if goal.search_mode is SearchMode.SCENE:
+    if goal.search_mode is SearchMode.SCENE and not state.asynchronous_perception:
         return _continue_scene_assessment(frame, completed_state, None)
     return _select_exploration_target(
         frame,
@@ -592,7 +622,7 @@ def _continue_target_approach(
             NavigationStatus.NEEDS_OBSERVATION,
             state,
             "target.observe",
-            "接近目标后需要 TargetObserver 重新观测。",
+            "需要 TargetObserver 用当前画面重新观测目标。",
         )
     if observation.visibility is TargetVisibility.UNCERTAIN:
         return _result(
@@ -617,13 +647,13 @@ def _continue_scene_assessment(
     state: SearchState,
     assessment: Optional[SceneAssessmentResult],
 ) -> NavigationResult:
-    """整轮扫描结束后先判断当前位置，未到场景时再选择 Frontier。"""
+    """用当前观察确认场景，未匹配则结束线索或继续探索。"""
     if assessment is None:
         return _result(
             NavigationStatus.NEEDS_SCENE_ASSESSMENT,
             state,
             "scene.assess",
-            "本轮扫描完成，需要 VLM 判断是否已经位于目的场景。",
+            "需要 VLM 根据当前观察判断是否已经位于目的场景。",
             details={"scan_image_count": len(state.scan_evidence)},
         )
     if assessment.assessment is SceneAssessment.UNCERTAIN:
@@ -643,7 +673,7 @@ def _continue_scene_assessment(
     if assessment.assessment is SceneAssessment.MATCHED:
         return _result(
             NavigationStatus.OK,
-            replace(state, phase=SearchPhase.COMPLETE),
+            replace(state, phase=SearchPhase.COMPLETE, active_target_clue=None),
             "scene.complete",
             "VLM 确认机器人已经位于目的场景。",
             details={"scan_image_count": len(state.scan_evidence)},
@@ -694,6 +724,7 @@ def _continue_target_confirmation(
                 state,
                 phase=SearchPhase.COMPLETE,
                 pending_target_world_xy=None,
+                active_target_clue=None,
             ),
             "target.complete",
             "VLM 已最终确认目标。",
@@ -701,20 +732,18 @@ def _continue_target_confirmation(
         )
 
     rejected_points = state.rejected_target_world_xy + (target_world_xy,)
-    scan_state = _reset_scan_after_move(
-        replace(
-            state,
-            initial_scan_complete=True,
-            rejected_target_world_xy=rejected_points,
-            pending_target_world_xy=None,
-        )
+    rejected_state = replace(
+        state,
+        initial_scan_complete=True,
+        rejected_target_world_xy=rejected_points,
+        pending_target_world_xy=None,
     )
-    result = _continue_scanning(frame, goal, scan_state, None)
+    result = _continue_scanning(frame, goal, _reset_scan_after_move(rejected_state), None)
     return replace(
         result,
         debug=NavigationDebug(
             stage="target.rejected",
-            message="VLM 否决当前候选，已屏蔽该位置并恢复 Frontier 探索。",
+            message="VLM 否决当前候选，已屏蔽该位置，继续处理剩余线索或探索。",
             details={
                 **result.debug.details,
                 "rejected_target_world_xy": target_world_xy,
@@ -911,7 +940,9 @@ def _select_exploration_target(
         "new_frontier_count": len(ranked_new),
         "deferred_frontier_count": len(deferred_candidates),
     }
-    if frontier_scores is None and len(ranked_new) > 1 and explored_state.scan_evidence:
+    if frontier_scores is None and len(ranked_new) > 1 and (
+        explored_state.scan_evidence or explored_state.asynchronous_perception
+    ):
         return _result(
             NavigationStatus.NEEDS_FRONTIER_SCORES,
             replace(explored_state, phase=SearchPhase.EXPLORING),
@@ -1045,12 +1076,77 @@ def _begin_backtracking(
         if any(candidate.deferred_order is None for candidate in candidates):
             return _select_exploration_target(frame, working_state, None)
 
+    return _wait_for_semantics_or_finish(working_state)
+
+
+def _wait_for_semantics_or_finish(state: SearchState) -> NavigationResult:
+    """没有可走方向时先排空已提交的检测；待处理不等于目标不存在。"""
+    pending = state.pending_semantic_jobs
     return _result(
-        NavigationStatus.NO_SOLUTION,
-        replace(working_state, phase=SearchPhase.FAILED),
-        "explore.exhausted",
-        "当前分支已退完，没有剩余有效探索方向。",
-        details=_scan_coverage_details(working_state),
+        NavigationStatus.OK if pending else NavigationStatus.NO_SOLUTION,
+        replace(state, phase=SearchPhase.WAITING_FOR_SEMANTICS if pending else SearchPhase.FAILED),
+        "perception.wait" if pending else "explore.exhausted",
+        (
+            f"没有剩余有效探索方向，保持当前位置等待 {pending} 项视觉工作。"
+            if pending else (
+                "当前分支已退完，视觉队列已处理完，没有剩余有效探索方向。"
+                + (f"其中 {state.failed_semantic_jobs} 批检测失败，未完成全部图像检查。"
+                   if state.failed_semantic_jobs else "")
+            )
+        ),
+        details={
+            **_scan_coverage_details(state),
+            "pending_semantic_jobs": pending, "failed_semantic_jobs": state.failed_semantic_jobs,
+        },
+    )
+
+
+def _continue_target_clue(
+    frame: NavigationFrame, state: SearchState,
+) -> NavigationResult:
+    """按后台检测结果返回拍摄位置与朝向，到位即完成，不再请求视觉复查。"""
+    clue = state.active_target_clue
+    if clue.map_frame_id != frame.obstacle_map.frame_id:
+        return _discard_target_clue(state, "目标线索与当前地图坐标系不同。")
+    distance = math.hypot(frame.pose.x_m - clue.pose.x_m, frame.pose.y_m - clue.pose.y_m)
+    if state.phase is SearchPhase.REVISITING_TARGET and distance > BACKTRACK_ARRIVAL_M:
+        return _discard_target_clue(state, f"返回线索位置的动作结束后仍相距 {distance:.3f} m。")
+    if distance > BACKTRACK_ARRIVAL_M:
+        command = _command_to_world_point((clue.pose.x_m, clue.pose.y_m), frame.pose)
+        command = replace(command, yaw_rad=shortest_turn_to_heading(frame.pose.yaw_rad, clue.pose.yaw_rad))
+        return _result(
+            NavigationStatus.OK, replace(state, phase=SearchPhase.REVISITING_TARGET, backtrack_node_id=None),
+            "target.revisit", "后台检测到目标，返回当时的拍摄位置与朝向。", command,
+            {"clue_id": clue.clue_id, "capture_timestamp_s": clue.timestamp_s,
+             "destination_world_xy": (clue.pose.x_m, clue.pose.y_m)},
+        )
+    turn = shortest_turn_to_heading(frame.pose.yaw_rad, clue.pose.yaw_rad)
+    if abs(turn) > TURN_TOLERANCE_RAD:
+        return _result(
+            NavigationStatus.OK, replace(state, phase=SearchPhase.REVISITING_TARGET, backtrack_node_id=None),
+            "target.revisit_turn", "已回到拍摄位置，对齐当时的朝向后结束搜索。",
+            RelativePoseCommand(yaw_rad=turn), {"clue_id": clue.clue_id},
+        )
+    return _result(
+        NavigationStatus.OK,
+        replace(_reset_scan_after_move(state), phase=SearchPhase.COMPLETE),
+        "target.revisit_complete", "已返回检测到目标时的位置与朝向，搜索完成。",
+        details={
+            "clue_id": clue.clue_id, "capture_timestamp_s": clue.timestamp_s,
+            "destination_world_xy": (clue.pose.x_m, clue.pose.y_m),
+            "destination_yaw_rad": clue.pose.yaw_rad,
+            "distance_to_capture_m": distance, "heading_error_rad": turn,
+        },
+    )
+
+
+def _discard_target_clue(state: SearchState, reason: str) -> NavigationResult:
+    """结束本条线索且不发命令，让下一周期优先取下一条；列表耗尽后恢复探索。"""
+    clue = state.active_target_clue
+    return _result(
+        NavigationStatus.OK, _reset_scan_after_move(state), "target.revisit_failed",
+        "未能返回本条线索的拍摄位姿，保留实际位置并尝试下一条；线索耗尽后继续探索。",
+        details={"clue_id": clue.clue_id if clue is not None else None, "reason": reason},
     )
 
 
@@ -1224,6 +1320,19 @@ def _refresh_frontier_regions(
     ), candidates
 
 
+def preview_frontier_candidates(frame: NavigationFrame, state: SearchState) -> Tuple[FrontierCandidate, ...]:
+    """对固定帧预览有效候选，不提交区域编号或修改导航状态；结果用于提前拍摄。"""
+    return _refresh_frontier_regions(frame, state)[1]
+
+
+def capture_semantic_view(
+    frame: NavigationFrame, observation_points: Tuple[Tuple[float, float], ...] = (),
+) -> ObservationView:
+    """记录固定帧的真实视角与覆盖；调用方须在检测成功后才登记为已检查。"""
+    offset, fov = _horizontal_camera_view(frame)
+    return capture_observation_view(frame, offset, fov, observation_points=observation_points)
+
+
 def _horizontal_camera_view(frame: NavigationFrame) -> Tuple[float, float]:
     """返回相机水平视场中心相对底盘的偏角，以及完整水平 FOV。"""
     intrinsics = frame.camera_intrinsics
@@ -1315,6 +1424,7 @@ def _scan_coverage_details(state: SearchState) -> Mapping[str, Any]:
     """保留本轮规划时的覆盖数量，首次图像同周期完成时也可在日志中查看。"""
     return {
         "local_observation_point_count": state.scan_local_point_count,
+        "pending_observation_view_count": len(state.pending_observation_views),
         "blocked_frontier_region_count": len(state.blocked_frontier_regions),
         "observation_point_count": len(state.scan_observation_points),
         "reused_observation_point_count": max(
@@ -1336,6 +1446,7 @@ def _reset_scan_after_move(state: SearchState) -> SearchState:
         target_approach_attempts=0,
         pending_target_world_xy=None,
         backtrack_node_id=None,
+        active_target_clue=None,
     )
 
 
@@ -1486,6 +1597,20 @@ def _validation_error(
     if state is not None:
         if not isinstance(state.phase, SearchPhase):
             return "state.phase 必须为 SearchPhase"
+        if not isinstance(state.asynchronous_perception, bool):
+            return "state.asynchronous_perception 必须为 bool"
+        for count in (state.pending_semantic_jobs, state.failed_semantic_jobs):
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                return "语义任务计数必须是非负整数"
+        clue = state.active_target_clue
+        if clue is not None and (
+            not isinstance(clue, TargetClue) or not isinstance(clue.pose, Pose2D)
+            or not all(_is_finite(value) for value in (clue.pose.x_m, clue.pose.y_m, clue.pose.yaw_rad, clue.timestamp_s))
+            or not isinstance(clue.clue_id, str) or not isinstance(clue.map_frame_id, str)
+        ):
+            return "state.active_target_clue 必须为有效目标线索或 None"
+        if state.phase is SearchPhase.REVISITING_TARGET and clue is None:
+            return "线索返回阶段必须保留拍摄位姿"
         if (
             isinstance(state.next_frontier_region_id, bool)
             or not isinstance(state.next_frontier_region_id, int)
@@ -1549,6 +1674,8 @@ def _validation_error(
             or state.scan_local_point_count < 0
         ):
             return "state.scan_local_point_count 必须为非负整数"
+        if not isinstance(state.observed_views, tuple) or not isinstance(state.pending_observation_views, tuple):
+            return "已检查与待处理覆盖必须为 ObservationView 元组"
         if any(
             not isinstance(view, ObservationView)
             or not isinstance(view.pose, Pose2D)
@@ -1561,9 +1688,9 @@ def _validation_error(
             or not isinstance(view.depth_coverage_available, bool)
             or not all(_valid_world_point(point) for point in view.visible_world_xy)
             or not all(_valid_world_point(point) for point in view.map_visible_world_xy)
-            for view in state.observed_views
+            for view in state.observed_views + state.pending_observation_views
         ):
-            return "state.observed_views 必须为有效 ObservationView 序列"
+            return "已检查与待处理覆盖必须包含有效 ObservationView"
         if not isinstance(state.initial_scan_complete, bool):
             return "state.initial_scan_complete 必须为 bool"
         if (
@@ -1643,8 +1770,10 @@ def _is_finite(value: object) -> bool:
 
 
 __all__ = [
+    "capture_semantic_view",
     "continue_after_motion_stall",
     "continue_after_target_detection",
     "navigate",
+    "preview_frontier_candidates",
     "recover_from_motion_failure",
 ]

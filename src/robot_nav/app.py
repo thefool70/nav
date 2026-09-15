@@ -16,10 +16,12 @@ from .adapters.perception import (
     ScanObservationContext,
     TargetObserver,
 )
+from .adapters.queued_semantics import QueuedSemanticObserver
 from .core.models import (
     NavigationFrame,
     NavigationResult,
     NavigationStatus,
+    SearchPhase,
     SearchState,
     TargetObservation,
     TargetSearchGoal,
@@ -48,10 +50,16 @@ def run_navigation_cycle(
 ) -> NavigationResult:
     """执行一个完整导航周期，并在需要时调用感知与底盘接口。
 
-    本函数只负责编排一次“读取 → 决策 → 感知补充 → 执行动作”；跨周期状态
-    仍全部由 ``SearchState`` 显式传入和返回。
+    本函数只负责编排一次“读取 → 决策 → 感知补充 → 执行动作”；核心跨周期
+    状态由 ``SearchState`` 显式传入和返回，后台任务与缓存由观察器管理。
     """
     frame = chassis.read_frame()
+    if isinstance(observer, QueuedSemanticObserver):
+        state = observer.prepare_cycle(frame, state or SearchState())
+        clue = observer.take_target_clue(state)
+        if clue is not None:
+            state = replace(state, active_target_clue=clue)
+        state = _observer_state(observer, frame, state)
     result = navigate(frame, goal, state)
     result, observation = _apply_target_observation(
         frame,
@@ -69,6 +77,11 @@ def run_navigation_cycle(
         observer,
     )
     result = _apply_frontier_scores(result, frame, goal, observer)
+    if isinstance(observer, QueuedSemanticObserver):
+        result = replace(
+            result, state=_observer_state(observer, frame, result.state),
+            debug=replace(result.debug, details={**result.debug.details, **observer.diagnostics()}),
+        )
 
     if on_cycle is not None:
         on_cycle(frame, observation, result)
@@ -83,7 +96,11 @@ def _apply_target_observation(
     observer: Optional[TargetObserver],
 ) -> Tuple[NavigationResult, Optional[TargetObservation]]:
     """按状态机需要读取当前视觉结果；持续观察器可抢占普通决策。"""
-    if observer is None:
+    if (
+        observer is None
+        or result.state.phase is SearchPhase.COMPLETE
+        or (state is not None and state.active_target_clue is not None)
+    ):
         return result, None
 
     observation_requested = result.status in {
@@ -96,6 +113,7 @@ def _apply_target_observation(
     ):
         return result, None
 
+    _observer_state(observer, frame, result.state)
     observation = observer.observe(
         frame,
         goal,
@@ -104,6 +122,8 @@ def _apply_target_observation(
     # 显式视觉请求应继续 result.state；持续检测旁路普通命令时则从周期入口
     # state 重新决策，避免在命令执行前误把“命令后的状态”当作当前位置状态。
     decision_state = result.state if observation_requested else state
+    if isinstance(observer, QueuedSemanticObserver):
+        decision_state = _observer_state(observer, frame, decision_state or SearchState())
     return navigate(frame, goal, decision_state, observation), observation
 
 
@@ -113,17 +133,18 @@ def _apply_scene_assessment(
     goal: TargetSearchGoal,
     observer: Optional[TargetObserver],
 ) -> NavigationResult:
-    """整轮扫描完成时，用已缓存的多视角图片判断目的场景。"""
+    """保留同步观察器的场景判断；异步线索返回不进入此步骤。"""
     if (
         observer is None
         or result.status is not NavigationStatus.NEEDS_SCENE_ASSESSMENT
     ):
         return result
+    current_state = _observer_state(observer, frame, result.state)
     assessment = observer.assess_scene(goal)
     return navigate(
         frame,
         goal,
-        result.state,
+        current_state,
         scene_assessment=assessment,
     )
 
@@ -145,6 +166,7 @@ def _apply_target_confirmation(
         visibility=TargetVisibility.UNCERTAIN,
         reason="最终确认缺少本地检测结果。",
     )
+    current_state = _observer_state(observer, frame, result.state)
     confirmation = observer.confirm_target(
         frame,
         goal,
@@ -153,7 +175,7 @@ def _apply_target_confirmation(
     return navigate(
         frame,
         goal,
-        result.state,
+        current_state,
         observation=observation,
         target_confirmation=confirmation,
     )
@@ -173,11 +195,12 @@ def _apply_frontier_scores(
         or request is None
     ):
         return result
+    current_state = _observer_state(observer, frame, result.state)
     scores = observer.score_frontiers(request, goal)
     return navigate(
         frame,
         goal,
-        result.state,
+        current_state,
         frontier_scores=scores,
     )
 
@@ -197,13 +220,18 @@ def _execute_command(
         if isinstance(observer, ContinuousTargetObserver)
         else None
     )
+    stage = result.debug.details.get("next_stage", result.debug.stage)
     if continuous_observer is not None:
         continuous_observer.set_motion_interrupt_enabled(
-            result.debug.stage != "target.approach"
+            stage not in ("target.approach", "target.revisit", "target.revisit_turn")
+        )
+    if isinstance(observer, QueuedSemanticObserver):
+        observer.set_motion_prefetch_enabled(
+            stage in ("explore.select", "backtrack.return", "backtrack.resume")
+            and (result.command.forward_m != 0.0 or result.command.left_m != 0.0)
         )
     try:
-        stage = result.debug.details.get("next_stage", result.debug.stage)
-        if stage in ("explore.select", "backtrack.return", "backtrack.resume") and isinstance(
+        if stage in ("explore.select", "backtrack.return", "backtrack.resume", "target.revisit") and isinstance(
             chassis, KnownSpaceChassisInterface,
         ):
             chassis.send_relative_pose_in_known_space(
@@ -239,9 +267,19 @@ def _execute_command(
             raise
         return recovered
     finally:
+        if isinstance(observer, QueuedSemanticObserver):
+            observer.set_motion_prefetch_enabled(False)
         if continuous_observer is not None:
             continuous_observer.set_motion_interrupt_enabled(False)
     return result
+
+
+def _observer_state(observer, frame: NavigationFrame, state: SearchState) -> SearchState:
+    """入队后刷新工作计数，防止同周期误将尚未检查的画面视为已耗尽。"""
+    if isinstance(observer, QueuedSemanticObserver):
+        state = observer.sync_state(state)
+        observer.bind_context(frame, state)
+    return state
 
 
 def _scan_observation_context(

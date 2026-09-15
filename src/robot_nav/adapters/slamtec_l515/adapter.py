@@ -115,6 +115,8 @@ class SlamtecL515Adapter:
         self._client = SlamtecRestClient(
             config.base_url, config.request_timeout_s
         )
+        self._active_action_id: Optional[int] = None
+        self._action_pending = False
         self._camera: Optional[L515Camera] = None
         self._observed_map = L515ObservedMap()
 
@@ -329,59 +331,40 @@ class SlamtecL515Adapter:
         known_space_map: Optional[ObstacleMap] = None,
     ) -> None:
         """监控活跃 Action 的反馈和位姿；不计入 VLM 等待时间。"""
-        action_id = self._client.create_action(action_name, options)
         action_label = action_name.rsplit(".", 1)[-1]
-        started_s = time.monotonic()
-        started_pose = self._client.get_pose()
-        monitor_state = _ActionMonitorState(
-            started_s=started_s,
-            last_sample_s=float("-inf"),
-            last_motion_s=started_s,
-            last_motion_pose=started_pose,
-        )
-        self._report_action_progress(
-            f"Hermes Action #{action_id} {action_label} 已创建。"
-        )
-        self._report_motion_plan(
-            target_world_xy,
-            (),
-        )
-
-        def monitor_action(status: int, stage: str) -> None:
-            self._monitor_action(
-                action_id,
-                action_label,
-                monitor_state,
-                status,
-                stage,
-                action_name == self._move_to_action,
-                target_world_xy,
-                known_space_map,
-            )
-
+        action_id = None
+        self._action_pending = True
         try:
+            action_id = self._client.create_action(action_name, options)
+            self._active_action_id = action_id
+            started_s = time.monotonic()
+            started_pose = self._client.get_pose()
+            monitor_state = _ActionMonitorState(
+                started_s=started_s, last_sample_s=float("-inf"),
+                last_motion_s=started_s, last_motion_pose=started_pose,
+            )
+            self._report_action_progress(f"Hermes Action #{action_id} {action_label} 已创建。")
+            self._report_motion_plan(target_world_xy, ())
+
+            def monitor_action(status: int, stage: str) -> None:
+                self._monitor_action(
+                    action_id, action_label, monitor_state, status, stage,
+                    action_name == self._move_to_action, target_world_xy, known_space_map,
+                )
+
             self._client.wait_for_action(
                 action_id=action_id,
                 timeout_s=self.config.action_timeout_s,
                 poll_interval_s=self.config.action_poll_interval_s,
                 on_poll=monitor_action,
             )
+            self._active_action_id = None
+            self._action_pending = False
         except BaseException as exc:
             detail = str(exc) or type(exc).__name__
             abort_error: Optional[RuntimeError] = None
             try:
-                self._client.abort_current_action()
-                if isinstance(exc, (
-                    MotionPathUnknownError, _ActionStalledError,
-                    _ActionInterruptedError, SlamtecActionError,
-                )):
-                    # 任何会恢复导航的结果都先确认终态，避免下一条命令覆盖未停动作。
-                    self._client.wait_for_action(
-                        action_id=action_id,
-                        timeout_s=self.config.request_timeout_s,
-                        poll_interval_s=self.config.action_poll_interval_s,
-                        require_success=False,
-                    )
+                self._cancel_active_action()
             except RuntimeError as caught_abort_error:
                 abort_error = caught_abort_error
             self._report_motion_plan(None, ())
@@ -457,6 +440,21 @@ class SlamtecL515Adapter:
             f"耗时 {time.monotonic() - started_s:.1f}s"
             f"{completion_detail}。"
         )
+
+    def _cancel_active_action(self) -> None:
+        """Action 创建后的所有异常都取消；取得 ID 时还要确认终态。"""
+        if not self._action_pending:
+            return
+        self._client.abort_current_action()
+        if self._active_action_id is not None:
+            self._client.wait_for_action(
+                action_id=self._active_action_id,
+                timeout_s=self.config.request_timeout_s,
+                poll_interval_s=self.config.action_poll_interval_s,
+                require_success=False,
+            )
+        self._active_action_id = None
+        self._action_pending = False
 
     def _read_rotation_error(
         self,
@@ -627,7 +625,10 @@ class SlamtecL515Adapter:
     def _report_action_progress(self, message: str) -> None:
         """向入口报告底盘 Action 进度；不参与运动控制。"""
         if self._on_action_progress is not None:
-            self._on_action_progress(message)
+            try:
+                self._on_action_progress(message)
+            except Exception:
+                self._on_action_progress = None
 
     def _publish_motion_frame(self, force: bool = False) -> None:
         """运动期间按固定间隔向 Rerun 发布真实底盘帧。"""
@@ -643,7 +644,12 @@ class SlamtecL515Adapter:
         self._last_motion_frame_s = now
 
     def close(self) -> None:
-        """幂等关闭外接 L515；REST 客户端没有常驻连接。"""
+        """退出先取消遗留动作，再关闭采集；取消失败仍显式上报。"""
+        cancellation_error = None
+        try:
+            self._cancel_active_action()
+        except RuntimeError as exc:
+            cancellation_error = exc
         self._continuous_frame_stop.set()
         frame_thread = self._continuous_frame_thread
         self._continuous_frame_thread = None
@@ -666,6 +672,8 @@ class SlamtecL515Adapter:
         self._camera = None
         if camera is not None:
             camera.close()
+        if cancellation_error is not None:
+            raise RuntimeError(f"退出时取消 Hermes Action 失败：{cancellation_error}") from cancellation_error
 
     def __enter__(self) -> "SlamtecL515Adapter":
         return self

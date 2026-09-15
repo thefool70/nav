@@ -107,6 +107,10 @@ class NavigationRunLogger:
             message=str(message),
         )
 
+    def log_semantic_queue_event(self, event: Mapping[str, Any]) -> None:
+        """队列事件记录任务 ID 与拍摄快照路径，允许关联迟到的模型结果。"""
+        self._write("semantic_queue", queue_event=event.get("event"), details=dict(event))
+
     def log_local_perception(
         self,
         frame: NavigationFrame,
@@ -154,7 +158,7 @@ class NavigationRunLogger:
         with self._write_lock:
             stream = self._stream
             if stream is None:
-                raise RuntimeError("运行日志已经关闭")
+                return
             record = {
                 "event": event,
                 "wall_time": datetime.now().astimezone().isoformat(
@@ -163,16 +167,18 @@ class NavigationRunLogger:
                 "monotonic_s": time.monotonic(),
                 **payload,
             }
-            stream.write(
-                json.dumps(
-                    _jsonable(record),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                )
-                + "\n"
-            )
-            stream.flush()
+            try:
+                stream.write(json.dumps(
+                    _jsonable(record), ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+                ) + "\n")
+                stream.flush()
+            except (OSError, ValueError, TypeError) as exc:
+                self._stream = None
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+                print(f"运行日志已停用，导航继续：{exc}", flush=True)
 
 
 def _result_summary(
@@ -374,6 +380,17 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
         "active_frontier_id": state.active_frontier_id,
         "backtrack_node_id": state.backtrack_node_id,
         "branch_node_ids": state.branch_node_ids,
+        "asynchronous_perception": state.asynchronous_perception,
+        "pending_semantic_jobs": state.pending_semantic_jobs,
+        "failed_semantic_jobs": state.failed_semantic_jobs,
+        "pending_observation_view_count": len(state.pending_observation_views),
+        "active_target_clue": (
+            {"clue_id": state.active_target_clue.clue_id,
+             "pose": _pose_summary(state.active_target_clue.pose),
+             "timestamp_s": state.active_target_clue.timestamp_s,
+             "map_frame_id": state.active_target_clue.map_frame_id}
+            if state.active_target_clue is not None else None
+        ),
         "frontier_region_ids": tuple(region.region_id for region in state.frontier_regions),
         "blocked_frontier_regions": tuple(
             {
