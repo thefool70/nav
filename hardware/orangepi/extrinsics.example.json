@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "device": "Intel RealSense D435i on Hermes via Orange Pi",
+  "camera_extrinsics": {
+    "height_m": null,
+    "forward_m": null,
+    "left_m": null,
+    "yaw_deg": null,
+    "pitch_down_deg": null,
+    "roll_deg": null
+  }
+}

@@ -1,4 +1,4 @@
-"""Hermes 底盘上的 L515 外参标定入口。"""
+"""共用 Hermes 标定运动接口，以及本地 D435i 外参标定入口。"""
 
 from __future__ import annotations
 
@@ -8,13 +8,11 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from ...core.models import Pose2D, RelativePoseCommand
-from ..realsense import L515Config
+from ..realsense.d435i_camera import D435iConfig
 from ..realsense.calibration import (
     CameraCalibrationConfig,
-    calibrate_l515_extrinsics,
 )
 from .adapter import SlamtecL515Adapter, SlamtecL515Config
-from .mount_config import save_camera_extrinsics
 
 
 @dataclass(frozen=True)
@@ -25,7 +23,7 @@ class SlamtecCalibrationResult:
     extrinsic_residual_m: float
 
 
-class _HermesCalibrationMotion:
+class HermesCalibrationMotion:
     """把公共标定所需的世界系运动转换为 Adapter 相对位姿命令。"""
 
     def __init__(self, adapter: SlamtecL515Adapter) -> None:
@@ -58,7 +56,7 @@ class _HermesCalibrationMotion:
 
 def calibrate_slamtec_l515(
     base_url: str,
-    camera_config: L515Config,
+    camera_config: D435iConfig,
     calibration_config: CameraCalibrationConfig,
     output_path: Path,
     action_timeout_s: float = 120.0,
@@ -66,33 +64,22 @@ def calibrate_slamtec_l515(
     progress: Optional[Callable[[str], None]] = None,
 ) -> SlamtecCalibrationResult:
     """用 Hermes 地图位姿执行标定运动并保存完整外参。"""
-    adapter_config = SlamtecL515Config(
-        base_url=base_url,
-        camera=None,
-        action_timeout_s=action_timeout_s,
-        minimum_localization_quality=minimum_localization_quality,
-    )
-    with SlamtecL515Adapter(
-        adapter_config,
-        on_action_progress=progress,
-    ) as adapter:
-        result = calibrate_l515_extrinsics(
-            _HermesCalibrationMotion(adapter),
-            camera_config,
-            calibration_config,
-            progress,
+    from ..realsense.d435i_camera import D435iCalibrationCamera
+    from .d435i_calibration import calibrate_hermes_d435i
+
+    camera = D435iCalibrationCamera(camera_config)
+    try:
+        result = calibrate_hermes_d435i(
+            base_url=base_url, camera=camera, output_path=output_path,
+            turn_angle_deg=math.degrees(calibration_config.turn_angle_rad),
+            drive_distance_m=calibration_config.drive_distance_m,
+            action_timeout_s=action_timeout_s,
+            minimum_localization_quality=minimum_localization_quality,
+            progress=progress if progress is not None else lambda _message: None,
         )
-    saved_path = save_camera_extrinsics(
-        output_path,
-        result.extrinsics,
-        result.diagnostics,
-    )
-    if progress is not None:
-        progress(f"标定完成，外参已保存到 {saved_path}")
-    return SlamtecCalibrationResult(
-        saved_path,
-        result.extrinsic_residual_m,
-    )
+    finally:
+        camera.close()
+    return SlamtecCalibrationResult(result.output_path, result.extrinsic_residual_m)
 
 
 def _angle_difference(target_rad: float, current_rad: float) -> float:
@@ -100,6 +87,7 @@ def _angle_difference(target_rad: float, current_rad: float) -> float:
 
 
 __all__ = [
+    "HermesCalibrationMotion",
     "CameraCalibrationConfig",
     "SlamtecCalibrationResult",
     "calibrate_slamtec_l515",

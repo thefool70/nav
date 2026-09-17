@@ -1,4 +1,4 @@
-"""把 SLAMTEC Hermes 与外接 L515 组合为统一 ChassisInterface。"""
+"""把 SLAMTEC Hermes 与外接 D435i 组合为统一 ChassisInterface。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional, Tuple
+from typing import Any, Callable, Mapping, Optional, Protocol, Tuple
 
 from ...core.models import (
     CameraExtrinsics,
@@ -22,8 +22,9 @@ from ..chassis import (
     MotionStalledError,
     RecoverableMotionError,
 )
-from ..realsense import L515Camera, L515Capture, L515Config
-from .observed_map import L515ObservedMap
+from ..realsense import L515Capture
+from ..realsense.d435i_camera import D435iCamera, D435iConfig
+from .observed_map import HERMES_OBSTACLE_INFLATION_RADIUS_M, L515ObservedMap
 from .rest_client import (
     SlamtecActionError,
     SlamtecExploreMap,
@@ -46,12 +47,22 @@ MotionPlanCallback = Callable[
 ]
 
 
+class RgbdCamera(Protocol):
+    """Hermes 组帧只要求采集与关闭，允许本地 USB 或远程 RGB-D 来源。"""
+
+    def capture(self) -> L515Capture:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
 @dataclass(frozen=True)
 class SlamtecL515Config:
-    """Hermes REST、可选 L515 和同步 Action 执行配置。"""
+    """Hermes REST、可选 D435i 和同步 Action 执行配置。"""
 
     base_url: str = "http://192.168.11.1:1448"
-    camera: Optional[L515Config] = field(default_factory=L515Config)
+    camera: Optional[D435iConfig] = field(default_factory=D435iConfig)
     camera_extrinsics_in_robot: CameraExtrinsics = field(
         default_factory=CameraExtrinsics
     )
@@ -62,6 +73,9 @@ class SlamtecL515Config:
     action_stall_timeout_s: float = 8.0
     action_stall_translation_m: float = 0.02
     action_stall_rotation_rad: float = math.radians(1.0)
+    # 到位后的提前收尾，与是否需要下发微小平移的 position_tolerance_m 分开。
+    action_arrival_position_m: float = 0.10
+    action_arrival_hold_s: float = 0.6
     max_unknown_path_m: float = 1.5
     motion_frame_interval_s: float = 0.5
     minimum_localization_quality: int = 1
@@ -78,6 +92,12 @@ class _ActionMonitorState:
     last_motion_pose: Pose2D
     path_error_reported: bool = False
     unknown_path_length_m: Optional[float] = None
+    arrival_since_s: Optional[float] = None
+    arrival_pose: Optional[Pose2D] = None
+
+
+class _ActionArrivedError(RuntimeError):
+    """位姿已到达且稳定，通知执行层终止 Action 并确认结束。"""
 
 
 class _ActionStalledError(RuntimeError):
@@ -89,7 +109,7 @@ class _ActionInterruptedError(RuntimeError):
 
 
 class SlamtecL515Adapter:
-    """由 Hermes 提供地图/位姿/规划控制，由外接 L515 提供 RGB-D。"""
+    """由 Hermes 提供地图/位姿/规划控制，由外接 D435i 提供 RGB-D。"""
 
     def __init__(
         self,
@@ -99,6 +119,8 @@ class SlamtecL515Adapter:
         on_action_progress: Optional[ActionProgressCallback] = None,
         on_motion_plan: Optional[MotionPlanCallback] = None,
         should_interrupt_motion: Optional[MotionInterruptCallback] = None,
+        *,
+        camera_factory: Callable[[D435iConfig], RgbdCamera] = D435iCamera,
     ) -> None:
         _validate_config(config)
         self.config = config
@@ -117,7 +139,7 @@ class SlamtecL515Adapter:
         )
         self._active_action_id: Optional[int] = None
         self._action_pending = False
-        self._camera: Optional[L515Camera] = None
+        self._camera: Optional[RgbdCamera] = None
         self._observed_map = L515ObservedMap()
 
         action_names = self._client.get_action_names()
@@ -130,10 +152,10 @@ class SlamtecL515Adapter:
         self._action_names = action_names
         try:
             if config.camera is not None:
-                self._camera = L515Camera(config.camera)
+                self._camera = camera_factory(config.camera)
             if on_continuous_frame is not None:
                 if self._camera is None:
-                    raise ValueError("连续视觉帧需要启用 L515")
+                    raise ValueError("连续视觉帧需要启用 D435i")
                 self._continuous_frame_thread = threading.Thread(
                     target=self._continuous_frame_loop,
                     name="slamtec-l515-frames",
@@ -146,7 +168,7 @@ class SlamtecL515Adapter:
 
     @property
     def has_camera(self) -> bool:
-        """当前 Adapter 是否启用了外接 L515。"""
+        """当前 Adapter 是否启用了外接 D435i。"""
         return self._camera is not None
 
     @property
@@ -175,7 +197,7 @@ class SlamtecL515Adapter:
         return self._client.get_pose()
 
     def read_frame(self) -> NavigationFrame:
-        """组合 Hermes 地图/位姿与同机 L515 对齐 RGB-D。"""
+        """组合 Hermes 地图/位姿与同机 D435i 对齐 RGB-D。"""
         self._raise_continuous_frame_error()
         return self._read_frame_locked()
 
@@ -189,7 +211,8 @@ class SlamtecL515Adapter:
             )
             pose = self._client.get_pose()
             slamtec_map = self._client.get_explore_map()
-            obstacle_map = _to_obstacle_map(slamtec_map)
+            navigation_map = _to_obstacle_map(slamtec_map)
+            obstacle_map = navigation_map
             if capture is not None:
                 obstacle_map = self._observed_map.update(
                     obstacle_map,
@@ -203,6 +226,7 @@ class SlamtecL515Adapter:
                 obstacle_map=obstacle_map,
                 capture=capture,
                 camera_extrinsics=self.config.camera_extrinsics_in_robot,
+                navigation_map=navigation_map,
             )
 
     def _continuous_frame_loop(self) -> None:
@@ -216,7 +240,7 @@ class SlamtecL515Adapter:
             except BaseException as exc:
                 self._continuous_frame_error = exc
                 self._report_action_progress(
-                    "Hermes/L515 连续视觉帧停止："
+                    "Hermes/D435i 连续视觉帧停止："
                     f"{str(exc) or type(exc).__name__}"
                 )
                 return
@@ -230,12 +254,12 @@ class SlamtecL515Adapter:
         if error is None:
             return
         raise RuntimeError(
-            "Hermes/L515 连续视觉帧失败："
+            "Hermes/D435i 连续视觉帧失败："
             f"{str(error) or type(error).__name__}"
         ) from error
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
-        """执行普通运动，用于启动、标定、转向和目标接近。"""
+        """执行普通运动，用于启动、标定、转向和同步 API 的目标接近。"""
         self._send_relative_pose(command)
 
     def send_relative_pose_in_known_space(
@@ -332,6 +356,7 @@ class SlamtecL515Adapter:
     ) -> None:
         """监控活跃 Action 的反馈和位姿；不计入 VLM 等待时间。"""
         action_label = action_name.rsplit(".", 1)[-1]
+        target_yaw = float(options["angle"]) if action_name == self._rotate_to_action else None
         action_id = None
         self._action_pending = True
         try:
@@ -350,14 +375,25 @@ class SlamtecL515Adapter:
                 self._monitor_action(
                     action_id, action_label, monitor_state, status, stage,
                     action_name == self._move_to_action, target_world_xy, known_space_map,
+                    target_yaw,
                 )
 
-            self._client.wait_for_action(
-                action_id=action_id,
-                timeout_s=self.config.action_timeout_s,
-                poll_interval_s=self.config.action_poll_interval_s,
-                on_poll=monitor_action,
-            )
+            try:
+                self._client.wait_for_action(
+                    action_id=action_id,
+                    timeout_s=self.config.action_timeout_s,
+                    poll_interval_s=self.config.action_poll_interval_s,
+                    on_poll=monitor_action,
+                )
+            except _ActionArrivedError as arrived:
+                # 不能仅凭位姿直接返回；先取消固件中的活跃动作并确认终态。
+                self._cancel_active_action()
+                if not self._pose_at_action_target(self._client.get_pose(), target_world_xy, target_yaw):
+                    raise RecoverableMotionError("提前结束 Action 后位姿超出到达容差，按实际位置重新决策。")
+                self._report_action_progress(
+                    f"Hermes Action #{action_id} {action_label} 按位姿确认到达，"
+                    f"已主动结束并确认终态：{arrived}"
+                )
             self._active_action_id = None
             self._action_pending = False
         except BaseException as exc:
@@ -482,13 +518,15 @@ class SlamtecL515Adapter:
         requires_translation: bool,
         target_world_xy: Optional[Tuple[float, float]],
         known_space_map: Optional[ObstacleMap] = None,
+        target_yaw: Optional[float] = None,
     ) -> None:
-        """采样活跃 Action 位姿，定期报告并识别真正的底盘停滞。"""
+        """每次轮询判断到位与停滞，仅终端输出按进度间隔节流。"""
         self._raise_continuous_frame_error()
+        pose = self._client.get_pose()
+        now = time.monotonic()
         if requires_translation and known_space_map is not None:
-            measurement = self._check_known_space_path(action_id, target_world_xy, known_space_map)
+            measurement = self._check_known_space_path(action_id, target_world_xy, known_space_map, pose)
             state.unknown_path_length_m = measurement.unknown_length_m if measurement is not None else None
-        self._publish_motion_frame()
         if (
             self._should_interrupt_motion is not None
             and self._should_interrupt_motion()
@@ -496,14 +534,6 @@ class SlamtecL515Adapter:
             raise _ActionInterruptedError(
                 f"Hermes Action {action_id} 被实时目标检测中断"
             )
-        now = time.monotonic()
-        if (
-            now - state.last_sample_s
-            < self.config.action_progress_interval_s
-        ):
-            return
-
-        pose = self._client.get_pose()
         moved_m = math.hypot(
             pose.x_m - state.last_motion_pose.x_m,
             pose.y_m - state.last_motion_pose.y_m,
@@ -521,6 +551,20 @@ class SlamtecL515Adapter:
             state.last_motion_pose = pose
             state.last_motion_s = now
 
+        self._check_stable_arrival(
+            state, status, pose, now, target_world_xy, target_yaw,
+            requires_translation,
+        )
+        still_s = now - state.last_motion_s
+        if still_s >= self.config.action_stall_timeout_s:
+            raise _ActionStalledError(
+                f"Hermes Action {action_id} 已连续 {still_s:.1f} 秒"
+                "没有产生足够位姿变化"
+            )
+        self._publish_motion_frame()
+        if now - state.last_sample_s < self.config.action_progress_interval_s:
+            return
+
         if (
             requires_translation and known_space_map is None
             and self._on_motion_plan is not None
@@ -532,7 +576,6 @@ class SlamtecL515Adapter:
             )
 
         elapsed_s = now - state.started_s
-        still_s = now - state.last_motion_s
         stage_text = stage or "-"
         unknown_detail = (
             f", unknown_path={state.unknown_path_length_m:.3f}/{self.config.max_unknown_path_m:.3f} m"
@@ -547,20 +590,53 @@ class SlamtecL515Adapter:
         )
         state.last_sample_s = now
 
-        if still_s >= self.config.action_stall_timeout_s:
-            raise _ActionStalledError(
-                f"Hermes Action {action_id} 已连续 {still_s:.1f} 秒"
-                "没有产生足够位姿变化"
-            )
+    def _pose_at_action_target(
+        self, pose: Pose2D, target_xy: Optional[Tuple[float, float]], target_yaw: Optional[float],
+    ) -> bool:
+        """MoveTo 只检查停靠位置，RotateTo 只检查朝向；两者仍按顺序执行。"""
+        if target_xy is not None:
+            return math.hypot(pose.x_m - target_xy[0], pose.y_m - target_xy[1]) <= self.config.action_arrival_position_m
+        if target_yaw is not None:
+            return abs(_angle_difference(target_yaw, pose.yaw_rad)) <= self.config.yaw_tolerance_rad
+        return False
+
+    def _check_stable_arrival(
+        self, state: _ActionMonitorState, status: int, pose: Pose2D, now: float,
+        target_xy: Optional[Tuple[float, float]], target_yaw: Optional[float], requires_translation: bool,
+    ) -> None:
+        """目标容差内连续稳定 0.6s 才提前收尾，避免路过目标或尚未起步时误报到达。"""
+        if (
+            status != 1
+            or (requires_translation and state.last_motion_s <= state.started_s)
+            or not self._pose_at_action_target(pose, target_xy, target_yaw)
+        ):
+            state.arrival_since_s = None
+            state.arrival_pose = None
+            return
+        anchor = state.arrival_pose
+        if (
+            anchor is None
+            or math.hypot(pose.x_m - anchor.x_m, pose.y_m - anchor.y_m) >= self.config.action_stall_translation_m
+            or abs(_angle_difference(pose.yaw_rad, anchor.yaw_rad)) >= self.config.action_stall_rotation_rad
+        ):
+            state.arrival_since_s = now
+            state.arrival_pose = pose
+            return
+        if state.arrival_since_s is not None and now - state.arrival_since_s >= self.config.action_arrival_hold_s:
+            if target_xy is not None:
+                error = f"位置误差 {math.hypot(pose.x_m - target_xy[0], pose.y_m - target_xy[1]):.3f} m"
+            else:
+                error = f"角度误差 {math.degrees(abs(_angle_difference(target_yaw, pose.yaw_rad))):.2f}°"
+            raise _ActionArrivedError(f"{error}，稳定 {now - state.arrival_since_s:.1f}s")
 
     def _check_known_space_path(
         self,
         action_id: int,
         target_world_xy: Optional[Tuple[float, float]],
         obstacle_map: ObstacleMap,
+        pose: Pose2D,
     ) -> Optional[UnknownPathMeasurement]:
         """每次轮询独立计算当前位置及剩余路径的未知长度，超过配置上限才取消。"""
-        pose = self._client.get_pose()
         # 检查所需路径读取失败属于系统错误，不能降级为仅隐藏可视化。
         remaining_path = self._client.get_remaining_path()
         self._report_motion_plan(target_world_xy, remaining_path)
@@ -688,6 +764,7 @@ def _build_navigation_frame(
     obstacle_map: ObstacleMap,
     capture: Optional[L515Capture],
     camera_extrinsics: CameraExtrinsics,
+    navigation_map: Optional[ObstacleMap] = None,
 ) -> NavigationFrame:
     """把两类设备数据冻结为 core 只读的同一地图坐标帧。"""
     if capture is None:
@@ -696,6 +773,8 @@ def _build_navigation_frame(
             pose=pose,
             obstacle_map=obstacle_map,
             camera_extrinsics_in_robot=camera_extrinsics,
+            navigation_map=navigation_map,
+            navigation_clearance_m=HERMES_OBSTACLE_INFLATION_RADIUS_M,
         )
     return NavigationFrame(
         timestamp_s=timestamp_s,
@@ -705,6 +784,8 @@ def _build_navigation_frame(
         rgb=_convert_rgb(capture.rgb),
         camera_intrinsics=capture.camera_intrinsics,
         camera_extrinsics_in_robot=camera_extrinsics,
+        navigation_map=navigation_map,
+        navigation_clearance_m=HERMES_OBSTACLE_INFLATION_RADIUS_M,
     )
 
 
@@ -780,8 +861,8 @@ def _validate_command(command: RelativePoseCommand) -> None:
 def _validate_config(config: SlamtecL515Config) -> None:
     if not isinstance(config, SlamtecL515Config):
         raise ValueError("config 必须为 SlamtecL515Config")
-    if config.camera is not None and not isinstance(config.camera, L515Config):
-        raise ValueError("camera 必须为 L515Config 或 None")
+    if config.camera is not None and not isinstance(config.camera, D435iConfig):
+        raise ValueError("camera 必须为 D435iConfig 或 None")
     if not isinstance(
         config.camera_extrinsics_in_robot, CameraExtrinsics
     ) or not all(
@@ -806,6 +887,8 @@ def _validate_config(config: SlamtecL515Config) -> None:
         "action_stall_timeout_s",
         "action_stall_translation_m",
         "action_stall_rotation_rad",
+        "action_arrival_position_m",
+        "action_arrival_hold_s",
         "motion_frame_interval_s",
         "position_tolerance_m",
         "yaw_tolerance_rad",

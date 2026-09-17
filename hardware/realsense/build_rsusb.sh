@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 install_dir="$script_dir/.rsusb"
+sdk_version="${ROBOT_NAV_REALSENSE_VERSION:-2.56.5}"
 build_root="$(mktemp -d /tmp/robot-nav-rsusb.XXXXXX)"
 source_dir="$build_root/librealsense"
 build_dir="$build_root/build"
@@ -19,15 +20,17 @@ for command in git cmake c++; do
     fi
 done
 if ! command -v python >/dev/null 2>&1; then
-    echo "请先激活要运行 L515 的 micromamba 环境。" >&2
+    echo "请先激活要运行 RealSense 的 micromamba 环境。" >&2
     exit 1
 fi
 
-echo "构建 librealsense 2.54.1 RSUSB 后端……"
-git clone --quiet --depth 1 --branch v2.54.1 \
-    https://github.com/IntelRealSense/librealsense.git \
+echo "构建 librealsense $sdk_version RSUSB 后端……"
+git clone --quiet --depth 1 --branch "v$sdk_version" \
+    https://github.com/realsenseai/librealsense.git \
     "$source_dir"
-git -C "$source_dir" apply "$script_dir/librealsense-2.54.1-gcc16.patch"
+if [[ "$sdk_version" == "2.54.1" ]]; then
+    git -C "$source_dir" apply "$script_dir/librealsense-2.54.1-gcc16.patch"
+fi
 
 cmake -S "$source_dir" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE=Release \
@@ -38,6 +41,7 @@ cmake -S "$source_dir" -B "$build_dir" \
     -DBUILD_EXAMPLES=OFF \
     -DBUILD_GRAPHICAL_EXAMPLES=OFF \
     -DBUILD_TOOLS=OFF \
+    -DBUILD_UNIT_TESTS=OFF \
     -DBUILD_PYTHON_BINDINGS=ON \
     -DPYTHON_EXECUTABLE="$(command -v python)" \
     -DPYTHON_INSTALL_DIR="$install_dir/python" \

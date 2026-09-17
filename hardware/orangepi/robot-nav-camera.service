@@ -1,0 +1,17 @@
+[Unit]
+Description=Robot navigation D435i data relay (no chassis control)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/nav
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/.config/robot-nav/orangepi-camera.env
+ExecStart=/bin/bash %h/nav/hardware/orangepi/run_camera.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target

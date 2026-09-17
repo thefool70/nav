@@ -37,6 +37,8 @@ class L515Capture:
 class L515Camera:
     """启动 L515，并返回对齐到 RGB 像素坐标的深度图。"""
 
+    device_label = "L515"
+
     def __init__(self, config: L515Config) -> None:
         _validate_config(config)
         try:
@@ -44,7 +46,7 @@ class L515Camera:
             self._np = importlib.import_module("numpy")
         except ImportError as exc:
             raise ImportError(
-                "L515Camera 需要 pyrealsense2 和 numpy"
+                f"{self.device_label} 采集需要 pyrealsense2 和 numpy"
             ) from exc
 
         self.config = config
@@ -88,7 +90,7 @@ class L515Camera:
             profile.get_device().first_depth_sensor().get_depth_scale()
         )
         if not math.isfinite(depth_scale) or depth_scale <= 0.0:
-            raise RuntimeError("L515 返回了无效的 depth_scale")
+            raise RuntimeError(f"{self.device_label} 返回了无效的 depth_scale")
         self._depth_scale_m = depth_scale
         depth_profile = profile.get_stream(rs.stream.depth)
         color_profile = profile.get_stream(rs.stream.color)
@@ -106,7 +108,7 @@ class L515Camera:
         """返回把深度/IMU方向转到彩色光学坐标系的按行展开矩阵。"""
         rotation = self._depth_to_color_rotation
         if rotation is None:
-            raise RuntimeError("L515Camera 已关闭")
+            raise RuntimeError(f"{self.device_label} 相机已关闭")
         return rotation
 
     def capture(self) -> L515Capture:
@@ -117,19 +119,19 @@ class L515Camera:
             frames = pipeline.wait_for_frames(timeout_ms)
             aligned = self._align.process(frames)
         except Exception as exc:
-            raise RuntimeError(f"L515 等待 RGB-D 帧失败：{exc}") from exc
+            raise RuntimeError(f"{self.device_label} 等待 RGB-D 帧失败：{exc}") from exc
 
         color_frame = aligned.get_color_frame()
         depth_frame = aligned.get_depth_frame()
         if not color_frame or not depth_frame:
-            raise RuntimeError("L515 对齐结果缺少 RGB 或深度帧")
+            raise RuntimeError(f"{self.device_label} 对齐结果缺少 RGB 或深度帧")
 
         rgb = self._np.asanyarray(color_frame.get_data())
         raw_depth = self._np.asanyarray(depth_frame.get_data())
         if rgb.ndim != 3 or rgb.shape[2] < 3:
-            raise RuntimeError("L515 RGB 帧不是 H×W×3 图像")
+            raise RuntimeError(f"{self.device_label} RGB 帧不是 H×W×3 图像")
         if raw_depth.ndim != 2 or raw_depth.shape != rgb.shape[:2]:
-            raise RuntimeError("L515 对齐后的 RGB 与深度尺寸不一致")
+            raise RuntimeError(f"{self.device_label} 对齐后的 RGB 与深度尺寸不一致")
 
         rgb_copy = rgb[:, :, :3].astype(self._np.uint8, copy=True)
         depth_m = raw_depth.astype(self._np.float32) * self._depth_scale_m
@@ -168,7 +170,7 @@ class L515Camera:
 
     def _require_open(self) -> Any:
         if self._pipeline is None or not self._started or self._align is None:
-            raise RuntimeError("L515Camera 已关闭")
+            raise RuntimeError(f"{self.device_label} 相机已关闭")
         return self._pipeline
 
 

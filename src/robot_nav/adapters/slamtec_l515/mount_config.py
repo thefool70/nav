@@ -1,4 +1,4 @@
-"""保存和读取 Hermes 与 L515 的完整安装外参。"""
+"""保存和读取 Hermes 与 D435i 的完整安装外参。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from ...core.models import CameraExtrinsics
 
 
 PathLike = Union[str, Path]
-DEFAULT_CAMERA_EXTRINSICS_PATH = Path("data/slamtec_l515/extrinsics.json")
+DEFAULT_CAMERA_EXTRINSICS_PATH = Path("data/hermes_d435i/extrinsics.json")
 
 
 def load_camera_extrinsics(path: PathLike) -> CameraExtrinsics:
@@ -48,14 +48,16 @@ def save_camera_extrinsics(
     path: PathLike,
     extrinsics: CameraExtrinsics,
     diagnostics: Mapping[str, Any],
+    *,
+    device: str = "Intel RealSense D435i on SLAMTEC Hermes 48V",
 ) -> Path:
-    """原子写入 Hermes/L515 外参与精简质量指标。"""
+    """原子写入 Hermes 相机外参与精简质量指标，默认使用 D435i 设备标识。"""
     _validate_extrinsics(extrinsics)
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
-        "device": "Intel RealSense L515 on SLAMTEC Hermes 48V",
+        "device": device,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "coordinate_convention": {
             "translation": "robot forward / left / up, metres",

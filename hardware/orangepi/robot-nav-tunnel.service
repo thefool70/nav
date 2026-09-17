@@ -1,0 +1,15 @@
+[Unit]
+Description=Robot navigation SSH data tunnels to Orange Pi
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/nav
+Environment=ROBOT_NAV_SSH_BATCH_MODE=1
+EnvironmentFile=-%h/.config/robot-nav/orangepi-tunnel.env
+ExecStart=/bin/bash %h/nav/hardware/orangepi/tunnel.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -26,7 +26,9 @@ from .adapters.perception import (
 from .adapters.random_observer import RandomScoreTargetObserver
 from .adapters.queued_semantics import QueuedSemanticObserver
 from .adapters.object_localizer import ObjectLocalizerConfig
+from .adapters.orangepi import OrangePiAdapter, OrangePiConfig
 from .adapters.realsense import L515Config
+from .adapters.realsense.d435i_camera import D435iConfig
 from .adapters.s100_l515 import (
     CameraMount,
     DEFAULT_CAMERA_MOUNT_PATH,
@@ -115,10 +117,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("外参标定会移动真机，必须显式提供 --enable-motion")
         return _run_s100_l515_calibration(args)
 
-    if args.adapter == "calibrate-slamtec-l515":
+    if args.adapter in ("calibrate-slamtec-l515", "calibrate-slamtec-d435i"):
         if not args.enable_motion:
             parser.error("外参标定会移动真机，必须显式提供 --enable-motion")
         return _run_slamtec_l515_calibration(args)
+
+    if args.adapter == "calibrate-orangepi":
+        if not args.enable_motion:
+            parser.error("D435i 外参标定会移动真机，必须显式提供 --enable-motion")
+        return _run_orangepi_calibration(args)
 
     if args.adapter == "s100-l515":
         calibration_path = Path(args.camera_calibration)
@@ -139,7 +146,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error(MISSING_VLM_CREDENTIAL)
         return _run_s100_l515(args, api_key)
 
-    if args.adapter == "slamtec-l515":
+    if args.adapter in ("slamtec-l515", "slamtec-d435i", "orangepi"):
         if args.base_only and not args.preflight_only:
             parser.error("--base-only 只用于 --preflight-only，不可启动导航")
         calibration_path = Path(args.camera_calibration)
@@ -149,11 +156,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             and not calibration_path.is_file()
         ):
             parser.error(
-                "缺少相机外参：先运行 calibrate-slamtec-l515，"
-                "或至少提供 --camera-height-m"
+                "缺少本套设备的相机外参：提供 --camera-calibration，"
+                "或至少提供 --camera-height-m；D435i 不可沿用 L515 安装外参"
             )
         if not args.preflight_only and not args.target:
-            parser.error("slamtec-l515 导航模式必须提供 --target")
+            parser.error(f"{args.adapter} 导航模式必须提供 --target")
         if not args.preflight_only and not args.enable_motion:
             parser.error("真机导航必须显式提供 --enable-motion")
         if (
@@ -252,7 +259,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     slamtec = adapters.add_parser(
-        "slamtec-l515", help="使用 SLAMTEC Hermes 与外接 RealSense L515"
+        "slamtec-d435i", aliases=["slamtec-l515"], help="使用 SLAMTEC Hermes 与本机 RealSense D435i"
     )
     _add_navigation_arguments(slamtec, target_required=False)
     slamtec.add_argument(
@@ -262,7 +269,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     slamtec.add_argument(
         "--camera-serial",
-        help="有多台 RealSense 时指定 L515 序列号",
+        help="有多台 RealSense 时指定 D435i 序列号",
     )
     slamtec.add_argument(
         "--camera-calibration",
@@ -272,7 +279,7 @@ def _build_parser() -> argparse.ArgumentParser:
     slamtec.add_argument(
         "--camera-height-m",
         type=_positive_float,
-        help="覆盖标定文件中的 L515 光心高度（米）",
+        help="覆盖标定文件中的 D435i 光心高度（米）",
     )
     slamtec.add_argument(
         "--camera-forward-m",
@@ -333,7 +340,7 @@ def _build_parser() -> argparse.ArgumentParser:
     slamtec.add_argument(
         "--base-only",
         action="store_true",
-        help="L515 未连接时只预检 Hermes 位姿、地图与 Action",
+        help="D435i 未连接时只预检 Hermes 位姿、地图与 Action",
     )
     slamtec.add_argument(
         "--preflight-only",
@@ -345,6 +352,26 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="明确允许真机创建运动 Action",
     )
+
+    orangepi = adapters.add_parser("orangepi", help="经香橙派转发连接 Hermes 与 D435i，算法和控制在开发机")
+    _add_navigation_arguments(orangepi, target_required=False)
+    orangepi.add_argument("--base-url", default="http://127.0.0.1:11448", help="SSH 转发后的 Hermes REST 地址")
+    orangepi.add_argument("--camera-url", default="http://127.0.0.1:18765", help="SSH 转发后的 D435i 数据地址")
+    orangepi.add_argument("--camera-request-timeout-s", type=_positive_float, default=5.0)
+    orangepi.add_argument("--camera-max-roundtrip-s", type=_positive_float, default=3.0,
+                          help="相机帧允许的最大请求往返时间，超过即拒绝该帧")
+    orangepi.add_argument("--camera-calibration", default="data/orangepi_d435i/extrinsics.json",
+                          help="D435i 在 Hermes 上的安装外参文件，保存在开发机")
+    for name in ("height-m", "forward-m", "left-m", "yaw-deg", "pitch-down-deg", "roll-deg"):
+        orangepi.add_argument("--camera-" + name, type=_positive_float if name == "height-m" else _finite_float)
+    orangepi.add_argument("--action-timeout-s", type=_positive_float, default=120.0)
+    orangepi.add_argument("--action-stall-timeout-s", type=_positive_float, default=8.0)
+    orangepi.add_argument("--max-unknown-path-m", type=_non_negative_float, default=1.5)
+    orangepi.add_argument("--min-localization-quality", type=_localization_quality, default=1)
+    orangepi.add_argument("--run-log", help="开发机上的导航 JSONL 日志路径")
+    orangepi.add_argument("--preflight-only", action="store_true", help="只读取远程相机及 Hermes 数据，不发送运动命令")
+    orangepi.add_argument("--enable-motion", action="store_true", help="允许开发机向 Hermes 发送运动命令")
+    orangepi.set_defaults(base_only=False, camera_serial=None)
 
     calibration = adapters.add_parser(
         "calibrate-s100-l515",
@@ -375,8 +402,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     slamtec_calibration = adapters.add_parser(
-        "calibrate-slamtec-l515",
-        help="利用 L515 IMU/RGB-D 和 Hermes 位姿标定安装外参",
+        "calibrate-slamtec-d435i", aliases=["calibrate-slamtec-l515"],
+        help="利用本机 D435i IMU/RGB-D 和 Hermes 位姿标定安装外参",
     )
     slamtec_calibration.add_argument(
         "--base-url",
@@ -385,7 +412,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     slamtec_calibration.add_argument(
         "--camera-serial",
-        help="有多台 RealSense 时指定 L515 序列号",
+        help="有多台 RealSense 时指定 D435i 序列号",
     )
     slamtec_calibration.add_argument(
         "--output",
@@ -421,6 +448,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="确认场地清空并允许标定程序移动真机",
     )
+    remote_calibration = adapters.add_parser("calibrate-orangepi", help="用远程 D435i IMU/RGB-D 与 Hermes 位姿自动标定")
+    remote_calibration.add_argument("--base-url", default="http://127.0.0.1:11448")
+    remote_calibration.add_argument("--camera-url", default="http://127.0.0.1:18765")
+    remote_calibration.add_argument("--output", type=Path, default=Path("data/orangepi_d435i/extrinsics.json"))
+    remote_calibration.add_argument("--turn-angle-deg", type=_positive_float, default=30.0)
+    remote_calibration.add_argument("--drive-distance-m", type=_positive_float, default=0.20)
+    remote_calibration.add_argument("--action-timeout-s", type=_positive_float, default=120.0)
+    remote_calibration.add_argument("--min-localization-quality", type=_localization_quality, default=1)
+    remote_calibration.add_argument("--camera-request-timeout-s", type=_positive_float, default=5.0)
+    remote_calibration.add_argument("--camera-max-roundtrip-s", type=_positive_float, default=3.0)
+    remote_calibration.add_argument("--enable-motion", action="store_true", help="明确允许左右转向和短距离平移")
     return parser
 
 
@@ -578,7 +616,7 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
 
 
 def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
-    """组装 Hermes/L515 Adapter，共用物体定位与导航队列。"""
+    """在开发机组装 Hermes 本地或无线 Adapter，共用导航、日志与运动规则。"""
     run_logger = _build_slamtec_run_logger(args)
     return_code = 1
     error_message = None
@@ -607,25 +645,35 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
                 observer,
                 TargetSearchGoal(args.target, SearchMode(args.search_mode)),
             )
-        config = SlamtecL515Config(
+        remote = args.adapter == "orangepi"
+        config_type = OrangePiConfig if remote else SlamtecL515Config
+        remote_options = ({
+            "camera_url": args.camera_url,
+            "camera_request_timeout_s": args.camera_request_timeout_s,
+            "camera_max_roundtrip_s": args.camera_max_roundtrip_s,
+        } if remote else {})
+        config = config_type(
             base_url=args.base_url,
             camera=(
                 None
                 if args.base_only
-                else L515Config(serial_number=args.camera_serial)
+                else (D435iConfig(wait_timeout_s=args.camera_request_timeout_s)
+                      if remote else D435iConfig(serial_number=args.camera_serial))
             ),
             camera_extrinsics_in_robot=_slamtec_extrinsics_from_args(args),
             action_timeout_s=args.action_timeout_s,
             action_stall_timeout_s=args.action_stall_timeout_s,
             max_unknown_path_m=args.max_unknown_path_m,
             minimum_localization_quality=args.min_localization_quality,
+            **remote_options,
         )
         action_progress = (
             print
             if run_logger is None
             else _action_progress_callback(run_logger)
         )
-        with SlamtecL515Adapter(
+        adapter_type = OrangePiAdapter if remote else SlamtecL515Adapter
+        with adapter_type(
             config,
             on_motion_frame=on_motion_frame,
             on_continuous_frame=on_continuous_frame,
@@ -640,7 +688,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
                 height = len(frame.obstacle_map.occupancy)
                 width = len(frame.obstacle_map.occupancy[0]) if height else 0
                 print(
-                    "Hermes/L515 预检读取完成："
+                    f"{'Hermes/OrangePi/D435i' if remote else 'Hermes/D435i'} 预检读取完成："
                     f"model={info.get('modelName', 'unknown')}，"
                     f"firmware={info.get('softwareVersion', 'unknown')}，"
                     f"pose=({frame.pose.x_m:.2f}, {frame.pose.y_m:.2f}, "
@@ -716,6 +764,8 @@ def _build_slamtec_run_logger(
         max_cycles=args.max_cycles,
         configuration={
             "base_url": args.base_url,
+            "camera_url": getattr(args, "camera_url", None),
+            "camera_max_roundtrip_s": getattr(args, "camera_max_roundtrip_s", None),
             "search_mode": args.search_mode,
             "debug_random_score": args.debug_random_score,
             "debug_frontier": args.debug_frontier,
@@ -788,7 +838,7 @@ def _run_s100_l515_calibration(args: argparse.Namespace) -> int:
 
 
 def _run_slamtec_l515_calibration(args: argparse.Namespace) -> int:
-    """执行 Hermes Action 与 L515 的独立外参标定。"""
+    """执行 Hermes Action 与 D435i 的独立外参标定。"""
     from .adapters.slamtec_l515.calibration import (
         CameraCalibrationConfig,
         calibrate_slamtec_l515,
@@ -801,7 +851,7 @@ def _run_slamtec_l515_calibration(args: argparse.Namespace) -> int:
     try:
         result = calibrate_slamtec_l515(
             base_url=args.base_url,
-            camera_config=L515Config(serial_number=args.camera_serial),
+            camera_config=D435iConfig(serial_number=args.camera_serial),
             calibration_config=CameraCalibrationConfig(
                 turn_angle_rad=math.radians(args.turn_angle_deg),
                 drive_distance_m=args.drive_distance_m,
@@ -813,7 +863,7 @@ def _run_slamtec_l515_calibration(args: argparse.Namespace) -> int:
         )
         extrinsics = load_camera_extrinsics(result.output_path)
     except (ImportError, RuntimeError, ValueError) as exc:
-        print(f"Hermes/L515 外参标定失败：{exc}")
+        print(f"Hermes/D435i 外参标定失败：{exc}")
         return 1
 
     print(
@@ -829,6 +879,29 @@ def _run_slamtec_l515_calibration(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_orangepi_calibration(args: argparse.Namespace) -> int:
+    """仅启动自动标定，不进入导航，不执行导航的启动前移 1 m。"""
+    from .adapters.orangepi.calibration import calibrate_orangepi
+
+    print(f"D435i 标定：左右转向 {args.turn_angle_deg:g}°，向前移动 {args.drive_distance_m:.2f} m。"
+          "请先停止其他导航进程，清空运动区域并准备独立急停。")
+    try:
+        result = calibrate_orangepi(
+            base_url=args.base_url, camera_url=args.camera_url, output_path=args.output,
+            turn_angle_deg=args.turn_angle_deg, drive_distance_m=args.drive_distance_m,
+            action_timeout_s=args.action_timeout_s, minimum_localization_quality=args.min_localization_quality,
+            camera_request_timeout_s=args.camera_request_timeout_s,
+            camera_max_roundtrip_s=args.camera_max_roundtrip_s,
+        )
+        extrinsics = load_camera_extrinsics(result.output_path)
+    except (ImportError, RuntimeError, ValueError, OSError) as exc:
+        print(f"Hermes/D435i 外参标定失败：{exc}")
+        return 1
+    print(f"标定结果：height={extrinsics.height_m:.3f} m，forward={extrinsics.forward_m:.3f} m，"
+          f"left={extrinsics.left_m:.3f} m，yaw={math.degrees(extrinsics.yaw_rad):.2f}°，"
+          f"pitch-down={math.degrees(extrinsics.pitch_down_rad):.2f}°，"
+          f"roll={math.degrees(extrinsics.roll_rad):.2f}°，residual={result.extrinsic_residual_m:.3f} m")
+    return 0
 
 
 def _camera_mount_from_args(args: argparse.Namespace) -> CameraMount:

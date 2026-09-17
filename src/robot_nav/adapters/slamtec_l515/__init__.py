@@ -1,4 +1,4 @@
-"""SLAMTEC Hermes 与外接 RealSense L515 真实设备环境。"""
+"""SLAMTEC Hermes 与外接 RealSense D435i 真实设备环境。"""
 
 from .adapter import SlamtecL515Adapter, SlamtecL515Config
 from .mount_config import (

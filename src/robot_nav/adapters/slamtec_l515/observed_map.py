@@ -1,9 +1,9 @@
-"""用 L515 理论水平 FOV 筛选 Hermes 地图，再膨胀禁行区域。"""
+"""仅在 RGB-D 相机当前理论水平 FOV 内刷新 Hermes 地图，视场外保留历史占用值。"""
 
 from __future__ import annotations
 
 import math
-from typing import Optional, Set, Tuple
+from typing import Dict, Mapping, Optional, Set, Tuple
 
 from ...core.geometry import (
     grid_cell_center_to_world,
@@ -24,7 +24,7 @@ MAX_FOV_DISTANCE_M = 5.0
 
 
 class L515ObservedMap:
-    """累计理论 FOV 与出生点地图格，并输出膨胀有效图。"""
+    """缓存原始占用值与膨胀结果，两者只在允许更新的区域内写入。"""
 
     def __init__(
         self,
@@ -50,8 +50,11 @@ class L515ObservedMap:
         self._start_area_radius_m = float(start_area_radius_m)
         self._anchor: Optional[Pose2D] = None
         self._resolution_m: Optional[float] = None
+        self._frame_id: Optional[str] = None
         self._start_world_xy: Optional[Tuple[float, float]] = None
-        self._seen_world_keys: Set[WorldGridKey] = set()
+        # 原始值独立保存，避免下一帧把上次膨胀的格子再当成真实障碍。
+        self._raw_occupancy: Dict[WorldGridKey, Optional[float]] = {}
+        self._inflated_occupancy: Dict[WorldGridKey, Optional[float]] = {}
 
     def update(
         self,
@@ -60,11 +63,8 @@ class L515ObservedMap:
         capture: L515Capture,
         camera_extrinsics: CameraExtrinsics,
     ) -> ObstacleMap:
-        """累计当前可见格，并返回未见为 None 的膨胀占用图。"""
+        """更新当前 FOV 中的占用值，其余区域输出缓存；从未观察的格子为 None。"""
         self._prepare_map_geometry(source)
-        if self._start_world_xy is None:
-            self._start_world_xy = (float(robot_pose.x_m), float(robot_pose.y_m))
-
         visible_cells = _cells_in_camera_fov(
             source,
             robot_pose,
@@ -72,40 +72,49 @@ class L515ObservedMap:
             camera_extrinsics,
             self._max_fov_distance_m,
         )
-        # 每帧重算，确保 Hermes 扩图后仍补入出生点附近的新格。
-        visible_cells.update(
-            _cells_in_world_radius(
-                self._start_world_xy,
-                self._start_area_radius_m,
-                source,
+        # 启动区域只初始化一次，之后也必须进入当前 FOV 才能刷新。
+        if self._start_world_xy is None:
+            self._start_world_xy = (float(robot_pose.x_m), float(robot_pose.y_m))
+            visible_cells.update(
+                _cells_in_world_radius(
+                    self._start_world_xy,
+                    self._start_area_radius_m,
+                    source,
+                )
             )
-        )
-        for cell in visible_cells:
-            self._seen_world_keys.add(self._cell_to_world_key(cell, source))
+        update_keys = {
+            cell: self._cell_to_world_key(cell, source)
+            for cell in visible_cells
+        }
+        for (row, col), key in update_keys.items():
+            self._raw_occupancy[key] = source.occupancy[row][col]
 
-        occupancy = [[None for _ in row] for row in source.occupancy]
-        for row, col in self._seen_cells_in(source):
-            occupancy[row][col] = source.occupancy[row][col]
+        occupancy = self._cached_occupancy_in(source, self._raw_occupancy)
         _inflate_obstacles(
             occupancy,
             source.resolution_m,
             self._inflation_radius_m,
         )
+        # 膨胀可以参考邻近的历史障碍，但结果只写回本帧更新区域。
+        # 不能让视野内新障碍把视野外的未知格或历史自由格一并刷新。
+        for (row, col), key in update_keys.items():
+            self._inflated_occupancy[key] = occupancy[row][col]
         return ObstacleMap(
-            occupancy=tuple(tuple(row) for row in occupancy),
+            occupancy=tuple(tuple(row) for row in self._cached_occupancy_in(source, self._inflated_occupancy)),
             resolution_m=source.resolution_m,
             origin=source.origin,
             frame_id=source.frame_id,
         )
 
     def _prepare_map_geometry(self, obstacle_map: ObstacleMap) -> None:
-        """地图分辨率或方向变化时清空不再兼容的累计可见格。"""
+        """坐标系、分辨率或方向变化时清空缓存；平移原点扩图时按世界位置复用。"""
         resolution = float(obstacle_map.resolution_m)
         yaw = float(obstacle_map.origin.yaw_rad)
         geometry_changed = (
             self._resolution_m is not None
             and (
-                not math.isclose(resolution, self._resolution_m, abs_tol=1e-9)
+                obstacle_map.frame_id != self._frame_id
+                or not math.isclose(resolution, self._resolution_m, abs_tol=1e-9)
                 or self._anchor is None
                 or not math.isclose(
                     yaw, float(self._anchor.yaw_rad), abs_tol=1e-9
@@ -115,7 +124,10 @@ class L515ObservedMap:
         if self._anchor is None or geometry_changed:
             self._anchor = obstacle_map.origin
             self._resolution_m = resolution
-            self._seen_world_keys.clear()
+            self._frame_id = obstacle_map.frame_id
+            self._start_world_xy = None
+            self._raw_occupancy.clear()
+            self._inflated_occupancy.clear()
 
     def _cell_to_world_key(
         self, cell: Cell, obstacle_map: ObstacleMap
@@ -137,14 +149,18 @@ class L515ObservedMap:
             _nearest_int(local_x / resolution),
         )
 
-    def _seen_cells_in(self, obstacle_map: ObstacleMap) -> Set[Cell]:
-        """把累计世界格网投回 Hermes 当前可能扩展过的地图数组。"""
+    def _cached_occupancy_in(
+        self,
+        obstacle_map: ObstacleMap,
+        values: Mapping[WorldGridKey, Optional[float]],
+    ) -> list:
+        """把缓存占用值投回当前地图数组，不读取视场外的底盘新值。"""
         anchor = self._require_anchor()
         resolution = self._require_resolution()
         cosine = math.cos(anchor.yaw_rad)
         sine = math.sin(anchor.yaw_rad)
-        cells = set()
-        for key_row, key_col in self._seen_world_keys:
+        occupancy = [[None for _ in row] for row in obstacle_map.occupancy]
+        for (key_row, key_col), value in values.items():
             local_x = key_col * resolution
             local_y = key_row * resolution
             world_xy = (
@@ -153,8 +169,8 @@ class L515ObservedMap:
             )
             cell = world_to_nearest_grid_cell(world_xy, obstacle_map)
             if _cell_in_map(cell, obstacle_map):
-                cells.add(cell)
-        return cells
+                occupancy[cell[0]][cell[1]] = value
+        return occupancy
 
     def _require_anchor(self) -> Pose2D:
         if self._anchor is None:

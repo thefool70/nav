@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, List, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from ....core.models import Pose2D
 from ..l515_camera import L515Capture
@@ -41,13 +41,17 @@ class MotionPair:
 
 
 def require_visual_features(capture: L515Capture, cv2: Any) -> None:
-    """在底盘移动前拒绝明显缺少纹理的场景。"""
+    """运动前检查纹理是否同时具有后续 PnP 可用的深度，避免远景特征误通过。"""
     gray = cv2.cvtColor(capture.rgb, cv2.COLOR_RGB2GRAY)
     keypoints = cv2.ORB_create(nfeatures=_ORB_FEATURE_COUNT).detect(gray, None)
-    if len(keypoints) < _MIN_PNP_POINTS * 2:
+    supported = sum(_usable_depth(capture, point.pt) is not None for point in keypoints)
+    if supported < _MIN_PNP_POINTS * 2:
         raise RuntimeError(
-            "当前画面纹理不足，无法进行 RGB-D 运动标定："
-            f"仅检测到 {len(keypoints)} 个特征点"
+            "当前画面缺少带有效深度的纹理，尚未开始标定运动："
+            f"RGB 特征点 {len(keypoints)} 个，其中深度位于 "
+            f"{_DEPTH_RANGE_M[0]:g}–{_DEPTH_RANGE_M[1]:g} m 的仅 "
+            f"{supported}/{_MIN_PNP_POINTS * 2} 个；"
+            "请让有纹理的静止物体位于前方约 1–3 m，避开大面积反光地面和强逆光。"
         )
 
 
@@ -125,7 +129,11 @@ def _estimate_camera_motion(
     if len(object_points) < _MIN_PNP_POINTS:
         raise RuntimeError(
             "有效 RGB-D 对应点不足："
-            f"{len(object_points)}/{_MIN_PNP_POINTS}"
+            f"{len(object_points)}/{_MIN_PNP_POINTS}；"
+            f"两帧 RGB 特征 {len(source_points)}/{len(target_points)}，"
+            f"通过图像匹配 {len(matches)} 对，"
+            f"其中源帧深度满足 {_DEPTH_RANGE_M[0]:g}–{_DEPTH_RANGE_M[1]:g} m 的 "
+            f"{len(object_points)} 对"
         )
 
     object_array = np.asarray(object_points, dtype=np.float32)
@@ -194,23 +202,11 @@ def _rgbd_correspondences(
 ) -> Tuple[List[Tuple[float, float, float]], List[Tuple[float, float]]]:
     object_points = []
     image_points = []
-    depth = source.depth_m
     intrinsics = source.camera_intrinsics
     for match in matches:
         source_pixel = source_points[match.queryIdx].pt
-        col = int(round(source_pixel[0]))
-        row = int(round(source_pixel[1]))
-        if (
-            row < 0
-            or row >= depth.shape[0]
-            or col < 0
-            or col >= depth.shape[1]
-        ):
-            continue
-        z = float(depth[row, col])
-        if not math.isfinite(z) or not (
-            _DEPTH_RANGE_M[0] <= z <= _DEPTH_RANGE_M[1]
-        ):
+        z = _usable_depth(source, source_pixel)
+        if z is None:
             continue
         object_points.append(
             (
@@ -221,6 +217,18 @@ def _rgbd_correspondences(
         )
         image_points.append(target_points[match.trainIdx].pt)
     return object_points, image_points
+
+
+def _usable_depth(capture: L515Capture, pixel: Tuple[float, float]) -> Optional[float]:
+    """前置检查与匹配使用同一像素取深度规则和米制范围。"""
+    col, row = int(round(pixel[0])), int(round(pixel[1]))
+    depth = capture.depth_m
+    if not (0 <= row < depth.shape[0] and 0 <= col < depth.shape[1]):
+        return None
+    value = float(depth[row, col])
+    if math.isfinite(value) and _DEPTH_RANGE_M[0] <= value <= _DEPTH_RANGE_M[1]:
+        return value
+    return None
 
 
 def _camera_matrix(intrinsics: Any, np: Any) -> Any:

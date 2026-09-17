@@ -18,5 +18,6 @@ weights/
 /slamtech/
 /wheeltech/
 
-hardware/realsense/.rsusb/
+hardware/realsense/.rsusb
+hardware/realsense/.rsusb-*/
 slam/s100_l515/.rsusb/
