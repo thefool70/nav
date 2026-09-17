@@ -28,6 +28,7 @@ from ..core.models import (
     TargetObservation,
 )
 from .vlm_trace import VlmTraceHistory, context_text, job_path, request_path
+from .semantic_world import SemanticWorldNodes
 
 
 UNKNOWN_RGB = (90, 90, 90)
@@ -127,6 +128,8 @@ class RerunVisualizer:
         self._last_result: Optional[NavigationResult] = None
         self._last_frame: Optional[NavigationFrame] = None
         self._vlm_trace = VlmTraceHistory()
+        self._world_nodes = SemanticWorldNodes(rr, self._log)
+        self._object_progress = None
         self._panel_font = _load_panel_font()
         if self._panel_font is None:
             _print_font_notice_once()
@@ -214,6 +217,9 @@ class RerunVisualizer:
         self._begin_sample()
         self._last_frame = frame
         self._last_result = result
+        self._object_progress = None
+        self._world_nodes.set_map(frame.obstacle_map.frame_id)
+        self._world_nodes.record_cycle(result)
         self._vlm_trace.record_cycle(result, self._sample_index)
         updated_jobs = {
             item["job_id"] for name in ("semantic_received_jobs", "semantic_score_sources")
@@ -234,7 +240,6 @@ class RerunVisualizer:
         self._log_motion_status(frame, result)
         self._log_status(frame, observation, result)
         self._log_vlm_overview()
-        self._log_vlm_world()
 
     def log_motion_frame(self, frame: NavigationFrame) -> None:
         """记录 Adapter 执行动作后的传感器帧，不推进算法状态。"""
@@ -244,13 +249,13 @@ class RerunVisualizer:
     def _log_motion_frame(self, frame: NavigationFrame) -> None:
         self._begin_sample()
         self._last_frame = frame
+        self._world_nodes.set_map(frame.obstacle_map.frame_id)
         self._log_rgb(frame, None)
         self._log_depth(frame)
         self._log_occupancy_map(frame)
         self._log_robot_pose(frame)
         if self._last_result is not None:
             self._log_motion_status(frame, self._last_result)
-        self._log_vlm_world()
 
     def log_motion_plan(
         self,
@@ -421,13 +426,13 @@ class RerunVisualizer:
     ) -> None:
         self._begin_sample()
         self._vlm_trace.record_interaction(interaction, self._sample_index)
+        self._world_nodes.record_interaction(interaction)
         self._log_vlm_card(interaction, "model/interaction", request_path(interaction.interaction_id))
         self._log(request_path(interaction.interaction_id) + "/text", self._rr.TextDocument(
             _vlm_card_text(interaction), media_type="text/plain",
         ))
         self._log_vlm_overview()
         if interaction.phase == "response":
-            self._log_vlm_world()
             if self._last_frame is not None and self._last_result is not None:
                 self._log_motion_status(self._last_frame, self._last_result)
 
@@ -447,8 +452,17 @@ class RerunVisualizer:
         with self._log_lock:
             self._begin_sample()
             self._vlm_trace.record_queue_event(event, self._sample_index)
+            self._world_nodes.record_queue_event(event)
+            if event["event"].startswith("object_"):
+                previous = self._object_progress if event["event"] == "object_localized" else None
+                self._object_progress = {**(previous or {}), **event}
+                if event["event"] == "object_localized":
+                    self._object_progress["stage"] = "finished"
+                self._log_object_progress()
             job_id = event.get("job_id")
-            job_ids = (job_id,) if job_id is not None else event.get("job_ids", ())
+            job_ids = () if event["event"].startswith("object_") else (
+                (job_id,) if job_id is not None else event.get("job_ids", ())
+            )
             for key in job_ids:
                 self._log_vlm_job(key)
             self._log_vlm_overview()
@@ -459,65 +473,44 @@ class RerunVisualizer:
         ))
 
     def _log_vlm_overview(self) -> None:
+        self._world_nodes.refresh_panels(self._panel_font)
         self._log("model/vlm/summary", self._rr.TextDocument(
             self._vlm_trace.overview(), media_type="text/markdown",
         ))
 
-    def _log_vlm_world(self) -> None:
-        """只显示最近返回请求的来源，保持旧输入快照与实时导航点的区别。"""
-        latest = self._vlm_trace.latest_response
-        frame = self._last_frame
-        if latest is None or frame is None:
-            return
-        views = latest["context"].get("views", ())
-        if not views or any(view["map_frame_id"] != frame.obstacle_map.frame_id for view in views):
-            self._log("world/vlm", self._rr.Clear(recursive=True))
-            return
-        positions = [_world_to_view_point((view["pose"]["x_m"], view["pose"]["y_m"])) for view in views]
-        labels = [f"R{latest['request_id']}/V{view['view_id']}" for view in views]
-        self._log("world/vlm/captures", self._rr.Points2D(
-            positions, colors=[VLM_CAPTURE_RGB] * len(positions), radii=0.09, labels=labels, show_labels=False,
+    def _log_object_progress(self) -> None:
+        """在阻塞推理开始前及期间更新状态，不沿用上一条运动命令。"""
+        event = self._object_progress
+        phase = event.get("phase", "localizing_object")
+        model = event.get("model", event.get("target_source", "YOLO / VLM"))
+        stage = event.get("stage", "finished" if event["event"] == "object_localized" else "starting")
+        lines = [
+            f"target: {self._target_text}",
+            f"phase: {phase} | robot paused for perception",
+            f"clue: {event.get('clue_id', '-')}",
+            f"input: {event.get('source', '-')}",
+            f"model: {model} / {stage}",
+            f"elapsed: {event.get('elapsed_s', 0.0):.1f}s",
+        ]
+        pose = event.get("robot_pose")
+        if pose is not None:
+            lines.append(f"robot pose: ({pose['x_m']:.2f}, {pose['y_m']:.2f}) m")
+        if event.get("localization_map") is not None:
+            lines.append(f"localization map: {event['localization_map']}")
+        if event.get("localization_method") == "obstacle_assumption":
+            lines.append("position basis: first obstacle on image ray (assumption)")
+        text = "\n".join(lines)
+        self._log("navigation/motion", self._rr.TextDocument(text))
+        self._log("navigation/live", self._rr.TextDocument(
+            f"**{phase}** | {event.get('clue_id', '-')}\n\n"
+            f"{model}: {stage} / {event.get('elapsed_s', 0.0):.1f}s | robot paused",
+            media_type="text/markdown",
         ))
-        self._log("world/vlm/headings", self._rr.Arrows2D(
-            origins=positions,
-            vectors=[_world_yaw_to_view_vector(view.get("heading_world_rad", view["pose"]["yaw_rad"]), 0.55) for view in views],
-            colors=[VLM_CAPTURE_RGB] * len(positions), radii=0.016, show_labels=False,
-        ))
-        markers = latest["context"].get("markers", ())
-        if markers:
-            marker_positions = [_world_to_view_point(item["world_xy"]) for item in markers]
-            self._log("world/vlm/frontiers", self._rr.Points2D(
-                marker_positions, colors=[VLM_SNAPSHOT_RGB] * len(markers), radii=0.025,
-                labels=[f"R{latest['request_id']}/{item['label']} {item['region_id']}" for item in markers], show_labels=False,
-            ))
-            outlines = [[(x - 0.12, y - 0.12), (x + 0.12, y - 0.12), (x + 0.12, y + 0.12),
-                         (x - 0.12, y + 0.12), (x - 0.12, y - 0.12)] for x, y in marker_positions]
-            self._log("world/vlm/frontier_outlines", self._rr.LineStrips2D(
-                outlines, colors=[VLM_SNAPSHOT_RGB] * len(markers), radii=0.014,
-            ))
+        self._log("navigation/status_text", self._rr.TextDocument(text))
+        if self._panel_font is None:
+            self._log("navigation/status", self._rr.TextDocument(text))
         else:
-            self._clear("world/vlm/frontiers")
-            self._clear("world/vlm/frontier_outlines")
-        target_views = latest["result"].get("target_view_ids") or ()
-        target_view = target_views[0] if target_views else None
-        reference = next((view for view in views if view["view_id"] == target_view), views[-1])
-        start = _world_to_view_point((frame.pose.x_m, frame.pose.y_m))
-        end = _world_to_view_point((reference["pose"]["x_m"], reference["pose"]["y_m"]))
-        dx, dy = end[0] - start[0], end[1] - start[1]
-        distance = math.hypot(dx, dy)
-        if distance <= 0.10:
-            self._clear("world/vlm/capture_link")
-            return
-        strips = []
-        offset = 0.0
-        while offset < distance:
-            stop = min(distance, offset + 0.12)
-            strips.append([(start[0] + dx * offset / distance, start[1] + dy * offset / distance),
-                           (start[0] + dx * stop / distance, start[1] + dy * stop / distance)])
-            offset += 0.24
-        self._log("world/vlm/capture_link", self._rr.LineStrips2D(
-            strips, colors=[VLM_CAPTURE_RGB] * len(strips), radii=0.009,
-        ))
+            self._log("navigation/status", self._rr.Image(_render_status_image(self._panel_font, lines)))
 
     def _begin_sample(self) -> None:
         """决策、运动与模型事件共享递增时间轴，迟到结果不能写回旧帧。"""
@@ -654,10 +647,25 @@ class RerunVisualizer:
         occupancy = frame.obstacle_map.occupancy
         if len(occupancy) == 0 or len(occupancy[0]) == 0:
             self._log("map/occupancy", self._rr.Clear(recursive=True))
+            self._log("world/occupancy", self._rr.Clear(recursive=True))
             return
         image = _occupancy_to_rgb_numpy(occupancy)
+        self._log_world_map(frame, np.flipud(image).copy())
         _draw_frontier_markers(image, self._frontier_markers)
         self._log("map/occupancy", self._rr.Image(np.flipud(image).copy()))
+
+    def _log_world_map(self, frame: NavigationFrame, image: np.ndarray) -> None:
+        """将栅格边缘对齐世界米制坐标，World 直接叠加机器人与任务标记。"""
+        grid = frame.obstacle_map
+        origin, scale = grid.origin, grid.resolution_m
+        c, s = math.cos(origin.yaw_rad), math.sin(origin.yaw_rad)
+        # origin 是左下格中心；图片从翻转后的左上角边缘开始，World 的 y 取反。
+        local_x, local_y = -0.5 * scale, (image.shape[0] - 0.5) * scale
+        self._log("world/occupancy", self._rr.Transform3D(
+            translation=[origin.x_m + c * local_x - s * local_y,
+                         -origin.y_m - s * local_x - c * local_y, 0],
+            mat3x3=[[scale * c, scale * s, 0], [-scale * s, scale * c, 0], [0, 0, 1]],
+        ), self._rr.Image(image, draw_order=-20))
 
     def _update_frontier_markers(self, result: NavigationResult) -> None:
         """保存当前决策的 Frontier，供随后运动帧继续显示。"""
@@ -995,17 +1003,20 @@ class RerunVisualizer:
         result: NavigationResult,
     ) -> None:
         """在侧栏更新实时位姿与最近决策，不在 World 图形上叠加文字。"""
+        if self._object_progress is not None:
+            self._log_object_progress()
+            return
         text = _motion_status_text(frame, result)
-        latest = self._vlm_trace.latest_response
-        if latest is not None:
-            job_id = latest["context"].get("job_id")
-            text += f"\nVLM World: R{latest['request_id']}"
-            text += f" / J{job_id}" if job_id is not None else " / direct"
-            text += "\ncyan = capture; pink squares = snapshot Frontier"
         self._log(
             "navigation/motion",
             self._rr.TextDocument(text),
         )
+        self._log("navigation/live", self._rr.TextDocument(
+            f"**{result.debug.stage}** | target: {self._target_text}\n\n"
+            f"robot ({frame.pose.x_m:.2f}, {frame.pose.y_m:.2f}) m / "
+            f"{math.degrees(frame.pose.yaw_rad):.0f} deg | {result.state.phase.value}",
+            media_type="text/markdown",
+        ))
 
     def _log_status(
         self,
@@ -1045,18 +1056,22 @@ def _send_default_blueprint(
     panel_view = (
         rrb.Spatial2DView if text_panels_as_images else rrb.TextDocumentView
     )
-    main_views = rrb.Vertical(
-        rrb.Spatial2DView(origin="/camera/rgb", name="RGB + target"),
-        rrb.Horizontal(
-            rrb.Spatial2DView(origin="/map/occupancy", name="Map"),
-            rrb.Spatial2DView(origin="/world", name="World"),
-            column_shares=[1, 1],
+    world_views = rrb.Tabs(
+        rrb.Spatial2DView(
+            origin="/world", name="World",
+            contents=["/world/**", "- /world/observations/**", "- /world/history/**", "- /world/scan/planned/**"],
         ),
-        row_shares=[1, 1],
-        name="Navigation",
+        rrb.Spatial2DView(
+            origin="/world", name="World history",
+            contents=["/world/**", "- /world/jobs/**"],
+        ),
+        rrb.Spatial2DView(origin="/map/occupancy", name="Map details"),
+        active_tab=0,
     )
     debug_views = rrb.Tabs(
+        rrb.TextDocumentView(origin="/observations/index", name="Observations"),
         rrb.TextDocumentView(origin="/navigation/frontiers", name="Frontiers"),
+        rrb.TextDocumentView(origin="/navigation/motion", name="Motion details"),
         panel_view(origin="/navigation/status", name="Status"),
         rrb.Spatial2DView(
             origin="/model/yolo_world/latest",
@@ -1073,17 +1088,26 @@ def _send_default_blueprint(
         name="Debug",
     )
     sidebar = rrb.Vertical(
-        rrb.TextDocumentView(origin="/navigation/motion", name="Live"),
+        rrb.Tabs(
+            rrb.Spatial2DView(origin="/observations/focus", name="Inference RGB + scores"),
+            rrb.Spatial2DView(origin="/camera/rgb", name="Live camera"),
+            active_tab=0,
+        ),
         debug_views,
-        row_shares=[1, 4],
+        row_shares=[3, 2],
         name="Details",
     )
     blueprint = rrb.Blueprint(
         rrb.Horizontal(
-            main_views,
+            rrb.Vertical(
+                world_views,
+                rrb.TextDocumentView(origin="/navigation/live", name="Live"),
+                row_shares=[8, 1],
+            ),
             sidebar,
-            column_shares=[3, 2],
+            column_shares=[2, 1],
         ),
+        rrb.SelectionPanel(state="expanded"),
         auto_views=False,
         auto_layout=False,
         collapse_panels=True,
@@ -1501,6 +1525,21 @@ def _motion_status_text(
         )
     if result.state.active_target_clue is not None:
         lines.append(f"target clue: {result.state.active_target_clue.clue_id}")
+    approach = result.state.object_approach
+    if approach.target is not None:
+        lines.append(
+            f"object source={approach.target.source} target={approach.target.target_world_xy} "
+            f"moves={len(approach.tried_positions)} depth points={approach.target.sample_count}"
+        )
+    planning = result.debug.details
+    if "standoff_map" in planning:
+        lines.append(
+            f"standoff map={planning['standoff_map']} "
+            f"clearance={planning['standoff_clearance_m']:.2f}m "
+            f"candidates={planning['standoff_candidate_count']}"
+        )
+        if "standoff_distance_m" in planning:
+            lines.append(f"planned distance to target={planning['standoff_distance_m']:.2f}m")
     if headings and "scan_mode" in result.debug.details:
         scan_index = min(result.state.next_scan_index, len(headings) - 1)
         lines.append(
@@ -1535,7 +1574,7 @@ def _scan_basis_text(mode: str) -> str:
     basis = {
         "initial": "initial 360 deg sweep",
         "frontier": "unchecked local Frontier directions",
-        "scene_current_view": "scene check at current pose (no extra turn)",
+        "current_view": "target check at current pose (no extra turn)",
     }
     return f"scan basis: {basis.get(mode, mode)}"
 

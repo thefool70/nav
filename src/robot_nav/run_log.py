@@ -7,6 +7,7 @@ import math
 import threading
 import time
 from datetime import datetime
+from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional, TextIO, Tuple
@@ -388,9 +389,11 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
             {"clue_id": state.active_target_clue.clue_id,
              "pose": _pose_summary(state.active_target_clue.pose),
              "timestamp_s": state.active_target_clue.timestamp_s,
-             "map_frame_id": state.active_target_clue.map_frame_id}
+             "map_frame_id": state.active_target_clue.map_frame_id,
+             "job_id": state.active_target_clue.job_id, "view_id": state.active_target_clue.view_id}
             if state.active_target_clue is not None else None
         ),
+        "object_approach": asdict(state.object_approach),
         "frontier_region_ids": tuple(region.region_id for region in state.frontier_regions),
         "blocked_frontier_regions": tuple(
             {

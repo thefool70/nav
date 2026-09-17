@@ -17,6 +17,19 @@ def job_path(job_id: int) -> str:
     return f"model/vlm/jobs/J{job_id:06d}"
 
 
+def view_node_path(job_id: int, view_id: int) -> str:
+    return f"world/observations/J{job_id:06d}/V{view_id}"
+
+
+def frontier_node_path(job_id: int, label: str) -> str:
+    return f"world/observations/J{job_id:06d}/{label}"
+
+
+def interaction_node_path(context, view_id: int) -> str:
+    job_id = context.get("job_id")
+    return view_node_path(job_id, context.get("view_id", view_id)) if job_id is not None else "world/observations"
+
+
 def interaction_result(interaction: VlmInteraction) -> Mapping[str, Any]:
     try:
         value = json.loads(interaction.parsed_result)
@@ -92,6 +105,8 @@ class VlmTraceHistory:
             self.latest_response = dict(row)
 
     def record_queue_event(self, event: Mapping[str, Any], frame_index: int) -> None:
+        if event["event"].startswith("object_"):
+            return
         if event["event"] == "stopped":
             self.queue_stopped = True
             for job_id in event["job_ids"]:
@@ -151,19 +166,20 @@ class VlmTraceHistory:
         latest = self.latest_response
         if latest is not None:
             job_id = latest["context"].get("job_id")
-            lines.extend([f"**Latest return / World overlay: R{latest['request_id']}"
+            lines.extend([f"**Latest return: R{latest['request_id']}"
                           + (f" / J{job_id}" if job_id is not None else " / direct") + "**", "",
                           result_summary(latest["result"]), ""])
             views = latest["context"].get("views", ())
             if views:
-                lines.extend(["Cyan arrows = capture poses; pink squares = Frontier snapshots.",
-                              "Dashed cyan link connects the robot to the reference capture; it is not a route.", ""])
+                lines.extend(["Observations links open RGB + scores for each job; V links open a single-view card.",
+                              "World shows grouped jobs; World history keeps every V/F marker.", ""])
                 target_views = latest["result"].get("target_view_ids") or ()
-                lines.extend(["| V | Return order | Capture (x, y) m | Timestamp s |", "| --- | --- | --- | --- |"])
+                lines.extend(["| V | Clue order | Capture (x, y) m | Timestamp s |", "| --- | --- | --- | --- |"])
                 for index, view in enumerate(views):
                     pose = view["pose"]
                     order = target_views.index(view["view_id"]) + 1 if view["view_id"] in target_views else "-"
-                    lines.append(f"| [V{view['view_id']}](recording://world/vlm/captures[#{index}]) | "
+                    path = interaction_node_path(latest["context"], view["view_id"])
+                    lines.append(f"| [V{view['view_id']}](recording://{path}) | "
                                  f"{order} | ({pose['x_m']:.2f}, {pose['y_m']:.2f}) | {view['timestamp_s']:.3f} |")
                 lines.append("")
             markers = latest["context"].get("markers", ())
@@ -172,7 +188,8 @@ class VlmTraceHistory:
                 for index, marker in enumerate(markers):
                     score = latest["result"].get("frontier_scores", {}).get(marker["candidate_id"])
                     score_text = "missing" if score is None else f"{score:.2f}"
-                    lines.append(f"| [{marker['label']}](recording://world/vlm/frontiers[#{index}]) | "
+                    path = frontier_node_path(job_id, marker['label']) if job_id is not None else "world/observations"
+                    lines.append(f"| [{marker['label']}](recording://{path}) | "
                                  f"{marker.get('view_id', '-')} | {marker['region_id']} | {score_text} |")
                 lines.append("")
         lines.extend(["## Recent requests", "", "| R / J | Source | State / result | Time | Send / return frame |",
