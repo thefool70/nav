@@ -36,6 +36,8 @@ from .models import (
     NavigationFrame,
     NavigationResult,
     NavigationStatus,
+    ObjectApproachState,
+    ObjectLocalization,
     ObservationNode,
     ObservationView,
     ObstacleMap,
@@ -67,6 +69,7 @@ from .scan import (
     build_uniform_scan_headings,
     shortest_turn_to_heading,
 )
+from .object_approach import continue_object_history, navigate_object_approach, recover_object_motion
 
 
 TURN_TOLERANCE_RAD = math.radians(5.0)
@@ -87,6 +90,7 @@ def navigate(
     frontier_scores: Optional[Mapping[str, float]] = None,
     target_confirmation: Optional[TargetConfirmationResult] = None,
     scene_assessment: Optional[SceneAssessmentResult] = None,
+    object_localization: Optional[ObjectLocalization] = None,
 ) -> NavigationResult:
     """推进一个导航周期，并返回本周期命令和下一周期状态。
 
@@ -101,11 +105,14 @@ def navigate(
         frontier_scores,
         target_confirmation,
         scene_assessment,
+        object_localization,
     )
     if reason is not None:
         return _invalid_result(state, reason)
 
     working_state = state or SearchState()
+    if working_state.phase is SearchPhase.STOPPED:
+        return _result(NavigationStatus.OK, working_state, "stopped", "导航已经停止。")
     if working_state.phase is SearchPhase.COMPLETE:
         return _result(
             NavigationStatus.OK,
@@ -121,7 +128,13 @@ def navigate(
             "语义搜索已经结束，当前状态没有可继续的方向。",
         )
     if working_state.active_target_clue is not None:
+        if goal.search_mode is SearchMode.OBJECT:
+            return navigate_object_approach(frame, working_state, object_localization)
         return _continue_target_clue(frame, working_state)
+    if goal.search_mode is SearchMode.OBJECT:
+        history_result = continue_object_history(frame, working_state)
+        if history_result is not None:
+            return history_result
     if working_state.phase is SearchPhase.VERIFYING_SCENE:
         return _continue_scene_assessment(
             frame,
@@ -135,7 +148,7 @@ def navigate(
             working_state,
             target_confirmation,
         )
-    # 物体模式下 YOLO-World 持续观察；有效检测可以抢占扫描和探索。
+    # 同步观察器保留原目标观测接口；CLI 的扫描只产生后台待处理结果。
     if (
         goal.search_mode is SearchMode.OBJECT
         and observation is not None
@@ -171,6 +184,9 @@ def recover_from_motion_failure(
     rejected_path_world_xy: Tuple[Tuple[float, float], ...] = (),
 ) -> Optional[NavigationResult]:
     """Frontier 普通失败淘汰目标点；未知路径长度超限时屏蔽整个连通区域。"""
+    object_recovery = recover_object_motion(result, reason)
+    if object_recovery is not None:
+        return object_recovery
     target_recovery = _reobserve_target_after_motion_issue(
         result,
         reason,
@@ -266,6 +282,9 @@ def continue_after_motion_stall(
     reason: str,
 ) -> Optional[NavigationResult]:
     """移动停滞时保留当前位置，并按原算法阶段继续。"""
+    object_recovery = recover_object_motion(result, reason)
+    if object_recovery is not None:
+        return object_recovery
     target_recovery = _reobserve_target_after_motion_issue(
         result,
         reason,
@@ -437,7 +456,7 @@ def _continue_scanning(
     state: SearchState,
     observation: Optional[TargetObservation],
 ) -> NavigationResult:
-    """首次环扫；之后仅补查局部可见 Frontier，场景判断至少采集当前画面。"""
+    """首次环扫；之后补查局部可见 Frontier，两种模式均至少采集当前画面。"""
     working_state = state
     scan_debug_details: Optional[Mapping[str, Any]] = None
     if not working_state.scan_headings_world_rad:
@@ -460,8 +479,8 @@ def _continue_scanning(
                     points, Pose2D(camera_xy[0], camera_xy[1], frame.pose.yaw_rad),
                     camera_offset, horizontal_fov,
                 )
-            if not headings and goal.search_mode is SearchMode.SCENE:
-                # 场景判断依赖当前所在位置，即使区域覆盖可复用仍需当前画面。
+            if not headings:
+                # 覆盖可复用也保留当前画面的目标检查，不为此额外转向。
                 headings = (frame.pose.yaw_rad,)
         except ValueError as exc:
             return _result(
@@ -475,18 +494,6 @@ def _continue_scanning(
             "reused_observation_point_count": len(local_points) - len(points),
             "checked_view_count": len(working_state.observed_views),
         }
-        if not headings:
-            # 没有局部待查 Frontier 时直接选点，不为已知区域或评分追加观察。
-            result = _select_exploration_target(
-                frame, replace(working_state, scan_observation_points=()), None
-            )
-            return replace(result, debug=replace(result.debug, details={
-                **result.debug.details,
-                "local_observation_point_count": len(local_points),
-                "observation_point_count": 0,
-                "reused_observation_point_count": len(local_points),
-                "scan_skipped": True,
-            }))
         working_state = _start_scan_with_headings(
             replace(
                 working_state,
@@ -591,7 +598,7 @@ def _finish_scan(
     goal: TargetSearchGoal,
     state: SearchState,
 ) -> NavigationResult:
-    """结束本轮采集；场景模式先判断当前位置，物体模式直接探索。"""
+    """结束本轮采集并探索；同步场景观察器仍先判断当前位置。"""
     completed_state = replace(
         state,
         phase=(
@@ -1104,7 +1111,7 @@ def _wait_for_semantics_or_finish(state: SearchState) -> NavigationResult:
 def _continue_target_clue(
     frame: NavigationFrame, state: SearchState,
 ) -> NavigationResult:
-    """按后台检测结果返回拍摄位置与朝向，到位即完成，不再请求视觉复查。"""
+    """场景线索返回拍摄位置并对齐朝向，到位即完成。"""
     clue = state.active_target_clue
     if clue.map_frame_id != frame.obstacle_map.frame_id:
         return _discard_target_clue(state, "目标线索与当前地图坐标系不同。")
@@ -1124,13 +1131,13 @@ def _continue_target_clue(
     if abs(turn) > TURN_TOLERANCE_RAD:
         return _result(
             NavigationStatus.OK, replace(state, phase=SearchPhase.REVISITING_TARGET, backtrack_node_id=None),
-            "target.revisit_turn", "已回到拍摄位置，对齐当时的朝向后结束搜索。",
+            "target.revisit_turn", "已回到拍摄位置，对齐检测画面当时的朝向。",
             RelativePoseCommand(yaw_rad=turn), {"clue_id": clue.clue_id},
         )
     return _result(
         NavigationStatus.OK,
         replace(_reset_scan_after_move(state), phase=SearchPhase.COMPLETE),
-        "target.revisit_complete", "已返回检测到目标时的位置与朝向，搜索完成。",
+        "target.revisit_complete", "已返回目标场景画面的拍摄位置与朝向，搜索完成。",
         details={
             "clue_id": clue.clue_id, "capture_timestamp_s": clue.timestamp_s,
             "destination_world_xy": (clue.pose.x_m, clue.pose.y_m),
@@ -1394,10 +1401,10 @@ def _start_scan_with_headings(
 
 
 def _scan_mode(state: SearchState) -> str:
-    """区分首次环扫、Frontier 补查和无待查方向时的当前位置场景采集。"""
+    """区分首次环扫、Frontier 补查和无待查方向时的当前画面采集。"""
     if not state.initial_scan_complete:
         return "initial"
-    return "frontier" if state.scan_observation_points else "scene_current_view"
+    return "frontier" if state.scan_observation_points else "current_view"
 
 
 def _scan_debug_details(
@@ -1447,6 +1454,7 @@ def _reset_scan_after_move(state: SearchState) -> SearchState:
         pending_target_world_xy=None,
         backtrack_node_id=None,
         active_target_clue=None,
+        object_approach=ObjectApproachState(),
     )
 
 
@@ -1537,6 +1545,7 @@ def _validation_error(
     frontier_scores: Optional[Mapping[str, float]],
     target_confirmation: Optional[TargetConfirmationResult],
     scene_assessment: Optional[SceneAssessmentResult],
+    object_localization: Optional[ObjectLocalization],
 ) -> Optional[str]:
     """返回非法公共输入的简短原因；合法输入返回 None。"""
     if not isinstance(goal, TargetSearchGoal) or not isinstance(
@@ -1562,8 +1571,22 @@ def _validation_error(
         return "frame.obstacle_map.resolution_m 必须为正有限值"
     if not isinstance(frame.obstacle_map.frame_id, str) or not frame.obstacle_map.frame_id:
         return "frame.obstacle_map.frame_id 必须为非空字符串"
+    if frame.navigation_map is not None:
+        if (
+            not isinstance(frame.navigation_map, ObstacleMap)
+            or frame.navigation_map.frame_id != frame.obstacle_map.frame_id
+            or not _is_finite(frame.navigation_map.resolution_m)
+            or float(frame.navigation_map.resolution_m) <= 0.0
+        ):
+            return "frame.navigation_map 必须为同坐标系、分辨率有效的障碍图"
+    if not _is_finite(frame.navigation_clearance_m) or float(frame.navigation_clearance_m) < 0.0:
+        return "frame.navigation_clearance_m 必须为非负米数"
     if state is not None and not isinstance(state, SearchState):
         return "state 必须为 SearchState 或 None"
+    if object_localization is not None:
+        issue = _object_localization_error(object_localization)
+        if issue is not None:
+            return issue
     if observation is not None and not isinstance(observation, TargetObservation):
         return "observation 必须为 TargetObservation 或 None"
     if observation is not None:
@@ -1609,8 +1632,48 @@ def _validation_error(
             or not isinstance(clue.clue_id, str) or not isinstance(clue.map_frame_id, str)
         ):
             return "state.active_target_clue 必须为有效目标线索或 None"
-        if state.phase is SearchPhase.REVISITING_TARGET and clue is None:
-            return "线索返回阶段必须保留拍摄位姿"
+        if clue is not None and any(
+            value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1)
+            for value in (clue.job_id, clue.view_id)
+        ):
+            return "物体快照编号必须为正整数或 None"
+        object_phases = (SearchPhase.LOCALIZING_OBJECT, SearchPhase.APPROACHING_OBJECT)
+        if (state.phase is SearchPhase.REVISITING_TARGET or state.phase in object_phases) and clue is None:
+            return "线索返回与物体接近阶段必须保留拍摄位姿"
+        if state.phase in object_phases and goal.search_mode is not SearchMode.OBJECT:
+            return "物体接近阶段仅用于物体模式"
+        context = state.object_approach
+        if not isinstance(context, ObjectApproachState):
+            return "state.object_approach 必须为 ObjectApproachState"
+        if context.target is not None:
+            issue = _object_localization_error(context.target)
+            if issue is not None:
+                return issue
+        if state.phase is SearchPhase.APPROACHING_OBJECT and (
+            context.target is None or context.target.target_world_xy is None
+        ):
+            return "物体接近阶段必须保留目标位置"
+        if context.destination is not None and (
+            not isinstance(context.destination, Pose2D)
+            or not all(_is_finite(value) for value in (context.destination.x_m, context.destination.y_m, context.destination.yaw_rad))
+        ):
+            return "物体停靠位姿无效"
+        if any(not _valid_world_point(point) for point in context.tried_positions):
+            return "物体已尝试停靠点无效"
+        fallback = context.fallback_clue
+        if fallback is not None and (
+            not isinstance(fallback, TargetClue) or not isinstance(fallback.pose, Pose2D)
+            or not all(_is_finite(value) for value in (fallback.pose.x_m, fallback.pose.y_m, fallback.pose.yaw_rad))
+            or not isinstance(fallback.map_frame_id, str)
+        ):
+            return "物体保底返回线索无效"
+        if (
+            not isinstance(context.history_localized, bool)
+            or isinstance(context.capture_turns, bool)
+            or not isinstance(context.capture_turns, int)
+            or context.capture_turns < 0
+        ):
+            return "物体恢复计数无效"
         if (
             isinstance(state.next_frontier_region_id, bool)
             or not isinstance(state.next_frontier_region_id, int)
@@ -1718,6 +1781,20 @@ def _validation_error(
                 or not 0 <= state.next_scan_index < len(state.scan_headings_world_rad)
             ):
                 return "state.next_scan_index 必须位于扫描航向范围内"
+    return None
+
+
+def _object_localization_error(value) -> Optional[str]:
+    if not isinstance(value, ObjectLocalization):
+        return "物体定位结果必须为 ObjectLocalization"
+    if value.target_world_xy is not None and not _valid_world_point(value.target_world_xy):
+        return "物体定位结果包含非法世界坐标"
+    if not isinstance(value.visibility, TargetVisibility) or not isinstance(value.vlm_confirmation, TargetConfirmation):
+        return "物体定位的可见性或 VLM 确认类型无效"
+    if not isinstance(value.source, str) or not isinstance(value.reason, str):
+        return "物体定位来源与原因必须为字符串"
+    if isinstance(value.sample_count, bool) or not isinstance(value.sample_count, int) or value.sample_count < 0:
+        return "物体定位深度点数无效"
     return None
 
 

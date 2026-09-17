@@ -7,8 +7,10 @@ from contextlib import ExitStack
 import json
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Optional, Sequence
+from uuid import uuid4
 
 from .adapters.chassis import ChassisInterface, MotionStalledError, RecoverableMotionError
 from .adapters.habitat import HabitatChassisAdapter, HabitatConfig
@@ -18,18 +20,13 @@ from .adapters.openai_compatible import (
     OpenAICompatibleTargetObserver,
 )
 from .adapters.perception import (
-    ContinuousTargetObserver,
     SemanticAnalyzer,
-    LocalPerceptionEvent,
     TargetObserver,
 )
 from .adapters.random_observer import RandomScoreTargetObserver
 from .adapters.queued_semantics import QueuedSemanticObserver
+from .adapters.object_localizer import ObjectLocalizerConfig
 from .adapters.realsense import L515Config
-from .adapters.sam2_observer import (
-    DEFAULT_SAM2_CHECKPOINT_PATH,
-    Sam2ObserverConfig,
-)
 from .adapters.s100_l515 import (
     CameraMount,
     DEFAULT_CAMERA_MOUNT_PATH,
@@ -46,11 +43,6 @@ from .adapters.slamtec_l515 import (
     SlamtecL515Config,
     SlamtecRobotHealth,
     load_camera_extrinsics,
-)
-from .adapters.yolo_world_sam2 import (
-    DEFAULT_YOLO_WORLD_MODEL_PATH,
-    YoloWorldSam2Config,
-    YoloWorldSam2TargetObserver,
 )
 from .app import run_navigation_cycle
 from .core.models import (
@@ -273,51 +265,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="有多台 RealSense 时指定 L515 序列号",
     )
     slamtec.add_argument(
-        "--yolo-world-model",
-        default=str(DEFAULT_YOLO_WORLD_MODEL_PATH),
-        help="YOLOv8s-World 模型文件",
-    )
-    slamtec.add_argument(
-        "--yolo-device",
-        default="cuda",
-        help="YOLO-World 推理设备，默认 cuda",
-    )
-    slamtec.add_argument(
-        "--yolo-class",
-        help=(
-            "YOLO-World 使用的简短开放词汇类别；不指定时复用 --target，"
-            "中文或长描述可单独提供英文类别"
-        ),
-    )
-    slamtec.add_argument(
-        "--yolo-confidence",
-        type=_probability,
-        default=0.25,
-        help="YOLO-World 最低置信度，默认 0.25",
-    )
-    slamtec.add_argument(
-        "--yolo-image-size",
-        type=_positive_int,
-        default=640,
-        help="YOLO-World 推理边长，默认 640",
-    )
-    slamtec.add_argument(
-        "--yolo-timeout-s",
-        type=_positive_float,
-        default=10.0,
-        help="决策帧本地感知等待上限，默认 10 秒",
-    )
-    slamtec.add_argument(
-        "--sam2-checkpoint",
-        default=str(DEFAULT_SAM2_CHECKPOINT_PATH),
-        help="SAM2.1 Hiera Small 模型文件",
-    )
-    slamtec.add_argument(
-        "--sam2-device",
-        default="cuda",
-        help="SAM2 推理设备，默认 cuda",
-    )
-    slamtec.add_argument(
         "--camera-calibration",
         default=str(DEFAULT_CAMERA_EXTRINSICS_PATH),
         help="完整相机外参 JSON；存在时自动读取，手动参数可覆盖",
@@ -505,6 +452,12 @@ def _add_navigation_arguments(
         default=SearchMode.OBJECT.value,
         help="搜索具体物体 object，或寻找目的场景 scene；默认 object",
     )
+    parser.add_argument("--object-class", help="接近阶段 YOLO 使用的简短类别；默认复用 --target")
+    parser.add_argument("--object-python", default=_default_object_python(), help="接近阶段本地模型的 Python；默认复用 robot-nav 环境")
+    parser.add_argument("--object-device", default="cuda", help="接近阶段 YOLO/SAM2 设备，默认 cuda")
+    parser.add_argument("--object-yolo-model", type=Path, default=Path("data/models/yolo-world/yolov8s-world.pt"))
+    parser.add_argument("--object-sam-checkpoint", type=Path, default=Path("data/models/sam2/sam2.1_hiera_small.pt"))
+    parser.add_argument("--object-timeout-s", type=_positive_float, default=120.0, help="一次本地模型请求的超时秒数")
     parser.add_argument(
         "--max-cycles",
         type=_positive_int,
@@ -544,17 +497,15 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
         on_motion_plan,
         on_semantic_event,
     ) = _build_visualization(args)
-    analyzer = _build_observer(
-        args.debug_random_score,
-        api_key,
-        on_vlm_interaction,
-    )
     config = HabitatConfig(
         scene_path=args.scene,
         seed=args.seed,
         gpu_device_id=args.gpu_device_id,
     )
-    with QueuedSemanticObserver(analyzer, on_event=on_semantic_event) as observer, HabitatChassisAdapter(
+    with _build_queued_observer(
+        args.debug_random_score, api_key, on_vlm_interaction, on_semantic_event,
+        object_config=_object_config(args),
+    ) as observer, HabitatChassisAdapter(
         config,
         on_motion_frame=_continuous_perception_frame_callback(
             on_motion_frame, observer, TargetSearchGoal(args.target, SearchMode(args.search_mode)),
@@ -596,9 +547,11 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
         observer = None
         motion_callback = on_motion_frame
         if not args.preflight_only:
-            observer = stack.enter_context(QueuedSemanticObserver(_build_observer(
+            observer = stack.enter_context(_build_queued_observer(
                 args.debug_random_score, api_key, on_vlm_interaction,
-            ), on_event=on_semantic_event))
+                on_semantic_event,
+                object_config=_object_config(args),
+            ))
             motion_callback = _continuous_perception_frame_callback(
                 on_motion_frame, observer, TargetSearchGoal(args.target, SearchMode(args.search_mode)),
             )
@@ -625,42 +578,33 @@ def _run_s100_l515(args: argparse.Namespace, api_key: str) -> int:
 
 
 def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
-    """组装 Hermes/L515 Adapter；base-only 仅用于无相机预检。"""
+    """组装 Hermes/L515 Adapter，共用物体定位与导航队列。"""
     run_logger = _build_slamtec_run_logger(args)
     return_code = 1
     error_message = None
-    observer: Optional[TargetObserver] = None
+    observer: Optional[QueuedSemanticObserver] = None
     try:
         (
             on_cycle,
             on_motion_frame,
             on_vlm_interaction,
-            on_local_perception,
+            _,
             on_motion_plan,
             on_semantic_event,
         ) = _build_visualization(args)
         if not args.preflight_only:
-            on_local_perception = _local_perception_callback(
-                on_local_perception,
-                run_logger,
-            )
-            observer = _build_slamtec_observer(
-                args,
+            observer = _build_queued_observer(
+                args.debug_random_score,
                 api_key,
                 on_vlm_interaction,
-                on_local_perception,
                 on_semantic_event=_semantic_queue_callback(on_semantic_event, run_logger),
+                object_config=_object_config(args),
             )
-        continuous_observer = (
-            observer
-            if isinstance(observer, ContinuousTargetObserver)
-            else None
-        )
         on_continuous_frame = None
-        if continuous_observer is not None:
+        if observer is not None:
             on_continuous_frame = _continuous_perception_frame_callback(
                 on_motion_frame,
-                continuous_observer,
+                observer,
                 TargetSearchGoal(args.target, SearchMode(args.search_mode)),
             )
         config = SlamtecL515Config(
@@ -687,11 +631,6 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             on_continuous_frame=on_continuous_frame,
             on_action_progress=action_progress,
             on_motion_plan=on_motion_plan,
-            should_interrupt_motion=(
-                continuous_observer.should_interrupt_motion
-                if continuous_observer is not None
-                else None
-            ),
         ) as chassis:
             if args.preflight_only:
                 info = chassis.get_robot_info()
@@ -701,7 +640,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
                 height = len(frame.obstacle_map.occupancy)
                 width = len(frame.obstacle_map.occupancy[0]) if height else 0
                 print(
-                    "Hermes/L515 预检通过："
+                    "Hermes/L515 预检读取完成："
                     f"model={info.get('modelName', 'unknown')}，"
                     f"firmware={info.get('softwareVersion', 'unknown')}，"
                     f"pose=({frame.pose.x_m:.2f}, {frame.pose.y_m:.2f}, "
@@ -710,7 +649,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
                     f"quality={slam_state.localization_quality}，"
                     f"health={_slamtec_health_text(health)}，"
                     f"map={width}×{height}，"
-                    f"L515={'已启用' if chassis.has_camera else '未启用'}。"
+                    f"相机={'已启用' if chassis.has_camera else '未启用'}。"
                 )
                 return_code = 0
             else:
@@ -739,7 +678,7 @@ def _run_slamtec_l515(args: argparse.Namespace, api_key: str) -> int:
             run_logger.log_error(exc)
         raise
     finally:
-        if isinstance(observer, ContinuousTargetObserver):
+        if observer is not None:
             observer.close()
         if run_logger is not None:
             run_logger.log_run_end(return_code, error_message)
@@ -768,11 +707,11 @@ def _build_slamtec_run_logger(
     path = (
         Path(args.run_log)
         if args.run_log
-        else default_run_log_path("slamtec-l515")
+        else default_run_log_path(args.adapter)
     )
     logger = NavigationRunLogger(path)
     logger.log_run_start(
-        adapter_name="slamtec-l515",
+        adapter_name=args.adapter,
         target_text=args.target,
         max_cycles=args.max_cycles,
         configuration={
@@ -786,22 +725,11 @@ def _build_slamtec_run_logger(
             "max_unknown_path_m": args.max_unknown_path_m,
             "startup_forward_m": SLAMTEC_STARTUP_FORWARD_M,
             "minimum_localization_quality": args.min_localization_quality,
-            "sam2_enabled": (
-                not args.debug_random_score
-                and args.search_mode == SearchMode.OBJECT.value
-            ),
-            "sam2_checkpoint": args.sam2_checkpoint,
-            "sam2_device": args.sam2_device,
-            "yolo_world_enabled": (
-                not args.debug_random_score
-                and args.search_mode == SearchMode.OBJECT.value
-            ),
-            "yolo_world_model": args.yolo_world_model,
-            "yolo_device": args.yolo_device,
-            "yolo_class": args.yolo_class or args.target,
-            "yolo_confidence": args.yolo_confidence,
-            "yolo_image_size": args.yolo_image_size,
-            "yolo_timeout_s": args.yolo_timeout_s,
+            "perception": "queued_vlm",
+            "object_local_models": not args.debug_random_score and args.search_mode == SearchMode.OBJECT.value,
+            "object_python": args.object_python,
+            "object_class": args.object_class or args.target,
+            "object_device": args.object_device,
         },
     )
     print(f"详细运行日志：{logger.path.resolve()}")
@@ -814,23 +742,6 @@ def _action_progress_callback(run_logger: NavigationRunLogger):
     def callback(message: str) -> None:
         print(message)
         run_logger.log_action_progress(message)
-
-    return callback
-
-
-def _local_perception_callback(
-    on_local_perception,
-    run_logger: Optional[NavigationRunLogger],
-):
-    """把后台 YOLO/SAM2 结果同时送往 Rerun 与 JSONL。"""
-    if on_local_perception is None and run_logger is None:
-        return None
-
-    def callback(frame, event: LocalPerceptionEvent) -> None:
-        if run_logger is not None:
-            run_logger.log_local_perception(frame, event)
-        if on_local_perception is not None:
-            on_local_perception(frame, event)
 
     return callback
 
@@ -916,6 +827,8 @@ def _run_slamtec_l515_calibration(args: argparse.Namespace) -> int:
         f"residual={result.extrinsic_residual_m:.3f} m"
     )
     return 0
+
+
 
 
 def _camera_mount_from_args(args: argparse.Namespace) -> CameraMount:
@@ -1069,11 +982,14 @@ def _run_navigation(
 
         if state.phase is SearchPhase.COMPLETE:
             return 0
+        if state.phase is SearchPhase.STOPPED:
+            return 3
         if result.status in {
             NavigationStatus.NEEDS_OBSERVATION,
             NavigationStatus.NEEDS_SCENE_ASSESSMENT,
             NavigationStatus.NEEDS_FRONTIER_SCORES,
             NavigationStatus.NEEDS_TARGET_CONFIRMATION,
+            NavigationStatus.NEEDS_OBJECT_LOCALIZATION,
         }:
             # 一次周期只消费一组外部感知输入。状态机若在处理该输入后立即
             # 请求下一组输入，应读取下一帧继续，而不是把“等待输入”当成失败。
@@ -1194,6 +1110,9 @@ def _build_observer(
             "移动和重新选点，无法识别或到达语义目标。"
         )
         return RandomScoreTargetObserver()
+    # 同一次导航共用会话标识，普通队列与物体定位请求均沿用它。
+    session_id = uuid4().hex
+    print(f"VLM 配置：OpenCode Go / {QWEN_MODEL}，会话 {session_id}", flush=True)
     return OpenAICompatibleTargetObserver(
         OpenAICompatibleConfig(
             endpoint_url=OPENCODE_GO_QWEN_ENDPOINT,
@@ -1204,66 +1123,53 @@ def _build_observer(
             max_output_tokens=2048,
             # Anthropic Messages 请求会显式发送 thinking=disabled（最低档）。
             reasoning_effort=None,
+            opencode_session_id=session_id,
         ),
         on_vlm_interaction=on_vlm_interaction,
     )
 
 
-def _build_slamtec_observer(
-    args: argparse.Namespace,
+def _build_queued_observer(
+    debug_random_score: bool,
     api_key: str,
     on_vlm_interaction=None,
-    on_local_perception=None,
     on_semantic_event=None,
+    *, object_config: Optional[ObjectLocalizerConfig] = None,
 ) -> QueuedSemanticObserver:
-    """组装联合分析队列，物体模式额外保留 YOLO+SAM2 持续检测。"""
-    semantic_advisor = _build_observer(
-        args.debug_random_score,
+    """所有 Adapter 和搜索模式共用同一条后台检测与评分链。"""
+    analyzer = _build_observer(
+        debug_random_score,
         api_key,
         on_vlm_interaction,
     )
-    if args.debug_random_score:
-        return QueuedSemanticObserver(semantic_advisor, on_event=on_semantic_event)
-    if args.search_mode == SearchMode.SCENE.value:
-        print(
-            "目的场景搜索已启用：后台联合判断场景和评分 Frontier，"
-            "不加载 YOLO-World 或 SAM2。"
-        )
-        return QueuedSemanticObserver(semantic_advisor, on_event=on_semantic_event)
-    if not isinstance(semantic_advisor, OpenAICompatibleTargetObserver):
-        raise RuntimeError("当前 VLM 观察器不支持 Frontier 评分与最终确认")
+    return QueuedSemanticObserver(analyzer, on_event=on_semantic_event, object_config=object_config)
 
-    print(
-        "实时目标感知已启用："
-        f"YOLO-World={args.yolo_world_model} ({args.yolo_device})，"
-        f"class={args.yolo_class or args.target}，"
-        f"SAM2={args.sam2_checkpoint} ({args.sam2_device})。"
+
+def _default_object_python() -> str:
+    """用现有模型环境承接 Habitat 的本地推理，不修改仿真环境依赖。"""
+    candidates = (
+        Path(sys.prefix).parent / "robot-nav" / "bin" / "python",
+        Path.home() / "micromamba" / "envs" / "robot-nav" / "bin" / "python",
     )
-    local_observer = YoloWorldSam2TargetObserver(
-        semantic_advisor,
-        YoloWorldSam2Config(
-            class_text=args.yolo_class or args.target,
-            model_path=Path(args.yolo_world_model),
-            device=args.yolo_device,
-            confidence_threshold=args.yolo_confidence,
-            image_size=args.yolo_image_size,
-            observation_timeout_s=args.yolo_timeout_s,
-            sam2=Sam2ObserverConfig(
-                checkpoint_path=Path(args.sam2_checkpoint),
-                device=args.sam2_device,
-            ),
-        ),
-        on_local_perception=on_local_perception,
+    return next((str(path) for path in candidates if path.is_file()), sys.executable)
+
+
+def _object_config(args) -> Optional[ObjectLocalizerConfig]:
+    if args.debug_random_score or args.search_mode != SearchMode.OBJECT.value:
+        return None
+    return ObjectLocalizerConfig(
+        python_executable=args.object_python, class_text=args.object_class or "", device=args.object_device,
+        yolo_model=args.object_yolo_model, sam2_checkpoint=args.object_sam_checkpoint,
+        timeout_s=args.object_timeout_s,
     )
-    return QueuedSemanticObserver(semantic_advisor, local_observer=local_observer, on_event=on_semantic_event)
 
 
 def _continuous_perception_frame_callback(
     on_motion_frame,
-    observer: ContinuousTargetObserver,
+    observer: QueuedSemanticObserver,
     goal: TargetSearchGoal,
 ):
-    """把最新帧送往本地检测和语义预采样，并旁路记录到 Rerun。"""
+    """把最新帧送往语义预采样，并旁路记录到 Rerun。"""
 
     visualization = _optional_callback(on_motion_frame, "运动帧可视化")
 
@@ -1365,13 +1271,6 @@ def _localization_quality(value: str) -> int:
     number = int(value)
     if not 0 <= number <= 100:
         raise argparse.ArgumentTypeError("必须是 0 到 100 的整数")
-    return number
-
-
-def _probability(value: str) -> float:
-    number = _finite_float(value)
-    if not 0.0 < number <= 1.0:
-        raise argparse.ArgumentTypeError("必须位于 (0, 1]")
     return number
 
 

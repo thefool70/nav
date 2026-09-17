@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Mapping, Optional, Tuple
 
 from ..core.models import (
-    CameraExtrinsics, CameraIntrinsics, FrontierCandidate, FrontierScoreRequest, NavigationFrame,
-    ObservationView, Pose2D, SceneAssessment, SceneAssessmentResult, SearchPhase,
-    SearchState, SemanticAnalysis, TargetClue, TargetObservation, TargetSearchGoal,
+    CameraExtrinsics, CameraIntrinsics, DepthImage, FrontierCandidate, FrontierScoreRequest, NavigationFrame,
+    ObservationView, Pose2D, SceneAssessment, SceneAssessmentResult, SearchMode, SearchPhase,
+    SearchState, SemanticAnalysis, TargetClue, TargetObservation, TargetSearchGoal, ObjectLocalization,
     TargetVisibility,
 )
 from ..core.navigator import capture_semantic_view, preview_frontier_candidates
@@ -28,7 +28,8 @@ from ..core.observation_coverage import frontier_observation_points
 from .frontier_overlay import (
     BufferedScanImage, buffer_scan_image, has_frontier_direction_in_view, visible_frontier_candidates,
 )
-from .perception import ContinuousTargetObserver, ScanObservationContext, SemanticAnalyzer
+from .perception import ScanObservationContext, SemanticAnalyzer
+from .object_localizer import ObjectLocalizer, ObjectLocalizerConfig
 
 
 PREFETCH_TRANSLATION_M = 0.75
@@ -41,6 +42,7 @@ class _CapturedView:
     image: BufferedScanImage
     coverage: ObservationView
     map_frame_id: str
+    depth_gzip: Optional[bytes]
 
 
 @dataclass(frozen=True)
@@ -53,15 +55,15 @@ class _CompletedAnalysis:
 
 
 class QueuedSemanticObserver:
-    """普通扫描按轮入队；检测到目标后暂停后台，核心返回拍摄位姿并结束。"""
+    """两种模式共用扫描队列；线索返回、物体接近与终态期间暂停后台。"""
 
     def __init__(
         self,
         analyzer: SemanticAnalyzer,
         *,
-        local_observer: Optional[ContinuousTargetObserver] = None,
         on_event: Optional[Callable[[Mapping[str, Any]], None]] = None,
         directory: Optional[Path] = None,
+        object_config: Optional[ObjectLocalizerConfig] = None,
     ) -> None:
         if directory is None:
             root = Path("data/run_logs")
@@ -71,7 +73,10 @@ class QueuedSemanticObserver:
             directory.mkdir(parents=True, exist_ok=False)
         self.directory = directory.resolve()
         self._analyzer = analyzer
-        self._local = local_observer
+        self._object_localizer = (
+            ObjectLocalizer(analyzer, object_config, self.directory / "object-localization", on_event=self._emit)
+            if object_config is not None else None
+        )
         self._on_event = on_event
         self._condition = threading.Condition()
         self._enqueue_lock = threading.Lock()
@@ -138,11 +143,16 @@ class QueuedSemanticObserver:
                 index = view_id - 1
                 if 0 <= index < len(item.views):
                     map_id, view = item.views[index]
-                    key = _vantage_key(map_id, view.pose)
+                    key = (
+                        (item.job_id, view_id)
+                        if self._goal is not None and self._goal.search_mode is SearchMode.OBJECT
+                        else _vantage_key(map_id, view.pose)
+                    )
                     if map_id == frame.obstacle_map.frame_id and key not in self._clue_vantages:
                         self._clue_vantages.add(key)
                         self._clues.append(TargetClue(
                             f"semantic:{item.job_id}:{index + 1}", view.pose, view.timestamp_s, map_id,
+                            job_id=item.job_id, view_id=index + 1,
                         ))
                         new_clues.append(self._clues[-1].clue_id)
             self._received_jobs.append({
@@ -156,7 +166,8 @@ class QueuedSemanticObserver:
     def take_target_clue(self, state: SearchState) -> Optional[TargetClue]:
         """批次按 FIFO，批内按模型列表顺序；已有目标处理期间不消费下一条。"""
         if state.active_target_clue is not None or state.phase in (
-            SearchPhase.COMPLETE, SearchPhase.LOCALIZING_TARGET,
+            SearchPhase.COMPLETE, SearchPhase.STOPPED, SearchPhase.LOCALIZING_OBJECT, SearchPhase.APPROACHING_OBJECT,
+            SearchPhase.LOCALIZING_TARGET,
             SearchPhase.VERIFYING_TARGET, SearchPhase.REVISITING_TARGET,
         ):
             return None
@@ -197,7 +208,8 @@ class QueuedSemanticObserver:
         return bool(self._clues) or state.active_target_clue is not None or state.phase in (
             SearchPhase.REVISITING_TARGET, SearchPhase.LOCALIZING_TARGET,
             SearchPhase.VERIFYING_TARGET, SearchPhase.VERIFYING_SCENE,
-            SearchPhase.COMPLETE, SearchPhase.FAILED,
+            SearchPhase.LOCALIZING_OBJECT, SearchPhase.APPROACHING_OBJECT,
+            SearchPhase.COMPLETE, SearchPhase.FAILED, SearchPhase.STOPPED,
         )
 
     def diagnostics(self) -> Mapping[str, Any]:
@@ -219,9 +231,6 @@ class QueuedSemanticObserver:
         self._set_goal(goal)
         if scan_context is not None:
             self._capture_scan(frame, scan_context)
-        if self._local is not None:
-            # 联合请求已持有独立快照，本地检测不再写共享 VLM 扫描缓存。
-            return self._local.observe(frame, goal)
         if scan_context is None and self._state.phase in (
             SearchPhase.LOCALIZING_TARGET, SearchPhase.VERIFYING_TARGET,
         ):
@@ -257,30 +266,42 @@ class QueuedSemanticObserver:
         )
 
     def confirm_target(self, frame, goal, observation):
-        observer = self._local if self._local is not None else self._analyzer
-        return observer.confirm_target(frame, goal, observation)
+        return self._analyzer.confirm_target(frame, goal, observation)
+
+    def localize_object(self, frame: NavigationFrame, goal: TargetSearchGoal, state: SearchState) -> ObjectLocalization:
+        """历史 RGB-D 优先定位，障碍保底查询当前地图；保留两者各自的时间与位姿。"""
+        if self._object_localizer is None:
+            raise RuntimeError("物体接近缺少本地模型配置。")
+        clue = state.active_target_clue
+        try:
+            observation_frame = _read_clue_frame(self.directory, clue, frame)
+        except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+            return ObjectLocalization(reason=f"历史 RGB-D 不可用，继续下一条线索：{exc}")
+        context = {
+            "clue_id": clue.clue_id, "job_id": clue.job_id, "view_id": clue.view_id,
+            "source": "object_snapshot",
+            "phase": state.phase.value,
+            "robot_pose": asdict(frame.pose),
+            "localization_map": "full_navigation" if frame.navigation_map is not None else "exploration",
+            "map_timestamp_s": frame.timestamp_s,
+        }
+        result = self._object_localizer.locate(
+            observation_frame, goal,
+            context=context,
+        )
+        return result
 
     def submit_motion_frame(self, frame: NavigationFrame, goal: TargetSearchGoal) -> None:
         self._set_goal(goal)
-        if self._local is not None:
-            self._local.submit_motion_frame(frame, goal)
         with self._condition:
             if not self._closed and not self._background_paused and self._prefetch_enabled:
                 self._pending_frame = (frame, self._state)
                 self._condition.notify_all()
 
-    def set_motion_interrupt_enabled(self, enabled: bool) -> None:
-        """只控制本地目标检测中断；扫描转向允许检测，但不触发 VLM 预采样。"""
-        if self._local is not None:
-            self._local.set_motion_interrupt_enabled(enabled)
-
     def set_motion_prefetch_enabled(self, enabled: bool) -> None:
         """由动作入口单独控制 VLM 预采样；只在指定的平移动作期间接收帧。"""
         with self._condition:
             self._prefetch_enabled = bool(enabled) and not self._background_paused
-
-    def should_interrupt_motion(self) -> bool:
-        return self._local.should_interrupt_motion() if self._local is not None else False
 
     def wait_for_result(self, timeout_s: float = 1.0) -> None:
         with self._condition:
@@ -300,10 +321,10 @@ class QueuedSemanticObserver:
             self._pending_frame = None
             self._condition.notify_all()
         self._emit({"event": "stopped", "job_ids": stopped_jobs})
+        if self._object_localizer is not None:
+            self._object_localizer.close()
         self._capture_worker.join(timeout=1.0)
         self._worker.join(timeout=1.0)
-        if self._local is not None:
-            self._local.close()
         if remaining:
             print(f"视觉队列因退出停止，{remaining} 批任务未消费；快照保留在 {self.directory}", flush=True)
 
@@ -352,7 +373,8 @@ class QueuedSemanticObserver:
         has_visible_direction = has_frontier_direction_in_view(image, candidates)
         candidates = visible_frontier_candidates({1: image}, candidates)
         coverage = capture_semantic_view(frame, state.scan_observation_points or points)
-        return _CapturedView(image, coverage, frame.obstacle_map.frame_id), candidates, has_visible_direction
+        depth_gzip = _compress_aligned_depth(frame.depth, image.width_px, image.height_px)
+        return _CapturedView(image, coverage, frame.obstacle_map.frame_id, depth_gzip), candidates, has_visible_direction
 
     def _capture_loop(self) -> None:
         while True:
@@ -461,11 +483,16 @@ class QueuedSemanticObserver:
                     raise TypeError("联合分析器必须返回 SemanticAnalysis")
             except Exception as exc:
                 result = SemanticAnalysis(None, detection_error=str(exc) or type(exc).__name__)
+            depth_retention = _retain_clue_depth(folder, len(views), result.target_view_ids)
+            if depth_retention.get("errors"):
+                self._emit({"event": "depth_retention_failed", "job_id": job_id,
+                            "errors": depth_retention["errors"]})
+            result_record = {**asdict(result), "depth_retention": depth_retention}
             try:
-                (folder / "result.json").write_text(json.dumps(asdict(result), ensure_ascii=False), encoding="utf-8")
+                (folder / "result.json").write_text(json.dumps(result_record, ensure_ascii=False), encoding="utf-8")
             except (OSError, TypeError, ValueError) as exc:
                 self._emit({"event": "result_write_failed", "job_id": job_id, "reason": str(exc)})
-            self._emit({"event": "completed", "job_id": job_id, **asdict(result)})
+            self._emit({"event": "completed", "job_id": job_id, **result_record})
             with self._condition:
                 self._active_job = None
                 self._finished += 1
@@ -487,6 +514,57 @@ class QueuedSemanticObserver:
                 self._on_event = None
 
 
+def _compress_aligned_depth(
+    depth: Optional[DepthImage], width_px: int, height_px: int,
+) -> Optional[bytes]:
+    """复制与 RGB 同帧、同尺寸的米制深度；无效像素记为 null，压缩后不引用原始帧。"""
+    if depth is None:
+        return None
+    if len(depth) != height_px or any(len(row) != width_px for row in depth):
+        raise ValueError("快照深度必须与 RGB 对齐且尺寸相同")
+    rows = []
+    for row in depth:
+        values = []
+        for value in row:
+            number = float(value) if value is not None else float("nan")
+            values.append(number if math.isfinite(number) and number > 0.0 else None)
+        rows.append(values)
+    payload = {
+        "unit": "m", "width_px": width_px, "height_px": height_px, "values": rows,
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return gzip.compress(encoded, compresslevel=1, mtime=0)
+
+
+def _retain_clue_depth(
+    folder: Path, view_count: int, target_view_ids: Optional[Tuple[int, ...]],
+) -> Mapping[str, Any]:
+    """匹配画面转为正式深度文件；明确未匹配的删除临时文件，检测失败仍保留待判定数据。"""
+    if target_view_ids is None:
+        return {"status": "pending_detection"}
+    retained, missing, errors = [], [], []
+    for index in range(1, view_count + 1):
+        pending = folder / f"view-{index}.depth.pending.json.gz"
+        retained_path = folder / f"view-{index}.depth.json.gz"
+        try:
+            if index in target_view_ids:
+                if pending.is_file():
+                    pending.replace(retained_path)
+                if retained_path.is_file():
+                    retained.append(index)
+                else:
+                    missing.append(index)
+            else:
+                pending.unlink(missing_ok=True)
+        except OSError as exc:
+            # 磁盘失败不推翻有效目标检测；临时数据保留，供调用方识别深度是否可用。
+            errors.append({"view_id": index, "reason": str(exc)})
+    return {
+        "status": "selection_failed" if errors else "selected",
+        "retained_view_ids": retained, "missing_view_ids": missing, "errors": errors,
+    }
+
+
 def _write_snapshot(folder, views, candidates, goal, source, job_id):
     folder.mkdir()
     metadata = {"source": source, "goal": asdict(goal), "views": [], "candidates": []}
@@ -494,12 +572,15 @@ def _write_snapshot(folder, views, candidates, goal, source, job_id):
         image = view.image
         with gzip.open(folder / f"view-{index}.rgb.gz", "wb") as stream:
             stream.write(image.rgb_bytes)
+        if view.depth_gzip is not None:
+            (folder / f"view-{index}.depth.pending.json.gz").write_bytes(view.depth_gzip)
         metadata["views"].append({
             "map_frame_id": view.map_frame_id, "coverage": asdict(view.coverage),
             "width_px": image.width_px, "height_px": image.height_px,
             "intrinsics": asdict(image.intrinsics), "camera_yaw_rad": image.camera_yaw_rad,
             "camera_extrinsics_in_robot": asdict(image.camera_extrinsics_in_robot),
             "frontier_projections": [asdict(projection) for projection in image.frontier_projections],
+            "depth": {"captured": view.depth_gzip is not None, "encoding": "gzip-json", "unit": "m"},
         })
     for index, candidate in enumerate(candidates, 1):
         item = asdict(replace(candidate, candidate_id=f"snapshot:{job_id}:{index}", frontier_cells=()))
@@ -542,6 +623,39 @@ def _read_snapshot(folder):
             item["deferred_order"] = tuple(item["deferred_order"])
         candidates.append(FrontierCandidate(**item))
     return images, tuple(views), tuple(candidates), goal, tuple(region_ids), metadata["source"]
+
+
+def _read_clue_frame(directory: Path, clue: TargetClue, current: NavigationFrame) -> NavigationFrame:
+    """恢复拍摄时的 RGB-D、位姿和标定，保留当前同坐标系地图供障碍射线查询。"""
+    if clue.job_id is None or clue.view_id is None:
+        raise ValueError("线索缺少快照编号")
+    folder = directory / f"job-{clue.job_id:06d}"
+    metadata = json.loads((folder / "snapshot.json").read_text())
+    item = metadata["views"][clue.view_id - 1]
+    if item["map_frame_id"] != current.obstacle_map.frame_id:
+        raise ValueError("历史图像与当前地图坐标系不同")
+    width, height = item["width_px"], item["height_px"]
+    with gzip.open(folder / f"view-{clue.view_id}.rgb.gz", "rb") as stream:
+        raw_rgb = stream.read()
+    if len(raw_rgb) != width * height * 3:
+        raise ValueError("历史 RGB 数据长度错误")
+    depth = None
+    depth_path = folder / f"view-{clue.view_id}.depth.json.gz"
+    if depth_path.exists():
+        with gzip.open(depth_path, "rt", encoding="utf-8") as stream:
+            raw_depth = json.load(stream)
+        if raw_depth["unit"] != "m" or raw_depth["width_px"] != width or raw_depth["height_px"] != height:
+            raise ValueError("历史深度尺寸或单位不匹配")
+        values = raw_depth["values"]
+        if len(values) != height or any(len(row) != width for row in values):
+            raise ValueError("历史深度数据长度错误")
+        depth = tuple(tuple(float(value) if value is not None else None for value in row) for row in values)
+    rgb = tuple(tuple(tuple(raw_rgb[(row * width + col) * 3:(row * width + col + 1) * 3]) for col in range(width)) for row in range(height))
+    return replace(
+        current, rgb=rgb, depth=depth, pose=Pose2D(**item["coverage"]["pose"]),
+        timestamp_s=item["coverage"]["timestamp_s"], camera_intrinsics=CameraIntrinsics(**item["intrinsics"]),
+        camera_extrinsics_in_robot=CameraExtrinsics(**item["camera_extrinsics_in_robot"]),
+    )
 
 
 def _view_trace(views):

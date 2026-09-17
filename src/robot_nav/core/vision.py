@@ -43,6 +43,15 @@ def build_semantic_analysis_prompt(
         "target": {"view_ids": []},
         "scores": {label: 0.5 for label in marker_labels},
     }
+    arrival_behavior = (
+        "The robot will return to a listed capture position and heading and finish "
+        "navigation on arrival, without another visual check. "
+        if search_mode is SearchMode.SCENE else
+        "The robot will first localize a listed object using the saved RGB-D, then "
+        "approach from its current position. It tries the remaining saved views when "
+        "localization fails. Only if none can be localized will it return to a capture "
+        "pose and stop. List only objects with direct visual evidence. "
+    )
     return (
         f"Target: {target}.\n"
         f"Inputs: captured RGB views {list(view_ids)}, identified by V headers. "
@@ -54,9 +63,7 @@ def build_semantic_analysis_prompt(
         f"Task 1 - target detection: {detection} Check every view, including those without F labels. "
         "Return all matching integer view IDs in target.view_ids, ordered from strongest "
         "to weakest evidence, without duplicates. Do not keep only the best view. "
-        "Return [] when no view meets the target condition. The robot will return to "
-        "a listed capture position and heading and finish navigation on arrival, "
-        "without another visual check.\n"
+        "Return [] when no view meets the target condition. " + arrival_behavior + "\n"
         "Task 2 - exploration scoring: " + _frontier_scoring_rules() + "\n"
         "Output: return every listed F exactly once; with no F labels return empty scores. "
         "Return JSON only, without explanations or Markdown: "
@@ -121,6 +128,18 @@ def build_target_visibility_prompt(target_text: str) -> str:
         "from room-level common sense. Choose exactly one of the two labels. "
         "Return exactly one of these JSON objects, without Markdown: "
         '{"visibility":"visible"} or {"visibility":"not_visible"}'
+    )
+
+
+def build_object_localization_prompt(target_text: str) -> str:
+    """用同一次请求判断目标身份并取得框，供历史定位和到达后的新图确认共用。"""
+    return (
+        f"Find the physical object described by {_target_json(target_text)} in this RGB image. "
+        "Require direct evidence of the object itself, not room context or a related sign. "
+        "If multiple instances match, choose one clearly visible instance. Return JSON only: "
+        '{"visibility":"visible","bbox_2d":[xmin,ymin,xmax,ymax]} '
+        "with coordinates from 0 to 1000 relative to the full image. "
+        'If no matching object is visible, return {"visibility":"not_visible"}.'
     )
 
 
@@ -333,6 +352,7 @@ def _finite_float(value: Any) -> Optional[float]:
 
 
 __all__ = [
+    "build_object_localization_prompt",
     "build_frontier_scores_prompt",
     "build_scene_assessment_prompt",
     "build_semantic_analysis_prompt",

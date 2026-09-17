@@ -25,17 +25,40 @@ def is_world_point_reachable(
     world_xy: Tuple[float, float],
 ) -> bool:
     """目标格属于机器人当前四邻接 BFS 可达自由区时返回 True。"""
+    target = world_to_nearest_grid_cell(world_xy, obstacle_map)
+    return target in reachable_free_distances(obstacle_map, pose)
+
+
+def reachable_free_distances(
+    obstacle_map: ObstacleMap,
+    pose: Pose2D,
+    *,
+    clearance_m: float = 0.0,
+) -> Dict[Cell, int]:
+    """返回可达自由格到机器人所在自由区起点的步数；原始地图可指定净空半径。"""
     grid = _normalize_grid(obstacle_map)
+    resolution = _positive_finite(obstacle_map.resolution_m, "resolution_m")
+    clearance_m = _non_negative_finite(clearance_m, "clearance_m")
     free_cells = _free_cells(grid)
+    if clearance_m > 0.0:
+        steps = int(math.ceil(clearance_m / resolution))
+        offsets = tuple(
+            (dr, dc) for dr in range(-steps, steps + 1) for dc in range(-steps, steps + 1)
+            if math.hypot(dr, dc) * resolution <= clearance_m
+        )
+        for row, values in enumerate(grid):
+            for col, value in enumerate(values):
+                if value is not None and value > 0.5:
+                    for dr, dc in offsets:
+                        free_cells.discard((row + dr, col + dc))
     if not free_cells:
-        return False
+        return {}
 
     requested_seed = world_to_nearest_grid_cell(
         (pose.x_m, pose.y_m), obstacle_map
     )
     seed = _nearest_free_cell(requested_seed, free_cells)
-    target = world_to_nearest_grid_cell(world_xy, obstacle_map)
-    return target in _reachable_free_distances(seed, free_cells)
+    return _reachable_free_distances(seed, free_cells)
 
 
 def find_frontier_candidates(
@@ -454,4 +477,5 @@ __all__ = [
     "SEMANTIC_SCORE_WEIGHT",
     "find_frontier_candidates",
     "is_world_point_reachable",
+    "reachable_free_distances",
 ]

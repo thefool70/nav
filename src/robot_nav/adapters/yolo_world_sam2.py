@@ -107,7 +107,7 @@ class YoloWorldSam2TargetObserver:
         self._semantic_advisor = semantic_advisor
         self._config = config
         self._on_local_perception = on_local_perception
-        self._detector = _YoloWorldSam2Detector(config)
+        self._detector = YoloWorldSam2Detector(config)
 
         self._condition = threading.Condition()
         self._required_request: Optional[_DetectionRequest] = None
@@ -341,18 +341,21 @@ class YoloWorldSam2TargetObserver:
             pass
 
 
-class _YoloWorldSam2Detector:
-    """单线程拥有 YOLO 与 SAM2 模型，避免并发访问 GPU predictor。"""
+class YoloWorldDetector:
+    """只负责 YOLO 框检测，初始化与检测不依赖 SAM2。"""
 
-    def __init__(self, config: YoloWorldSam2Config) -> None:
+    def __init__(self, config: YoloWorldSam2Config, on_stage=None) -> None:
+        on_stage = on_stage or (lambda stage: None)
         model_path = Path(config.model_path)
         if not model_path.is_file():
             raise RuntimeError(f"缺少 YOLO-World 模型文件：{model_path}")
+        on_stage("importing_yolo")
         try:
             from ultralytics import YOLOWorld
         except ImportError as exc:
             raise RuntimeError("当前 Python 环境未安装 ultralytics") from exc
 
+        on_stage("loading_yolo")
         try:
             self._model = YOLOWorld(str(model_path), verbose=False)
         except Exception as exc:
@@ -361,6 +364,7 @@ class _YoloWorldSam2Detector:
             ) from exc
         self._config = config
         target_text = config.class_text.strip()
+        on_stage("encoding_class_text")
         try:
             self._model.set_classes([target_text])
         except Exception as exc:
@@ -368,14 +372,10 @@ class _YoloWorldSam2Detector:
                 "YOLO-World 类别初始化失败；请确认 CLIP ViT-B/32 权重可用："
                 f"{_exception_text(exc)}"
             ) from exc
-        self._segmenter = Sam2BoxSegmenter(config.sam2)
 
-    def detect(
-        self,
-        frame: NavigationFrame,
-    ) -> Tuple[TargetObservation, int]:
-        """返回置信度最高且能产生 SAM2 掩码的目标候选。"""
-        rgb = _as_rgb_array(frame.rgb)
+    def detect_boxes(self, rgb) -> Tuple[Tuple[TargetObservation, ...], int]:
+        """按置信度返回目标框；未检出返回空列表，不运行分割。"""
+        rgb = _as_rgb_array(rgb)
         # Ultralytics 的 numpy 输入约定为 OpenCV BGR。
         bgr = np.ascontiguousarray(rgb[:, :, ::-1])
         results = self._model.predict(
@@ -387,33 +387,49 @@ class _YoloWorldSam2Detector:
             verbose=False,
         )
         if not results or results[0].boxes is None:
-            return _not_visible(), 0
+            return (), 0
 
         boxes = results[0].boxes.cpu().numpy()
         normalized_boxes = np.asarray(boxes.xyxyn, dtype=np.float64)
         confidences = np.asarray(boxes.conf, dtype=np.float64)
         candidate_count = len(confidences)
         if candidate_count == 0:
-            return _not_visible(), 0
+            return (), 0
 
-        self._segmenter.set_image(rgb)
+        observations = []
         for index in np.argsort(-confidences):
             bbox_norm = _normalized_box(normalized_boxes[int(index)])
             if bbox_norm is None:
                 continue
-            mask = self._segmenter.segment_box(bbox_norm)
-            if mask is None:
-                continue
-            return (
-                TargetObservation(
-                    visibility=TargetVisibility.VISIBLE,
-                    bbox_norm=bbox_norm,
-                    target_mask=mask,
-                    source="yolo_world_sam2",
-                    confidence=float(confidences[int(index)]),
-                ),
-                candidate_count,
-            )
+            observations.append(TargetObservation(
+                TargetVisibility.VISIBLE, bbox_norm=bbox_norm, source="yolo_world",
+                confidence=float(confidences[int(index)]),
+            ))
+        return tuple(observations), candidate_count
+
+
+class YoloWorldSam2Detector(YoloWorldDetector):
+    """同步观察器复用 YOLO 框检测，再用同帧 SAM2 编码分割候选。"""
+
+    def __init__(self, config: YoloWorldSam2Config):
+        super().__init__(config)
+        self._segmenter = Sam2BoxSegmenter(config.sam2)
+
+    def detect(self, frame: NavigationFrame) -> Tuple[TargetObservation, int]:
+        return self.detect_rgb(frame.rgb)
+
+    def detect_rgb(self, rgb) -> Tuple[TargetObservation, int]:
+        observations, candidate_count = self.detect_boxes(rgb)
+        if not observations:
+            return _not_visible(), candidate_count
+        self._segmenter.set_image(rgb)
+        for observation in observations:
+            mask = self._segmenter.segment_box(observation.bbox_norm)
+            if mask is not None:
+                return TargetObservation(
+                    TargetVisibility.VISIBLE, bbox_norm=observation.bbox_norm, target_mask=mask,
+                    source="yolo_world_sam2", confidence=observation.confidence,
+                ), candidate_count
 
         return (
             TargetObservation(
@@ -499,6 +515,8 @@ def _exception_text(exc: Exception) -> str:
 
 
 __all__ = [
+    "YoloWorldDetector",
+    "YoloWorldSam2Detector",
     "DEFAULT_YOLO_WORLD_MODEL_PATH",
     "YoloWorldSam2Config",
     "YoloWorldSam2TargetObserver",

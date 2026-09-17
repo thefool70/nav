@@ -27,12 +27,13 @@ def ground_target_bbox(
     min_valid_points: int = 8,
     no_valid_depth_fallback_m: Optional[float] = None,
     target_mask: Optional[MaskImage] = None,
+    filter_background: bool = True,
 ) -> TargetEstimate:
     """返回目标在机器人与世界坐标系中的位置；输入不可靠时显式失败。
 
     有 ``target_mask`` 时只使用掩码像素；否则优先使用目标框中央区域，深度
     不足时退回完整目标框。``no_valid_depth_fallback_m`` 只在目标区域完全
-    没有有效深度时使用。
+    没有有效深度时使用。``filter_background=False`` 时保留全部有效深度点。
     """
     bbox = _normalize_bbox(bbox_norm)
     if bbox is None:
@@ -46,8 +47,10 @@ def ground_target_bbox(
         return TargetEstimate(False, "camera_extrinsics_invalid")
     if (
         not _is_finite(min_depth_m)
-        or not _is_finite(max_depth_m)
-        or float(min_depth_m) <= 0.0
+        or isinstance(max_depth_m, bool)
+        or not isinstance(max_depth_m, (int, float))
+        or math.isnan(float(max_depth_m))
+        or float(min_depth_m) < 0.0
         or float(max_depth_m) <= float(min_depth_m)
     ):
         return TargetEstimate(False, "target_depth_range_invalid")
@@ -132,11 +135,12 @@ def ground_target_bbox(
             sample_count=len(points_base),
         )
 
-    points_base = _keep_near_points(points_base)
+    if filter_background:
+        points_base = _keep_near_points(points_base)
     target_forward = float(statistics.median(point[0] for point in points_base))
     target_left = float(statistics.median(point[1] for point in points_base))
     distance = math.hypot(target_forward, target_left)
-    if not math.isfinite(distance) or distance <= 0.05:
+    if not math.isfinite(distance):
         return TargetEstimate(
             False, "target_distance_invalid", sample_count=len(points_base)
         )
@@ -186,7 +190,7 @@ def _depth_points_in_robot(
             if raw_depth is None or not _is_finite(raw_depth):
                 continue
             forward_camera = float(raw_depth)
-            if not min_depth_m <= forward_camera <= max_depth_m:
+            if forward_camera <= 0.0 or not min_depth_m <= forward_camera <= max_depth_m:
                 continue
             point_base = _camera_pixel_to_robot(
                 row,
@@ -225,7 +229,7 @@ def _depth_points_in_mask(
             if raw_depth is None or not _is_finite(raw_depth):
                 continue
             forward_camera = float(raw_depth)
-            if not min_depth_m <= forward_camera <= max_depth_m:
+            if forward_camera <= 0.0 or not min_depth_m <= forward_camera <= max_depth_m:
                 continue
             point_base = _camera_pixel_to_robot(
                 row_index,
@@ -318,7 +322,7 @@ def _camera_pixel_to_robot(
     forward_camera: float,
     intrinsics: CameraIntrinsics,
     extrinsics: CameraExtrinsics,
-) -> Optional[Tuple[float, float]]:
+) -> Tuple[float, float]:
     """把一个带深度的相机像素投影到机器人平面。"""
     left_camera = -(
         (float(col) - float(intrinsics.cx))
@@ -336,8 +340,6 @@ def _camera_pixel_to_robot(
         up_camera,
         extrinsics,
     )
-    if forward_base <= 0.05:
-        return None
     return forward_base, left_base
 
 

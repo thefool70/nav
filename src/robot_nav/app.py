@@ -61,6 +61,7 @@ def run_navigation_cycle(
             state = replace(state, active_target_clue=clue)
         state = _observer_state(observer, frame, state)
     result = navigate(frame, goal, state)
+    result = _apply_object_localization(frame, goal, result, observer)
     result, observation = _apply_target_observation(
         frame,
         goal,
@@ -98,7 +99,7 @@ def _apply_target_observation(
     """按状态机需要读取当前视觉结果；持续观察器可抢占普通决策。"""
     if (
         observer is None
-        or result.state.phase is SearchPhase.COMPLETE
+        or result.state.phase in (SearchPhase.COMPLETE, SearchPhase.STOPPED)
         or (state is not None and state.active_target_clue is not None)
     ):
         return result, None
@@ -147,6 +148,17 @@ def _apply_scene_assessment(
         current_state,
         scene_assessment=assessment,
     )
+
+
+def _apply_object_localization(frame, goal, result, observer) -> NavigationResult:
+    """按请求读取历史 RGB-D；本周期只消费一次定位结果。"""
+    if result.status is not NavigationStatus.NEEDS_OBJECT_LOCALIZATION:
+        return result
+    if not isinstance(observer, QueuedSemanticObserver):
+        return result
+    state = _observer_state(observer, frame, result.state)
+    localization = observer.localize_object(frame, goal, state)
+    return navigate(frame, goal, state, object_localization=localization)
 
 
 def _apply_target_confirmation(
@@ -231,11 +243,17 @@ def _execute_command(
             and (result.command.forward_m != 0.0 or result.command.left_m != 0.0)
         )
     try:
-        if stage in ("explore.select", "backtrack.return", "backtrack.resume", "target.revisit") and isinstance(
+        if stage in ("explore.select", "backtrack.return", "backtrack.resume", "target.revisit", "object.fallback_return", "object.approach") and isinstance(
             chassis, KnownSpaceChassisInterface,
         ):
+            # 物体停靠与选点使用同一份完整地图；探索和返回仍约束在 FOV 缓存图中。
+            path_map = (
+                frame.navigation_map
+                if stage == "object.approach" and frame.navigation_map is not None
+                else frame.obstacle_map
+            )
             chassis.send_relative_pose_in_known_space(
-                result.command, frame.obstacle_map, reference_pose=frame.pose,
+                result.command, path_map, reference_pose=frame.pose,
             )
         else:
             chassis.send_relative_pose(result.command)

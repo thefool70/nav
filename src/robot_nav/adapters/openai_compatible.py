@@ -38,6 +38,7 @@ from ..core.vision import (
     build_target_confirmation_prompt,
     build_target_grounding_prompt,
     build_target_visibility_prompt,
+    build_object_localization_prompt,
     parse_frontier_scores_response,
     parse_scene_assessment_response,
     parse_target_confirmation_response,
@@ -79,6 +80,7 @@ class OpenAICompatibleConfig:
     api_format: OpenAIApiFormat = OpenAIApiFormat.CHAT_COMPLETIONS
     max_output_tokens: int = 2048
     reasoning_effort: Optional[str] = None
+    opencode_session_id: Optional[str] = None
 
 
 class OpenAICompatibleTargetObserver:
@@ -146,6 +148,33 @@ class OpenAICompatibleTargetObserver:
             error="; ".join(value for value in (result.detection_error, result.scoring_error) if value),
         )
         return result
+
+    def locate_object(
+        self, frame: NavigationFrame, goal: TargetSearchGoal, *, context=None,
+    ) -> TargetObservation:
+        """一帧一次请求，返回目标身份判断与框；不参与普通扫描的实时抢占。"""
+        if frame.rgb is None:
+            return _uncertain("物体定位缺少 RGB。")
+        image = pack_rgb_image(frame.rgb)
+        prompt = build_object_localization_prompt(goal.target_text)
+        interaction = self._begin_interaction(
+            "object_localization", prompt, image,
+            context={**_frame_trace_context(frame, "object_localization"), **(context or {})},
+        )
+        assistant_text, response_json = "", ""
+        try:
+            payload, response_json = self._request_model(prompt, image)
+            assistant_text = self._response_text(payload)
+            visibility = parse_target_visibility_response(assistant_text)
+            bbox = parse_target_grounding_response(assistant_text) if visibility is TargetVisibility.VISIBLE else None
+        except Exception as exc:
+            self._finish_interaction(interaction, assistant_text=assistant_text, response_json=response_json, error=_exception_text(exc))
+            return _uncertain(_failure_reason("物体定位请求失败", exc))
+        self._finish_interaction(
+            interaction, assistant_text=assistant_text, response_json=response_json,
+            parsed_result=json.dumps({"visibility": visibility.value, "bbox_norm": bbox}), bbox_norm=bbox,
+        )
+        return TargetObservation(visibility, bbox_norm=bbox, source="vlm")
 
     def observe(
         self,
@@ -534,6 +563,8 @@ class OpenAICompatibleTargetObserver:
         error: str = "",
     ) -> None:
         """把原始回应、解析结果或错误补到同一条交互记录。"""
+        if error:
+            print(f"VLM 请求 R{interaction.interaction_id:06d}（{interaction.task}）失败：{error}", flush=True)
         self._emit_interaction(
             replace(
                 interaction,
@@ -572,6 +603,8 @@ class OpenAICompatibleTargetObserver:
                 )
         if self._config.api_format is OpenAIApiFormat.ANTHROPIC_MESSAGES:
             headers["anthropic-version"] = "2023-06-01"
+        if self._config.opencode_session_id is not None:
+            headers["x-opencode-session"] = self._config.opencode_session_id
         request = Request(
             self._config.endpoint_url.strip(),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -691,6 +724,12 @@ def _validate_config(config: OpenAICompatibleConfig) -> None:
         raise ValueError("model 不能为空")
     if not isinstance(config.api_key, str):
         raise ValueError("api_key 必须是字符串")
+    if config.opencode_session_id is not None and (
+        not isinstance(config.opencode_session_id, str)
+        or not config.opencode_session_id
+        or any(not 33 <= ord(char) <= 126 for char in config.opencode_session_id)
+    ):
+        raise ValueError("opencode_session_id 必须是不含空白的 ASCII 字符串或 None")
     if not isinstance(config.api_format, OpenAIApiFormat):
         raise ValueError("api_format 必须是 OpenAIApiFormat")
     if config.reasoning_effort is not None:

@@ -79,6 +79,10 @@ class NavigationFrame:
     camera_intrinsics 为可选相机内参；camera_extrinsics_in_robot 为相机在
     机器人局部前/左/上坐标系中的六自由度外参（无相机时保持默认零外参）。
 
+    navigation_map 可提供同坐标系的完整、未膨胀障碍图，仅用于物体定位与接近；
+    navigation_clearance_m 为该图选停靠点时采用的机器人净空半径（米）。
+    未提供时沿用 obstacle_map，不额外膨胀。探索始终只使用 obstacle_map。
+
     契约：pose 在进入 core 前必须已转换到 obstacle_map.frame_id 坐标系，
     core 内部不再做坐标转换。
     """
@@ -92,6 +96,8 @@ class NavigationFrame:
     camera_extrinsics_in_robot: CameraExtrinsics = field(
         default_factory=CameraExtrinsics
     )
+    navigation_map: Optional[ObstacleMap] = None
+    navigation_clearance_m: float = 0.0
 
 
 class SearchMode(str, Enum):
@@ -180,12 +186,38 @@ class SemanticAnalysis:
 
 @dataclass(frozen=True)
 class TargetClue:
-    """检测画面对应的返回位姿；pose 是拍摄时的机器人位姿，不是物体位置。"""
+    """目标线索的拍摄位姿与快照编号；pose 是机器人位姿，不是物体位置。"""
 
     clue_id: str
     pose: Pose2D
     timestamp_s: float
     map_frame_id: str
+    job_id: Optional[int] = None
+    view_id: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ObjectLocalization:
+    """地图系物体位置；source 区分 RGB-D 定位与 bbox_obstacle/front_obstacle 假设。"""
+
+    target_world_xy: Optional[Tuple[float, float]] = None
+    visibility: TargetVisibility = TargetVisibility.UNCERTAIN
+    vlm_confirmation: TargetConfirmation = TargetConfirmation.UNCERTAIN
+    source: str = ""
+    sample_count: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ObjectApproachState:
+    """当前线索的接近状态，以及处理整批历史线索时保留的返回保底位姿。"""
+
+    target: Optional[ObjectLocalization] = None
+    destination: Optional[Pose2D] = None
+    tried_positions: Tuple[Tuple[float, float], ...] = ()
+    fallback_clue: Optional[TargetClue] = None
+    history_localized: bool = False
+    capture_turns: int = 0
 
 
 @dataclass(frozen=True)
@@ -308,6 +340,9 @@ class SearchPhase(Enum):
     BACKTRACKING = "backtracking"
     WAITING_FOR_SEMANTICS = "waiting_for_semantics"
     REVISITING_TARGET = "revisiting_target"
+    LOCALIZING_OBJECT = "localizing_object"
+    APPROACHING_OBJECT = "approaching_object"
+    STOPPED = "stopped"
     COMPLETE = "complete"
     FAILED = "failed"
 
@@ -361,7 +396,9 @@ class SearchState:
     blocked_frontier_regions 保留因未知路径长度超限被取消的完整区域，防止换代表点重试。
     branch_node_ids 按根到叶保存当前分支的出发节点；逐个返回，已退完节点出栈。
     backtrack_node_id 是正在返回的栈顶父节点，到达后才检查该节点的暂存方向。
-    pending_target_world_xy 与 rejected_target_world_xy 用于目标最终确认。"""
+    active_target_clue 在物体定位、接近和保底返回期间保留拍摄位姿与快照编号。
+    object_approach 保存定位和重试记录，以及所有历史无法定位时的保底返回线索。
+    pending_target_world_xy 与 rejected_target_world_xy 用于同步观测的目标最终确认。"""
 
     phase: SearchPhase = SearchPhase.SCANNING
     scan_headings_world_rad: Tuple[float, ...] = ()
@@ -385,6 +422,7 @@ class SearchState:
     pending_semantic_jobs: int = 0
     failed_semantic_jobs: int = 0
     active_target_clue: Optional[TargetClue] = None
+    object_approach: ObjectApproachState = field(default_factory=ObjectApproachState)
     pending_observation_views: Tuple[ObservationView, ...] = ()
 
 
@@ -398,6 +436,7 @@ class NavigationStatus(Enum):
     NEEDS_SCENE_ASSESSMENT = "needs_scene_assessment"
     NEEDS_FRONTIER_SCORES = "needs_frontier_scores"
     NEEDS_TARGET_CONFIRMATION = "needs_target_confirmation"
+    NEEDS_OBJECT_LOCALIZATION = "needs_object_localization"
     MISSING_DATA = "missing_data"
 
 

@@ -13,6 +13,7 @@ from ...core.models import (
     RelativePoseCommand,
 )
 from ..realsense import L515Camera, L515Capture, L515Config
+from ..chassis import RecoverableMotionError
 from .mapping import CameraMount, DepthOccupancyMap, DepthOccupancyMapConfig
 from .motion import S100MotionConfig, S100MotionController
 from .planner import plan_known_free_path
@@ -146,12 +147,15 @@ class S100L515Adapter:
             if remaining <= self.config.motion.position_tolerance_m:
                 return
 
-            path = plan_known_free_path(
-                frame.obstacle_map,
-                (pose.x_m, pose.y_m),
-                target_world_xy,
-                self.config.robot_radius_m,
-            )
+            try:
+                path = plan_known_free_path(
+                    frame.obstacle_map,
+                    (pose.x_m, pose.y_m),
+                    target_world_xy,
+                    self.config.robot_radius_m,
+                )
+            except RuntimeError as exc:
+                raise RecoverableMotionError(str(exc)) from exc
             next_world_xy = _limit_step(
                 (pose.x_m, pose.y_m),
                 path[0],
@@ -160,7 +164,7 @@ class S100L515Adapter:
             self._drive_map_step(motion, pose, next_world_xy)
             frame = self._publish_stopped_frame()
 
-        raise RuntimeError("S100 分段规划次数已用尽，仍未到达相对位姿目标")
+        raise RecoverableMotionError("S100 分段规划次数已用尽，仍未到达相对位姿目标")
 
     def _drive_map_step(
         self,
