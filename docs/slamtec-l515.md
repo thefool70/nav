@@ -1,17 +1,24 @@
-# Hermes + L515 真机 Adapter
+# Hermes + D435i 真机 Adapter
 
-这是当前主要真机链路。Hermes 提供地图位姿、激光栅格图、自主路径规划和运动
-控制；外接 L515 提供对齐 RGB-D。`SlamtecL515Adapter` 把两者组合成统一的
+这是当前主要真机链路，由原 Hermes + L515 直连版本改为 D435i。Hermes 提供地图位姿、激光栅格图、自主路径规划和运动
+控制；外接 D435i 提供对齐 RGB-D。`SlamtecL515Adapter` 把两者组合成统一的
 `NavigationFrame`，核心算法不包含思岚或 RealSense 分支。
+
+使用香橙派网口连接 Hermes、USB 连接 D435i 时，改用独立的 `orangepi` 入口，
+香橙派只做数据转发，详见 [无线适配说明](orangepi.md)。该入口不需要本机 USB 转发。
 
 ```text
 Hermes 位姿 + 激光地图 ───────────────┐
-L515 RGB-D + 标定参数 ─► 有效地图处理 ─┼─► NavigationFrame ─► core
-                          │             │
-                          └─► YOLO + SAM2（物体模式）
+D435i RGB-D + 标定参数 ─► 有效地图处理 ─┼─► NavigationFrame ─► core
+D435i RGB ─► VLM 视觉队列 ─────────────┘
 
 core 相对位姿 ─► 地图系目标 ─► Hermes MoveTo / Rotate Action
 ```
+
+目录 `hardware/slamtec_l515/`、Python 类名和安装 extra `slamtec-l515` 沿用原名；
+CLI 使用 `slamtec-d435i` 和 `calibrate-slamtec-d435i`，旧 CLI 名作为别名也使用 D435i。
+本机直接采集 USB 图像和 IMU，无需启动 `orangepi.server` 或 SSH 隧道。
+运行前关闭仍占用 D435i 的相机服务。旧 L515 安装外参不能用于这台相机。
 
 ## 首次安装
 
@@ -22,13 +29,15 @@ hardware/realsense/build_rsusb.sh
 hardware/realsense/setup_usb_permissions.sh
 ```
 
-RSUSB 用来绕过标准 WSL 内核缺少 L515 Motion Module HID/IIO 枚举的问题。构建
+D435i 固件 5.17.0.10 使用配套的 librealsense 2.56.5；本机 RSUSB 构建默认安装该版本。
+该后端直接访问 USB，不依赖 WSL 内核的相机 HID/IIO 驱动。构建
 脚本需要系统已有 `git`、`cmake` 和 C++ 编译器；权限脚本会请求一次 WSL
 `sudo`。
 
 以后通过 `hardware/slamtec_l515/run.sh` 启动带相机的命令。脚本会识别 Windows
-侧 L515、通过 `usbipd` 转发到 WSL，并注入 RSUSB 库。首次强制绑定会弹出
-Windows UAC；绑定期间 Windows 侧不能同时使用相机。若已手动转发，可以设置：
+侧 D435i、通过 `usbipd` 转发到 WSL，并注入 RSUSB 库。首次强制绑定会弹出
+Windows UAC；绑定期间 Windows 侧不能同时使用相机。只有已经完成强制绑定并
+转发后，才可跳过这一步：
 
 ```bash
 export ROBOT_NAV_SKIP_USB_PREPARE=1
@@ -40,21 +49,31 @@ export ROBOT_NAV_SKIP_USB_PREPARE=1
 usbipd unbind --busid <BUSID>
 ```
 
+升级 SDK 后需退出并重启已有相机进程，旧进程不会自动切换到新库。
+若 IMU 在总期限内两路均为 0，先核对当前加载的 SDK 与相机固件，再检查
+Windows 的 `usbipd` 绑定方式。普通共享即使显示 Attached，RGB-D 也能使用，
+仍可能在相机流关闭、重开后没有 IMU 数据。此时取消
+`ROBOT_NAV_SKIP_USB_PREPARE=1`，让启动脚本执行 `bind --force` 并重新转发；
+Windows 枚举名称中的 `435i` 与 `D435i` 均受支持。
+恢复后应检查连续两轮 RGB-D/IMU 切换，不能只用一次冷启动读取判定恢复。
+不要通过延长等待或放宽静止门槛掩盖无数据的问题。官方配套表见
+[RealSense 固件发布说明](https://dev.realsenseai.com/docs/firmware-releases-d400/)。
+
 ## 预检
 
-只检查 Hermes，不连接 L515：
+只检查 Hermes，不连接 D435i：
 
 ```bash
-python -m robot_nav slamtec-l515 \
+python -m robot_nav slamtec-d435i \
   --preflight-only \
   --base-only
 ```
 
-检查 Hermes、L515、位姿和地图的完整链路：
+检查 Hermes、D435i、位姿和地图的完整链路：
 
 ```bash
 hardware/slamtec_l515/run.sh \
-  python -m robot_nav slamtec-l515 \
+  python -m robot_nav slamtec-d435i \
   --preflight-only
 ```
 
@@ -66,20 +85,22 @@ hardware/slamtec_l515/run.sh \
   `--min-localization-quality`，默认 1。
 - `mode=odometry`、`health=error` 或 `health=fatal`：拒绝运动。
 
-## 标定 L515
+## 标定 D435i
 
 相机固定后标定一次；安装位置改变后必须重做。程序会左右旋转并向前移动约
 0.20 m，执行前清空四周及前方至少 0.5 m，并确保可以立即急停。
+画面应同时包含地面和约 1–3 m 的静止纹理物体。程序在运动前检查至少 80 个
+RGB 特征点有 0.25–4 m 的可用深度；空旷地面或远景纹理不能替代这一条件。
 
 ```bash
 hardware/slamtec_l515/run.sh \
-  python -m robot_nav calibrate-slamtec-l515 \
+  python -m robot_nav calibrate-slamtec-d435i \
   --enable-motion
 ```
 
 标定使用 Motion Module、深度地面拟合、RGB-D 视觉运动和 Hermes 位姿，估计
 相机的前、左、高度、yaw、pitch 和 roll。结果默认保存到
-`data/slamtec_l515/extrinsics.json`，导航时自动读取。它是算法开发所需的初值，
+`data/hermes_d435i/extrinsics.json`，导航时自动读取。它是算法开发所需的初值，
 不是计量级标定。
 
 无法自动标定时，至少用 `--camera-height-m` 提供手测高度；其余字段可用
@@ -92,31 +113,29 @@ hardware/slamtec_l515/run.sh \
 
 ```bash
 hardware/slamtec_l515/run.sh \
-  python -m robot_nav slamtec-l515 \
+  python -m robot_nav slamtec-d435i \
   --target "门口" \
-  --yolo-class "doorway" \
   --enable-motion \
   --max-cycles 100
 ```
 
-`--yolo-class` 是可选参数。默认直接使用 `--target`；只有目标是中文长描述或不适合
-开放词汇检测时，才需要额外给出简短英文类别。
+物体模式与 Habitat、S100 共用后台 VLM 队列，联合检测目标与评分 Frontier。
+收到线索后先用历史 RGB-D 做 YOLO/VLM 检测、SAM2 分割与定位，直接前往目标
+附近的可达停靠点，YOLO 或 VLM 任一路检出即可使用。深度定位失败时，有框沿
+框中心方向、无框沿拍摄时光轴，在完整导航图中查询首个障碍作为位置假设。
+历史线索失败时原地继续
+其他画面，全部无法定位才保底返回拍摄位姿并停止。停靠命令执行成功后直接完成；
+实际运动失败才有限换点或继续下一条线索，详见 [物体接近](algorithm.md#物体接近)。
 
-物体模式会加载：
-
-- `data/models/yolo-world/yolov8s-world.pt`
-- `data/models/sam2/sam2.1_hiera_small.pt`
-
-YOLO-World 持续检测候选，SAM2 用候选框生成掩码。后台 VLM 对选取的固定画面
-联合检查目标与评分 Frontier，发现目标后提供拍摄位置线索；机器人接近候选后
-仍使用新画面做最终确认。默认 YOLO 与 SAM2
-都使用 CUDA；可分别用 `--yolo-device cpu`、`--sam2-device cpu` 排错。
+本地模型按需启动后常驻，默认复用已有 `robot-nav` 环境。`--object-python` 可指定
+模型环境解释器，`--object-class` 可提供简短 YOLO 类别，`--object-device` 默认
+为 `cuda`；`--object-yolo-model` 与 `--object-sam-checkpoint` 可指定权重。
 
 ## 运行场景搜索
 
 ```bash
 hardware/slamtec_l515/run.sh \
-  python -m robot_nav slamtec-l515 \
+  python -m robot_nav slamtec-d435i \
   --search-mode scene \
   --target "洗手间" \
   --enable-motion \
@@ -135,7 +154,7 @@ hardware/slamtec_l515/run.sh \
 
 ```bash
 hardware/slamtec_l515/run.sh \
-  python -m robot_nav slamtec-l515 \
+  python -m robot_nav slamtec-d435i \
   --target "门口" \
   --debug-random-score \
   --debug-frontier \
@@ -151,13 +170,13 @@ hardware/slamtec_l515/run.sh \
 可恢复失败也从实际朝向重新规划观察。
 
 后续探索一次下发选定的最终 Frontier，等待 Hermes 动作结束后，仅补查局部可见
-且尚未检查的 Frontier 方向，再选择下一目标；场景模式仍采集当前画面判断所在
-场景。新候选耗尽后，沿当前分支逐个返回；每到一个节点，有有效方向就继续探索，
+且尚未检查的 Frontier 方向，再选择下一目标；两种模式没有待查方向时仍采集
+当前画面检查目标。新候选耗尽后，沿当前分支逐个返回；每到一个节点，有有效方向就继续探索，
 没有则再退一层。日志分别为 `backtrack.return` 和 `backtrack.resume`，
 父节点到达容差为 0.25 m。
 核心不插入固定两米停靠。实际路径仍由 Hermes 规划，Frontier 探索与返回父节点
-及返回目标线索位置都会检查路径是否经过算法未知区。目标接近沿用原有距离规则，YOLO-World + SAM2 持续检测
-不受扫描方向限制。
+及返回目标线索位置都会检查路径是否经过算法未知区。后台结果在下一周期接收，
+不因本地检测中断扫描或移动。
 
 ## 地图处理
 
@@ -167,20 +186,35 @@ Hermes 原始栅格值在 Adapter 中转换为：
 - `1..127`：自由。
 - `128..255`：占用。
 
-算法使用的地图是原始地图的临时视图，不会写回或修改 Hermes 内部地图：
+探索图 `obstacle_map` 独立缓存占用值，不会写回或修改 Hermes 内部地图：
 
-1. 累计 L515 理论水平 FOV 内、最远 5 m 的地图格；不按深度或障碍遮挡截断。
-2. 始终加入程序启动位置周围 0.50 m 的区域。
-3. 未观察区域设为未知。
-4. 对已观察障碍膨胀 0.36 m，避免把机器人中心规划到车体无法进入的位置。
+1. 只读取并更新 D435i **当前**理论水平 FOV 内、最远 5 m 的地图格，不按深度或障碍遮挡截断。
+2. 启动位置周围 0.50 m 仅初始化一次；之后也只有进入当前 FOV 才更新。
+3. 视场外保留上次记录的占用值，不跟随底盘新地图刷新；从未公开的区域保持未知。
+4. 障碍仍按 0.36 m 半径膨胀，膨胀结果也只写回本次允许更新的区域。
 
-该累计只存在于当前进程，重新启动后从头建立。
+因此，机器人转开后，即使 Hermes 改变了背后的障碍格，探索图仍保留旧值；
+再次转回并覆盖该格时才刷新。地图扩展、原点平移时按世界位置保留缓存；坐标系、
+分辨率或地图方向变化时重新初始化。缓存仅存在于当前进程，重启后重新建立。
+
+同一导航帧还保留转换后的完整原始图 `navigation_map`。物体定位失败后的障碍
+射线使用这张未膨胀图；停靠选点按 0.36 m 净空计算可达自由区，并搜索目标周围
+0.60–2.0 m 的自由格。物体停靠的实际路径检查也使用该完整图，不受探索图 5 m
+公开范围限制；其他探索与返回动作仍使用探索图。两张图分别使用，完整图不会
+写入 FOV 缓存。历史射线使用拍摄时位姿查询当前地图，两者时间分别写入定位记录。
 
 ## Hermes Action 与异常
 
 Adapter 把相对平移转换成地图坐标后交给 `MoveToAction`，再用 `RotateToAction`
 达到目标朝向。终端约每 2 秒输出 Action ID、阶段、位姿、运行时间和连续静止
-时间。
+时间；位姿到达与停滞判断在每次 Action 轮询执行，轮询间隔默认 0.2 秒。
+
+若 Action 仍为 `working`，但位置误差已不超过 0.10 m（平移）或角度误差已不超过
+5°（转向），且连续 0.6 秒内位姿变化小于 2 cm、1°，Adapter 主动结束该 Action。
+平移还必须已经产生有效进展，防止尚未起步就被当作到达。取消后确认 Action
+进入终态，并重新检查实际位姿，再开始下一步；终止或确认失败仍停止程序。
+日志会显示“按位姿确认到达，已主动结束并确认终态”。固件先报告完成时直接沿用
+正常完成流程。0.6 秒为稳定观察时间，不包含网络与取消确认耗时。
 
 Frontier、返回父节点与返回目标线索的相对命令使用决策帧位姿还原世界目标，发送前的最新位姿
 只用于剩余距离和反馈。日志分别记录 `reference_pose` 与 `start_pose`，避免
@@ -191,7 +225,7 @@ Frontier 移动使用选点时的有效地图快照检查 Hermes 返回的剩余
 实际长度累计超过 1.5 m 时，
 先取消并确认 Action 结束，将本次尝试标为 `INVALIDATED`，并屏蔽整个连通
 Frontier 区域后选择其他区域。不会沿同一片边界换代表点逐个重试。未知判定使用
-L515 筛选后的算法地图，
+D435i 筛选后的算法地图，
 对应选点时 Rerun 中的灰色区域，不使用 Hermes 原始完整地图替代。
 
 多段未知区长度累加，例如 0.8 m + 0.9 m 会触发取消；累计不超过 1.5 m 时继续。
@@ -208,20 +242,23 @@ L515 筛选后的算法地图，
 标为不可达。动作结束后仍距父节点超过 0.25 m，也进入相同恢复流程：跳过本次
 返回节点，释放该节点的暂存方向，从实际位置重新观察和选点，保留其他节点的回退顺序。
 执行失败、停滞和目标检测中断均在取消后确认 Action 终态；确认失败仍停止程序。
-目标线索返回失败时尝试下一条，均无法返回才恢复原搜索分支；到位后不再请求新图确认。
+场景线索返回失败时尝试下一条，到位即完成。物体接近失败换停靠点；所有历史
+线索都无法定位时才保底返回，返回到位或失败均直接停止，不再重新采集。
 
 路径检查在每次 Action 轮询中执行，重规划后也会复查，不依赖 Rerun 或 2 秒
 进度输出间隔。路径尚未发布（空列表）时继续等待；路径读取或取消确认失败则
 停止程序。Hermes 当前接口在 Action 创建后才提供路径，因此取消前可能已有
-位移。启动前移、标定、扫描转向和目标接近不启用这项 Frontier 路径约束。
+位移。物体保底返回与停靠命令也使用这项路径检查：保底返回用探索图，停靠用
+完整导航图；两者失败均不屏蔽 Frontier 区域。
+启动前移、标定、扫描转向和同步 API 的旧接近命令不启用它。
 
 - 单个 Action 默认总超时 120 秒。
 - `MoveToAction` 连续 8 秒平移不足 2 cm 时结束本次动作。
-- `RotateToAction` 以 1° 为有效进展，进入目标朝向 5° 内即可结束。
+- `RotateToAction` 以 1° 为有效进展，进入目标朝向 5° 内并稳定 0.6 秒即可主动收尾。
 - Frontier 明确规划失败时淘汰当前方向并继续其他候选。
 - Frontier 路径未知长度超过上限时，记录累计长度、上限、首个未知格和被拒绝路径，取消并屏蔽整个区域。
 - 探索移动停滞时记录 `STALLED`，检查实际位置并在重新选点时避开本次停滞目标。
-- 目标接近失败或停滞时，保留实际位置并重新检测目标。
+- 物体模式停靠命令成功后直接完成，不再复检或测距；实际运动失败时每条线索最多尝试三次停靠。
 - 网络、相机、地图或健康状态异常仍会停止程序。
 
 普通 VLM 推理在后台进行，不阻塞 Action 监控；8 秒静止门槛仍只依据底盘动作
@@ -237,16 +274,21 @@ Rerun 默认开启，使用 `--no-rerun` 关闭。主要图形含义：
 - 紫色：Hermes 返回的剩余规划路径。
 - 蓝色：机器人实际轨迹。
 
-World 隐藏自动浮动标签；侧栏 `Live` 显示实时位姿和最近决策，`Frontiers` 表格
-显示编号与暂存顺序，编号链接到对应点。右侧其他标签页显示 YOLO、SAM2、VLM
-和状态详情。`VLM full` 保留实际输入图、完整提示词、原始输出、HTTP JSON 与
+World 隐藏候选的浮动标签；下方 `Live` 显示实时位姿和当前阶段，`Frontiers` 表格
+显示编号与暂存顺序，编号链接到对应点。VLM 和状态页显示当前分析与导航结果；
+物体接近阶段在 `Motion details` 中显示定位来源、目标位置、深度支持点数及停靠次数，
+选点时还显示地图来源、净空、候选数和计划目标距离。完整掩码、当次定位地图与
+本地推理记录保存在视觉队列目录的 `object-localization/`。
+`VLM full` 保留实际输入图、完整提示词、原始输出、HTTP JSON 与
 解析结果；新增 `VLM summary` 简要显示 FIFO 任务 J、模型请求 R、目标判断、
 评分与导航接收／排序周期。请求和返回各自记录到发生时刻，不将回包写回旧帧。
 `Frontiers` 还列出被未知路径屏蔽的区域，状态栏用 `blocked` 显示数量。
-`Live` 与状态详情显示待处理视觉工作、失败批次和目标线索。
-World 中青色拍摄位姿／朝向和粉色 Frontier 快照对应最近返回的 R/J；青色虚线
-仅连接当前位置与参考拍摄点，不是规划路径。V/F 编号及区域映射在简表查看；
-发送／返回帧号可用于回放完整会话。图例与交互说明见 [Habitat 的 Rerun 说明](habitat.md#rerun)。
+`Motion details` 与状态详情显示待处理视觉工作、失败批次和目标线索。
+World 在占用图上按任务显示拍摄点，聚合邻近任务，完整视角与评分点在 `World history`。
+右侧直接展示当前推理的单图与评分；`Observations` 中点 J 查看整组、V 查看单图
+评分卡，raw 查看原图。历史选择的结果显示在 Selection，自动推理面板继续跟随当前任务。
+物体推理期间 Live 显示当前步骤和耗时。
+图例与交互说明见 [Habitat 的 Rerun 说明](habitat.md#rerun)。
 
 每次导航还会在 `data/run_logs/` 创建 JSONL 日志，记录每周期决策、候选摘要、
 世界目标和 Action 位姿反馈。使用 `--run-log <PATH>` 可以指定 JSONL 文件。
@@ -285,12 +327,12 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB），WebSocket 服务缓�
 | `--action-stall-timeout-s` | 连续静止门槛，默认 8 秒 |
 | `--max-unknown-path-m` | 当前剩余路径允许的累计未知长度，默认 1.5 m；超过才取消，0 表示不允许正长度未知段 |
 | `--min-localization-quality` | 定位模式最低质量，默认 1 |
-| `--camera-serial` | 多台 RealSense 时选择 L515 |
+| `--camera-serial` | 多台 RealSense 时选择 D435i |
 | `--debug-frontier` | 打印本轮 Frontier 评分明细 |
 | `--rerun-save` | 指定 RRD 录制路径，默认自动创建 |
 | `--no-rerun` | 关闭 Rerun 界面及录制 |
 
-完整参数以 `python -m robot_nav slamtec-l515 --help` 为准。
+完整参数以 `python -m robot_nav slamtec-d435i --help` 为准。
 
 该链路使用 Hermes 自带规划和激光避障，但不是独立的功能安全系统。标定和导航
 期间必须有人能够立即急停。
