@@ -445,14 +445,14 @@
   不要每次 HTTP 请求重新生成；User-Agent 保持 robot-nav 的真实标识。
   查看 `job-*/result.json` 的 detection_error/scoring_error 或终端请求错误；
   仅有导航周期继续输出不代表模型成功，普通模型失败会继续几何探索。
-- Hermes 静止检测默认 8 秒，`__main__.py` 的 `--action-stall-timeout-s` 与
+- Hermes 静止检测默认 1 秒，直连及无线 CLI 的 `--action-stall-timeout-s` 与
   `SlamtecL515Config.action_stall_timeout_s` 必须同步。`_monitor_action` 每次
   Action 轮询读取位姿并检查，默认间隔 0.2s；2s 仅控制日志输出，不能用于节流到位判断。
-  实际间隔另受帧采集与 REST 延迟影响，不能理解为精确第 8 秒取消。
+  实际间隔另受帧采集与 REST 延迟影响，不能理解为精确第 1 秒取消。
   MoveToAction 的有效进展仍是平移至少 2 cm，原地转向不重置其平移停滞计时。
 - `slamtec_l515/adapter.py::_check_stable_arrival` 对 working Action 检查目标
-  位置误差 ≤`action_arrival_position_m`（0.10m）或转向误差 ≤`yaw_tolerance_rad`（5°）。
-  在容差内连续 `action_arrival_hold_s`（0.6s）相对采样锚点移动 <2cm、转动 <1° 才
+  位置误差 ≤`action_arrival_position_m`（0.30m）或转向误差 ≤`yaw_tolerance_rad`（5°）。
+  在容差内连续 `action_arrival_hold_s`（0.001s，实际至少等到后续轮询）相对采样锚点移动 <2cm、转动 <1° 才
   抛出内部到达信号；MoveTo 还要求先有有效平移。`_execute_action` 捕获后调用
   `_cancel_active_action`，用 `require_success=False` 确认终态，再读位姿复查。
   取消或终态确认失败仍报错；复查超出容差作为可恢复运动失败。该容差不同于

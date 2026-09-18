@@ -315,8 +315,8 @@ def _build_parser() -> argparse.ArgumentParser:
     slamtec.add_argument(
         "--action-stall-timeout-s",
         type=_positive_float,
-        default=8.0,
-        help="活跃 Action 无足够位姿变化的终止秒数，默认 8",
+        default=1.0,
+        help="活跃 Action 无足够位姿变化的终止秒数，默认 1",
     )
     slamtec.add_argument(
         "--max-unknown-path-m",
@@ -365,7 +365,7 @@ def _build_parser() -> argparse.ArgumentParser:
     for name in ("height-m", "forward-m", "left-m", "yaw-deg", "pitch-down-deg", "roll-deg"):
         orangepi.add_argument("--camera-" + name, type=_positive_float if name == "height-m" else _finite_float)
     orangepi.add_argument("--action-timeout-s", type=_positive_float, default=120.0)
-    orangepi.add_argument("--action-stall-timeout-s", type=_positive_float, default=8.0)
+    orangepi.add_argument("--action-stall-timeout-s", type=_positive_float, default=1.0)
     orangepi.add_argument("--max-unknown-path-m", type=_non_negative_float, default=1.5)
     orangepi.add_argument("--min-localization-quality", type=_localization_quality, default=1)
     orangepi.add_argument("--run-log", help="开发机上的导航 JSONL 日志路径")

@@ -70,12 +70,12 @@ class SlamtecL515Config:
     action_timeout_s: float = 120.0
     action_poll_interval_s: float = 0.2
     action_progress_interval_s: float = 2.0
-    action_stall_timeout_s: float = 8.0
+    action_stall_timeout_s: float = 1.0
     action_stall_translation_m: float = 0.02
     action_stall_rotation_rad: float = math.radians(1.0)
     # 到位后的提前收尾，与是否需要下发微小平移的 position_tolerance_m 分开。
-    action_arrival_position_m: float = 0.10
-    action_arrival_hold_s: float = 0.6
+    action_arrival_position_m: float = 0.3
+    action_arrival_hold_s: float = 0.001
     max_unknown_path_m: float = 1.5
     motion_frame_interval_s: float = 0.5
     minimum_localization_quality: int = 1
