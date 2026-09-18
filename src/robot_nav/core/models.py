@@ -102,6 +102,8 @@ class NavigationFrame:
     navigation_map: Optional[ObstacleMap] = None
     navigation_clearance_m: float = 0.0
     visibility_map: Optional[ObstacleMap] = None
+    # Adapter 的组帧诊断快照；仅供日志读取，不参与决策。
+    acquisition_timings: Tuple[Mapping[str, Any], ...] = field(default=(), compare=False, repr=False)
 
 
 class SearchMode(str, Enum):

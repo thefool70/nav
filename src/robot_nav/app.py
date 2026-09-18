@@ -1,7 +1,10 @@
 """顶层单周期入口，串联底盘读取与导航算法。"""
 
 from dataclasses import replace
+from time import monotonic
 from typing import Callable, Optional, Tuple
+
+from .core.timing import TimingSpans, measure_stage
 
 from .adapters.chassis import (
     ChassisInterface,
@@ -47,45 +50,72 @@ def run_navigation_cycle(
     state: Optional[SearchState] = None,
     observer: Optional[TargetObserver] = None,
     on_cycle: Optional[NavigationCycleCallback] = None,
+    on_timing: Optional[Callable[[dict], None]] = None,
 ) -> NavigationResult:
     """执行一个完整导航周期，并在需要时调用感知与底盘接口。
 
     本函数只负责编排一次“读取 → 决策 → 感知补充 → 执行动作”；核心跨周期
     状态由 ``SearchState`` 显式传入和返回，后台任务与缓存由观察器管理。
+    ``on_timing`` 在执行动作前接收本周期阶段计时，不包含运动时长。
     """
-    frame = chassis.read_frame()
-    if isinstance(observer, QueuedSemanticObserver):
-        state = observer.prepare_cycle(frame, state or SearchState())
-        clue = observer.take_target_clue(state)
-        if clue is not None:
-            state = replace(state, active_target_clue=clue)
-        state = _observer_state(observer, frame, state)
-    result = navigate(frame, goal, state)
-    result = _apply_object_localization(frame, goal, result, observer)
-    result, observation = _apply_target_observation(
-        frame,
-        goal,
-        state,
-        result,
-        observer,
-    )
-    result = _apply_scene_assessment(result, frame, goal, observer)
-    result = _apply_target_confirmation(
-        result,
-        frame,
-        goal,
-        observation,
-        observer,
-    )
-    result = _apply_frontier_scores(result, frame, goal, observer)
+    started = monotonic()
+    timings = [] if on_timing is not None else None
+    with measure_stage(timings, "cycle.read_frame"):
+        frame = chassis.read_frame()
+    if timings is not None:
+        timings.extend(frame.acquisition_timings)
+    with measure_stage(timings, "cycle.prepare_observer"):
+        if isinstance(observer, QueuedSemanticObserver):
+            state = observer.prepare_cycle(frame, state or SearchState())
+            clue = observer.take_target_clue(state)
+            if clue is not None:
+                state = replace(state, active_target_clue=clue)
+            state = _observer_state(observer, frame, state)
+    with measure_stage(timings, "cycle.navigate"):
+        result = navigate(frame, goal, state, timings=timings)
+    with measure_stage(timings, "cycle.object_localization"):
+        result = _apply_object_localization(frame, goal, result, observer, timings=timings)
+    with measure_stage(timings, "cycle.observe"):
+        result, observation = _apply_target_observation(
+            frame,
+            goal,
+            state,
+            result,
+            observer,
+            timings=timings,
+        )
+    with measure_stage(timings, "cycle.scene_assessment"):
+        result = _apply_scene_assessment(result, frame, goal, observer, timings=timings)
+    with measure_stage(timings, "cycle.target_confirmation"):
+        result = _apply_target_confirmation(
+            result,
+            frame,
+            goal,
+            observation,
+            observer,
+            timings=timings,
+        )
+    with measure_stage(timings, "cycle.frontier_scores"):
+        result = _apply_frontier_scores(result, frame, goal, observer, timings=timings)
     if isinstance(observer, QueuedSemanticObserver):
         result = replace(
             result, state=_observer_state(observer, frame, result.state),
             debug=replace(result.debug, details={**result.debug.details, **observer.diagnostics()}),
         )
 
-    if on_cycle is not None:
-        on_cycle(frame, observation, result)
+    with measure_stage(timings, "cycle.callbacks"):
+        if on_cycle is not None:
+            on_cycle(frame, observation, result)
+    if on_timing is not None:
+        ended = monotonic()
+        on_timing({
+            "started_monotonic_s": started,
+            "ended_monotonic_s": ended,
+            "duration_s": ended - started,
+            "stage": result.debug.stage,
+            "has_command": result.status is NavigationStatus.OK and result.command is not None,
+            "spans": timings,
+        })
     return _execute_command(chassis, result, observer, frame)
 
 
@@ -95,6 +125,7 @@ def _apply_target_observation(
     state: Optional[SearchState],
     result: NavigationResult,
     observer: Optional[TargetObserver],
+    timings: Optional[TimingSpans] = None,
 ) -> Tuple[NavigationResult, Optional[TargetObservation]]:
     """按状态机需要读取当前视觉结果；持续观察器可抢占普通决策。"""
     if (
@@ -115,17 +146,18 @@ def _apply_target_observation(
         return result, None
 
     _observer_state(observer, frame, result.state)
-    observation = observer.observe(
-        frame,
-        goal,
-        _scan_observation_context(result),
-    )
+    with measure_stage(timings, "observer.observe"):
+        observation = observer.observe(
+            frame,
+            goal,
+            _scan_observation_context(result),
+        )
     # 显式视觉请求应继续 result.state；持续检测旁路普通命令时则从周期入口
     # state 重新决策，避免在命令执行前误把“命令后的状态”当作当前位置状态。
     decision_state = result.state if observation_requested else state
     if isinstance(observer, QueuedSemanticObserver):
         decision_state = _observer_state(observer, frame, decision_state or SearchState())
-    return navigate(frame, goal, decision_state, observation), observation
+    return navigate(frame, goal, decision_state, observation, timings=timings), observation
 
 
 def _apply_scene_assessment(
@@ -133,6 +165,7 @@ def _apply_scene_assessment(
     frame: NavigationFrame,
     goal: TargetSearchGoal,
     observer: Optional[TargetObserver],
+    timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """保留同步观察器的场景判断；异步线索返回不进入此步骤。"""
     if (
@@ -147,18 +180,20 @@ def _apply_scene_assessment(
         goal,
         current_state,
         scene_assessment=assessment,
+        timings=timings,
     )
 
 
-def _apply_object_localization(frame, goal, result, observer) -> NavigationResult:
+def _apply_object_localization(frame, goal, result, observer, timings: Optional[TimingSpans] = None) -> NavigationResult:
     """按请求读取历史 RGB-D；本周期只消费一次定位结果。"""
     if result.status is not NavigationStatus.NEEDS_OBJECT_LOCALIZATION:
         return result
     if not isinstance(observer, QueuedSemanticObserver):
         return result
     state = _observer_state(observer, frame, result.state)
-    localization = observer.localize_object(frame, goal, state)
-    return navigate(frame, goal, state, object_localization=localization)
+    with measure_stage(timings, "observer.localize_object"):
+        localization = observer.localize_object(frame, goal, state)
+    return navigate(frame, goal, state, object_localization=localization, timings=timings)
 
 
 def _apply_target_confirmation(
@@ -167,6 +202,7 @@ def _apply_target_confirmation(
     goal: TargetSearchGoal,
     observation: Optional[TargetObservation],
     observer: Optional[TargetObserver],
+    timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """候选接近后调用一次 VLM 最终确认。"""
     if (
@@ -190,6 +226,7 @@ def _apply_target_confirmation(
         current_state,
         observation=observation,
         target_confirmation=confirmation,
+        timings=timings,
     )
 
 
@@ -198,6 +235,7 @@ def _apply_frontier_scores(
     frame: NavigationFrame,
     goal: TargetSearchGoal,
     observer: Optional[TargetObserver],
+    timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """多个 Frontier 待排序时，一次取得整批语义分数。"""
     request = result.frontier_score_request
@@ -208,12 +246,14 @@ def _apply_frontier_scores(
     ):
         return result
     current_state = _observer_state(observer, frame, result.state)
-    scores = observer.score_frontiers(request, goal)
+    with measure_stage(timings, "observer.score_frontiers"):
+        scores = observer.score_frontiers(request, goal)
     return navigate(
         frame,
         goal,
         current_state,
         frontier_scores=scores,
+        timings=timings,
     )
 
 

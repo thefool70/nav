@@ -65,6 +65,18 @@ class NavigationRunLogger:
             configuration=configuration,
         )
 
+    def log_cycle_start(self, cycle_index: int) -> None:
+        """在取帧前标记周期，便于测量上一动作结束后的循环间隔。"""
+        self._current_cycle = cycle_index
+        self._write("cycle_start", cycle=cycle_index)
+
+    def log_cycle_timing(self, timing: Mapping[str, Any]) -> None:
+        """记录动作执行前各阶段；嵌套耗时与多次调用保留原始边界。"""
+        self._write("cycle_timing", cycle=self._current_cycle, **timing)
+
+    def log_callback_timing(self, spans) -> None:
+        self._write("callback_timing", cycle=self._current_cycle, spans=spans)
+
     def log_cycle_decision(
         self,
         cycle_index: int,

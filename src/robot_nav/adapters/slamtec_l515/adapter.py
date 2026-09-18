@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Optional, Protocol, Tuple
 
 from ...core.models import (
@@ -16,6 +16,7 @@ from ...core.models import (
     RelativePoseCommand,
 )
 from ...core.path_validation import UnknownPathMeasurement, measure_unknown_path_length
+from ...core.timing import measure_stage
 from ..chassis import (
     MotionInterruptedError,
     MotionPathUnknownError,
@@ -203,33 +204,50 @@ class SlamtecL515Adapter:
 
     def _read_frame_locked(self) -> NavigationFrame:
         """串行读取相机和 Hermes，避免主循环与连续帧线程争用设备。"""
+        timings = []
+        lock_started = time.monotonic()
         with self._frame_read_lock:
-            capture = (
-                self._camera.capture()
-                if self._camera is not None
-                else None
-            )
-            pose = self._client.get_pose()
-            slamtec_map = self._client.get_explore_map()
-            navigation_map = _to_obstacle_map(slamtec_map)
+            lock_acquired = time.monotonic()
+            timings.append({
+                "stage": "frame.lock_wait",
+                "started_monotonic_s": lock_started,
+                "ended_monotonic_s": lock_acquired,
+                "duration_s": lock_acquired - lock_started,
+                "completed": True,
+            })
+            with measure_stage(timings, "frame.camera_capture"):
+                capture = (
+                    self._camera.capture()
+                    if self._camera is not None
+                    else None
+                )
+            with measure_stage(timings, "frame.get_pose"):
+                pose = self._client.get_pose()
+            with measure_stage(timings, "frame.get_map"):
+                slamtec_map = self._client.get_explore_map()
+            with measure_stage(timings, "frame.convert_map"):
+                navigation_map = _to_obstacle_map(slamtec_map)
             obstacle_map = navigation_map
             visibility_map = None
             if capture is not None:
-                obstacle_map, visibility_map = self._observed_map.update(
-                    obstacle_map,
-                    pose,
-                    capture,
-                    self.config.camera_extrinsics_in_robot,
+                with measure_stage(timings, "frame.update_observed_map"):
+                    obstacle_map, visibility_map = self._observed_map.update(
+                        obstacle_map,
+                        pose,
+                        capture,
+                        self.config.camera_extrinsics_in_robot,
+                    )
+            with measure_stage(timings, "frame.build"):
+                frame = _build_navigation_frame(
+                    timestamp_s=time.monotonic(),
+                    pose=pose,
+                    obstacle_map=obstacle_map,
+                    capture=capture,
+                    camera_extrinsics=self.config.camera_extrinsics_in_robot,
+                    navigation_map=navigation_map,
+                    visibility_map=visibility_map,
                 )
-            return _build_navigation_frame(
-                timestamp_s=time.monotonic(),
-                pose=pose,
-                obstacle_map=obstacle_map,
-                capture=capture,
-                camera_extrinsics=self.config.camera_extrinsics_in_robot,
-                navigation_map=navigation_map,
-                visibility_map=visibility_map,
-            )
+            return replace(frame, acquisition_timings=tuple(timings))
 
     def _continuous_frame_loop(self) -> None:
         """导航全程采集最新帧；慢 VLM 请求期间也保持本地目标检测。"""

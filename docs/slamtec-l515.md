@@ -301,6 +301,22 @@ World 在占用图上按任务显示拍摄点，聚合邻近任务，完整视�
 
 每次导航还会在 `data/run_logs/` 创建 JSONL 日志，记录每周期决策、候选摘要、
 世界目标和 Action 位姿反馈。使用 `--run-log <PATH>` 可以指定 JSONL 文件。
+排查到点后停留时，按 `cycle` 关联以下事件（耗时单位均为秒，使用单调时钟）：
+
+- `cycle_start`：开始下一轮取帧，可与上一 Action 完成时刻比较循环间隔。
+- `cycle_timing`：从本轮入口到执行动作前的总耗时与 `spans`；不含底盘运动。
+  `frame.*` 区分取帧锁等待、相机采集、位姿/地图请求、地图转换、观察图更新和组帧；
+  `frontier.*` 区分栅格准备、可达距离、边界与孔洞过滤、聚类、代表点生成、区域匹配、
+  评分排序及选点提交。`observer.*` 记录主线程感知/评分调用，后台 VLM 耗时仍看队列事件。
+- `callback_timing`：分别记录决策日志写入、可视化与终端调试回调的耗时。
+
+每个 span 带 `started_monotonic_s`、`ended_monotonic_s`、`duration_s` 和 `completed`。
+同名阶段多次调用会逐条保留；`cycle.*` 包含内部的 `frame.*`、`frontier.*` 等子阶段，
+`frontier.extract` 也包含提取子阶段，统计时不能把父子耗时相加。
+`cycle_timing.ended_monotonic_s` 到首条 Action 创建事件的间隔，包含计时日志写入、
+执行前准备和 REST 下发；它不等于单次网络请求耗时。只有走到执行前的周期才输出
+完整 `cycle_timing`，取帧或决策异常时结合 `cycle_start` 和错误事件定位。
+
 取消结果的 `rejection_scope=region` 表示整片屏蔽，`rejected_path_world_xy`
 保存被拒绝路径；状态中的 `blocked_frontier_regions` 列出屏蔽记录摘要。
 Action 进度中的 `unknown_path=当前长度/允许上限` 使用米；取消结果另保存

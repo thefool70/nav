@@ -11,6 +11,7 @@ import math
 from dataclasses import replace
 from typing import Any, Mapping, Optional, Tuple
 
+from .timing import TimingSpans, measure_stage
 
 from .frontier import (
     PATH_DISTANCE_SCORE_WEIGHT,
@@ -92,6 +93,7 @@ def navigate(
     target_confirmation: Optional[TargetConfirmationResult] = None,
     scene_assessment: Optional[SceneAssessmentResult] = None,
     object_localization: Optional[ObjectLocalization] = None,
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """推进一个导航周期，并返回本周期命令和下一周期状态。
 
@@ -141,6 +143,7 @@ def navigate(
             frame,
             working_state,
             scene_assessment,
+            timings=timings,
         )
     if working_state.phase is SearchPhase.VERIFYING_TARGET:
         return _continue_target_confirmation(
@@ -148,6 +151,7 @@ def navigate(
             goal,
             working_state,
             target_confirmation,
+            timings=timings,
         )
     # 同步观察器保留原目标观测接口；CLI 的扫描只产生后台待处理结果。
     if (
@@ -155,27 +159,28 @@ def navigate(
         and observation is not None
         and observation.visibility is TargetVisibility.VISIBLE
     ):
-        return _approach_visible_target(frame, goal, working_state, observation)
+        return _approach_visible_target(frame, goal, working_state, observation, timings=timings)
     if working_state.phase is SearchPhase.LOCALIZING_TARGET:
-        return _continue_target_approach(frame, goal, working_state, observation)
+        return _continue_target_approach(frame, goal, working_state, observation, timings=timings)
     if working_state.phase is SearchPhase.WAITING_FOR_SEMANTICS:
         try:
-            working_state, candidates = _refresh_frontier_regions(frame, working_state)
+            working_state, candidates = _refresh_frontier_regions(frame, working_state, timings=timings)
         except ValueError as exc:
             return _invalid_result(working_state, str(exc))
         if candidates:
-            return _continue_scanning(frame, goal, _reset_scan_after_move(working_state), observation)
+            return _continue_scanning(frame, goal, _reset_scan_after_move(working_state), observation, timings=timings)
         return _wait_for_semantics_or_finish(working_state)
     if working_state.phase is SearchPhase.BACKTRACKING:
-        return _continue_backtracking(frame, working_state)
+        return _continue_backtracking(frame, working_state, timings=timings)
     if working_state.phase is SearchPhase.EXPLORING:
         return _select_exploration_target(
             frame,
             working_state,
             frontier_scores,
+            timings=timings,
         )
 
-    return _continue_scanning(frame, goal, working_state, observation)
+    return _continue_scanning(frame, goal, working_state, observation, timings=timings)
 
 
 def recover_from_motion_failure(
@@ -456,13 +461,14 @@ def _continue_scanning(
     goal: TargetSearchGoal,
     state: SearchState,
     observation: Optional[TargetObservation],
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """首次环扫；之后补查局部可见 Frontier，两种模式均至少采集当前画面。"""
     working_state = state
     scan_debug_details: Optional[Mapping[str, Any]] = None
     if not working_state.scan_headings_world_rad:
         try:
-            working_state, candidates = _refresh_frontier_regions(frame, working_state)
+            working_state, candidates = _refresh_frontier_regions(frame, working_state, timings=timings)
             local_points = frontier_observation_points(frame, candidates)
             points = unobserved_observation_points(
                 local_points, frame, working_state.observed_views + working_state.pending_observation_views,
@@ -505,6 +511,7 @@ def _continue_scanning(
         )
     return _advance_scan(
         frame, goal, working_state, observation, scan_debug_details,
+        timings=timings,
     )
 
 
@@ -514,6 +521,7 @@ def _advance_scan(
     state: SearchState,
     observation: Optional[TargetObservation],
     scan_debug_details: Optional[Mapping[str, Any]] = None,
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """对齐并处理当前扫描方向；一轮扫描结束后进入 Frontier 探索。"""
     target_heading = state.scan_headings_world_rad[state.next_scan_index]
@@ -554,7 +562,7 @@ def _advance_scan(
         goal.search_mode is SearchMode.OBJECT
         and observation.visibility is TargetVisibility.VISIBLE
     ):
-        return _approach_visible_target(frame, goal, state, observation)
+        return _approach_visible_target(frame, goal, state, observation, timings=timings)
 
     try:
         camera_offset, horizontal_fov = _horizontal_camera_view(frame)
@@ -589,15 +597,17 @@ def _advance_scan(
             goal,
             replace(scanned_state, next_scan_index=next_index),
             observation=None,
+            timings=timings,
         )
 
-    return _finish_scan(frame, goal, scanned_state)
+    return _finish_scan(frame, goal, scanned_state, timings=timings)
 
 
 def _finish_scan(
     frame: NavigationFrame,
     goal: TargetSearchGoal,
     state: SearchState,
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """结束本轮采集并探索；同步场景观察器仍先判断当前位置。"""
     completed_state = replace(
@@ -610,11 +620,12 @@ def _finish_scan(
         initial_scan_complete=True,
     )
     if goal.search_mode is SearchMode.SCENE and not state.asynchronous_perception:
-        return _continue_scene_assessment(frame, completed_state, None)
+        return _continue_scene_assessment(frame, completed_state, None, timings=timings)
     return _select_exploration_target(
         frame,
         completed_state,
         frontier_scores=None,
+        timings=timings,
     )
 
 
@@ -623,6 +634,7 @@ def _continue_target_approach(
     goal: TargetSearchGoal,
     state: SearchState,
     observation: Optional[TargetObservation],
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """移动后重新观察目标，直到到达目标或目标丢失。"""
     if observation is None:
@@ -640,20 +652,21 @@ def _continue_target_approach(
             observation.reason or "目标观测不确定，保持当前位置等待重新观测。",
         )
     if observation.visibility is TargetVisibility.VISIBLE:
-        return _approach_visible_target(frame, goal, state, observation)
+        return _approach_visible_target(frame, goal, state, observation, timings=timings)
 
     # 8×45° 环扫只发生在程序开始；目标丢失后按当前 Frontier 重新规划视角。
     scan_state = _reset_scan_after_move(
         replace(state, initial_scan_complete=True)
     )
     # 下一次观测必须带 scan_context，才能进入本轮批量评分图像缓冲。
-    return _continue_scanning(frame, goal, scan_state, None)
+    return _continue_scanning(frame, goal, scan_state, None, timings=timings)
 
 
 def _continue_scene_assessment(
     frame: NavigationFrame,
     state: SearchState,
     assessment: Optional[SceneAssessmentResult],
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """用当前观察确认场景，未匹配则结束线索或继续探索。"""
     if assessment is None:
@@ -691,6 +704,7 @@ def _continue_scene_assessment(
         frame,
         replace(state, phase=SearchPhase.EXPLORING),
         frontier_scores=None,
+        timings=timings,
     )
 
 
@@ -699,6 +713,7 @@ def _continue_target_confirmation(
     goal: TargetSearchGoal,
     state: SearchState,
     confirmation: Optional[TargetConfirmationResult],
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """候选已接近后等待 VLM 最终确认；否决后屏蔽该世界位置。"""
     target_world_xy = state.pending_target_world_xy
@@ -746,7 +761,7 @@ def _continue_target_confirmation(
         rejected_target_world_xy=rejected_points,
         pending_target_world_xy=None,
     )
-    result = _continue_scanning(frame, goal, _reset_scan_after_move(rejected_state), None)
+    result = _continue_scanning(frame, goal, _reset_scan_after_move(rejected_state), None, timings=timings)
     return replace(
         result,
         debug=NavigationDebug(
@@ -767,6 +782,7 @@ def _approach_visible_target(
     goal: TargetSearchGoal,
     state: SearchState,
     observation: TargetObservation,
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """用目标掩码内深度定位目标，并生成保持安全距离的相对位姿命令。"""
     state = replace(state, backtrack_node_id=None)
@@ -813,12 +829,13 @@ def _approach_visible_target(
             result = _continue_scanning(
                 frame, goal, state,
                 TargetObservation(TargetVisibility.NOT_VISIBLE),
+                timings=timings,
             )
         else:
             scan_state = _reset_scan_after_move(
                 replace(state, initial_scan_complete=True)
             )
-            result = _continue_scanning(frame, goal, scan_state, None)
+            result = _continue_scanning(frame, goal, scan_state, None, timings=timings)
         return replace(
             result,
             debug=NavigationDebug(
@@ -905,43 +922,45 @@ def _select_exploration_target(
     frame: NavigationFrame,
     state: SearchState,
     frontier_scores: Optional[Mapping[str, float]],
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """优先选择新 Frontier；新候选耗尽时沿当前分支逐个返回父节点。"""
     explored_state = _mark_latest_committed_explored(state)
     try:
-        explored_state, candidates = _refresh_frontier_regions(frame, explored_state)
+        explored_state, candidates = _refresh_frontier_regions(frame, explored_state, timings=timings)
     except ValueError as exc:
         return _invalid_result(state, f"障碍图无法用于 Frontier：{exc}")
     if not candidates:
-        return _begin_backtracking(frame, explored_state, ())
+        return _begin_backtracking(frame, explored_state, (), timings=timings)
 
-    new_candidates = []
-    deferred_candidates = []
-    for candidate in candidates:
-        if candidate.deferred_order is not None:
-            deferred_candidates.append(candidate)
-            continue
-        semantic_score = (frontier_scores or {}).get(candidate.candidate_id)
-        semantic_bonus = (
-            0.0 if semantic_score is None
-            else SEMANTIC_SCORE_WEIGHT * (2.0 * semantic_score - 1.0)
-        )
-        new_candidates.append(replace(
-            candidate,
-            semantic_score=semantic_score,
-            score=candidate.score + semantic_bonus,
+    with measure_stage(timings, "frontier.select_rank"):
+        new_candidates = []
+        deferred_candidates = []
+        for candidate in candidates:
+            if candidate.deferred_order is not None:
+                deferred_candidates.append(candidate)
+                continue
+            semantic_score = (frontier_scores or {}).get(candidate.candidate_id)
+            semantic_bonus = (
+                0.0 if semantic_score is None
+                else SEMANTIC_SCORE_WEIGHT * (2.0 * semantic_score - 1.0)
+            )
+            new_candidates.append(replace(
+                candidate,
+                semantic_score=semantic_score,
+                score=candidate.score + semantic_bonus,
+            ))
+        ranked_new = tuple(sorted(
+            new_candidates,
+            key=lambda item: (-item.score, item.path_distance_m, item.candidate_id),
         ))
-    ranked_new = tuple(sorted(
-        new_candidates,
-        key=lambda item: (-item.score, item.path_distance_m, item.candidate_id),
-    ))
-    # 暂存节点后进先出，同一节点沿用原排序；随机 / VLM 新分数不能插队。
-    deferred_candidates.sort(key=lambda item: (
-        -item.deferred_order[0], item.deferred_order[1], item.candidate_id,
-    ))
-    candidates = ranked_new + tuple(deferred_candidates)
+        # 暂存节点后进先出，同一节点沿用原排序；随机 / VLM 新分数不能插队。
+        deferred_candidates.sort(key=lambda item: (
+            -item.deferred_order[0], item.deferred_order[1], item.candidate_id,
+        ))
+        candidates = ranked_new + tuple(deferred_candidates)
     if not ranked_new:
-        return _begin_backtracking(frame, explored_state, candidates)
+        return _begin_backtracking(frame, explored_state, candidates, timings=timings)
     details = tuple(_frontier_candidate_debug(candidate) for candidate in candidates)
     selection_details = {
         "frontier_selection_source": "new" if ranked_new else "deferred",
@@ -962,9 +981,10 @@ def _select_exploration_target(
             frontier_score_request=FrontierScoreRequest(ranked_new),
         )
 
-    return _commit_frontier_move(
-        frame, explored_state, candidates, ranked_new, frontier_scores,
-    )
+    with measure_stage(timings, "frontier.commit"):
+        return _commit_frontier_move(
+            frame, explored_state, candidates, ranked_new, frontier_scores,
+        )
 
 
 def _commit_frontier_move(
@@ -1037,6 +1057,7 @@ def _begin_backtracking(
     frame: NavigationFrame,
     state: SearchState,
     candidates: Tuple[FrontierCandidate, ...],
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """只返回栈顶节点；到达且没有剩余方向才出栈，继续返回上一层。"""
     working_state = replace(_reset_scan_after_move(state), active_frontier_id=None)
@@ -1082,7 +1103,7 @@ def _begin_backtracking(
             working_state, branch_node_ids=working_state.branch_node_ids[:-1],
         )
         if any(candidate.deferred_order is None for candidate in candidates):
-            return _select_exploration_target(frame, working_state, None)
+            return _select_exploration_target(frame, working_state, None, timings=timings)
 
     return _wait_for_semantics_or_finish(working_state)
 
@@ -1161,6 +1182,7 @@ def _discard_target_clue(state: SearchState, reason: str) -> NavigationResult:
 def _continue_backtracking(
     frame: NavigationFrame,
     state: SearchState,
+    *, timings: Optional[TimingSpans] = None,
 ) -> NavigationResult:
     """返回命令已同步结束，检查实际到达位置，再刷新父节点的剩余候选。"""
     node = next(node for node in state.observation_history
@@ -1173,10 +1195,10 @@ def _continue_backtracking(
             issue_kind="not_arrived", actual_pose=frame.pose,
         )
     try:
-        state, candidates = _refresh_frontier_regions(frame, state)
+        state, candidates = _refresh_frontier_regions(frame, state, timings=timings)
     except ValueError as exc:
         return _invalid_result(state, f"回到父节点后无法刷新 Frontier：{exc}")
-    return _begin_backtracking(frame, state, candidates)
+    return _begin_backtracking(frame, state, candidates, timings=timings)
 
 
 def _recover_backtrack_issue(
@@ -1305,21 +1327,25 @@ def _frontier_scan_debug_details(
 def _refresh_frontier_regions(
     frame: NavigationFrame,
     state: SearchState,
+    *, timings: Optional[TimingSpans] = None,
 ) -> Tuple[SearchState, Tuple[FrontierCandidate, ...]]:
     """重提边界、过滤仍被未知路径屏蔽的整片区域，再关联有效候选的稳定 ID。"""
-    extraction = extract_frontiers(
-        frame.obstacle_map, frame.pose,
-        excluded_world_xy=_tried_candidate_points(state.observation_history),
-        visibility_map=frame.visibility_map,
-    )
-    candidates = extraction.candidates
-    candidates, blocked_regions = filter_blocked_frontier_regions(
-        frame.obstacle_map, candidates, state.blocked_frontier_regions,
-    )
-    candidates, regions, next_id = match_frontier_regions(
-        frame.obstacle_map, candidates, state.frontier_regions,
-        state.next_frontier_region_id,
-    )
+    with measure_stage(timings, "frontier.extract"):
+        extraction = extract_frontiers(
+            frame.obstacle_map, frame.pose,
+            excluded_world_xy=_tried_candidate_points(state.observation_history),
+            visibility_map=frame.visibility_map,
+            timings=timings,
+        )
+    with measure_stage(timings, "frontier.match_regions"):
+        candidates = extraction.candidates
+        candidates, blocked_regions = filter_blocked_frontier_regions(
+            frame.obstacle_map, candidates, state.blocked_frontier_regions,
+        )
+        candidates, regions, next_id = match_frontier_regions(
+            frame.obstacle_map, candidates, state.frontier_regions,
+            state.next_frontier_region_id,
+        )
     active_id = state.active_frontier_id
     if not any(region.region_id == active_id for region in regions):
         active_id = None
@@ -1334,9 +1360,9 @@ def _refresh_frontier_regions(
     ), candidates
 
 
-def preview_frontier_candidates(frame: NavigationFrame, state: SearchState) -> Tuple[FrontierCandidate, ...]:
+def preview_frontier_candidates(frame: NavigationFrame, state: SearchState, *, timings: Optional[TimingSpans] = None) -> Tuple[FrontierCandidate, ...]:
     """对固定帧预览有效候选，不提交区域编号或修改导航状态；结果用于提前拍摄。"""
-    return _refresh_frontier_regions(frame, state)[1]
+    return _refresh_frontier_regions(frame, state, timings=timings)[1]
 
 
 def capture_semantic_view(

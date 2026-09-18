@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Optional, Sequence
 from uuid import uuid4
 
+from .core.timing import measure_stage
+
 from .adapters.chassis import ChassisInterface, MotionStalledError, RecoverableMotionError
 from .adapters.habitat import HabitatChassisAdapter, HabitatConfig
 from .adapters.openai_compatible import (
@@ -1030,6 +1032,7 @@ def _run_navigation(
         cycle_index += 1
         cycle_callback = _with_frontier_debug(on_cycle, debug_frontier)
         if run_logger is not None:
+            run_logger.log_cycle_start(cycle_index)
             cycle_callback = _with_run_log(
                 cycle_callback,
                 run_logger,
@@ -1041,6 +1044,7 @@ def _run_navigation(
             state,
             observer,
             on_cycle=cycle_callback,
+            on_timing=None if run_logger is None else run_logger.log_cycle_timing,
         )
         state = result.state
         if run_logger is not None:
@@ -1085,14 +1089,18 @@ def _with_run_log(
     """把发送命令前的完整决策帧写入当前运行日志。"""
 
     def callback(frame, observation, result) -> None:
-        run_logger.log_cycle_decision(
-            cycle_index,
-            frame,
-            observation,
-            result,
-        )
-        if on_cycle is not None:
-            on_cycle(frame, observation, result)
+        timings = []
+        with measure_stage(timings, "callback.decision_log"):
+            run_logger.log_cycle_decision(
+                cycle_index,
+                frame,
+                observation,
+                result,
+            )
+        with measure_stage(timings, "callback.visualization_and_debug"):
+            if on_cycle is not None:
+                on_cycle(frame, observation, result)
+        run_logger.log_callback_timing(timings)
 
     return callback
 
