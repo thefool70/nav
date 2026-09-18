@@ -311,6 +311,10 @@ World 在占用图上按任务显示拍摄点，聚合邻近任务，完整视�
 - `callback_timing`：分别记录决策日志写入、可视化与终端调试回调的耗时。
 
 每个 span 带 `started_monotonic_s`、`ended_monotonic_s`、`duration_s` 和 `completed`。
+`snapshot.*` 进一步拆分主线程观测中的前沿预览、观察点、图像投影、覆盖计算、深度
+编码和整轮提交；提交包含队列锁等待、RGB 压缩、文件写入及队列事件回调。
+`frontier.cache_hit` 表示复用了本周期同帧、同排除集的提取结果；前沿计时也包含
+快照预览中的调用。命中缓存时不会出现该次提取的准备、BFS、聚类等子阶段。
 同名阶段多次调用会逐条保留；`cycle.*` 包含内部的 `frame.*`、`frontier.*` 等子阶段，
 `frontier.extract` 也包含提取子阶段，统计时不能把父子耗时相加。
 `cycle_timing.ended_monotonic_s` 到首条 Action 创建事件的间隔，包含计时日志写入、

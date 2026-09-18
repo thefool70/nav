@@ -17,12 +17,14 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Mapping, Optional, Tuple
 
 from ..core.models import (
-    CameraExtrinsics, CameraIntrinsics, DepthImage, FrontierCandidate, FrontierScoreRequest, NavigationFrame,
+    CameraExtrinsics, CameraIntrinsics, FrontierCandidate, FrontierScoreRequest, NavigationFrame,
     ObservationView, Pose2D, SceneAssessment, SceneAssessmentResult, SearchMode, SearchPhase,
     SearchState, SemanticAnalysis, TargetClue, TargetObservation, TargetSearchGoal, ObjectLocalization,
     TargetVisibility,
 )
 from ..core.navigator import capture_semantic_view, preview_frontier_candidates
+from ..core.frontier import FrameFrontierCache
+from ..core.timing import TimingSpans, measure_stage
 from ..core.frontier_projection import FrontierImageProjection
 from ..core.observation_coverage import frontier_observation_points
 from .frontier_overlay import (
@@ -30,6 +32,7 @@ from .frontier_overlay import (
 )
 from .perception import ScanObservationContext, SemanticAnalyzer
 from .object_localizer import ObjectLocalizer, ObjectLocalizerConfig
+from .snapshot_depth import decode_depth, encode_depth
 
 
 PREFETCH_TRANSLATION_M = 0.75
@@ -227,10 +230,12 @@ class QueuedSemanticObserver:
     def observe(
         self, frame: NavigationFrame, goal: TargetSearchGoal,
         scan_context: Optional[ScanObservationContext] = None,
+        *, timings: Optional[TimingSpans] = None,
+        frontier_cache: Optional[FrameFrontierCache] = None,
     ) -> TargetObservation:
         self._set_goal(goal)
         if scan_context is not None:
-            self._capture_scan(frame, scan_context)
+            self._capture_scan(frame, scan_context, timings=timings, frontier_cache=frontier_cache)
         if scan_context is None and self._state.phase in (
             SearchPhase.LOCALIZING_TARGET, SearchPhase.VERIFYING_TARGET,
         ):
@@ -340,16 +345,24 @@ class QueuedSemanticObserver:
                 raise ValueError("同一视觉队列不能混用不同搜索目标")
             self._goal = goal
 
-    def _capture_scan(self, frame: NavigationFrame, context: ScanObservationContext) -> None:
+    def _capture_scan(
+        self, frame: NavigationFrame, context: ScanObservationContext,
+        *, timings: Optional[TimingSpans] = None,
+        frontier_cache: Optional[FrameFrontierCache] = None,
+    ) -> None:
         """本轮全部方向收齐后提交一次，目标线索和候选分数共享整轮拼图。"""
         if context.index == 0:
             # 扫描被打断后重建计划时，先提交上一轮已拍到的部分画面。
-            self._flush_scan()
-        captured, candidates, _ = self._capture(frame, self._state)
+            with measure_stage(timings, "snapshot.flush_previous"):
+                self._flush_scan()
+        captured, candidates, _ = self._capture(
+            frame, self._state, timings=timings, frontier_cache=frontier_cache,
+        )
         self._scan_views.append(captured)
         self._scan_candidates.update({_target_key(captured.map_frame_id, item.world_xy, item.candidate_id): item for item in candidates})
         if context.index + 1 >= context.count:
-            self._flush_scan()
+            with measure_stage(timings, "snapshot.submit"):
+                self._flush_scan()
 
     def _flush_scan(self) -> None:
         if not self._scan_views:
@@ -361,19 +374,30 @@ class QueuedSemanticObserver:
         self._scan_views.clear()
         self._scan_candidates.clear()
 
-    def _capture(self, frame: NavigationFrame, state: SearchState):
-        candidates = preview_frontier_candidates(frame, state)
-        points = frontier_observation_points(frame, candidates)
-        visible_points = {_xy_key(point) for point in points}
-        candidates = tuple(
-            item for item in candidates
-            if item.deferred_order is None and _xy_key(item.world_xy) in visible_points
-        )
-        image = buffer_scan_image(frame, candidates)
-        has_visible_direction = has_frontier_direction_in_view(image, candidates)
-        candidates = visible_frontier_candidates({1: image}, candidates)
-        coverage = capture_semantic_view(frame, state.scan_observation_points or points)
-        depth_gzip = _compress_aligned_depth(frame.depth, image.width_px, image.height_px)
+    def _capture(
+        self, frame: NavigationFrame, state: SearchState,
+        *, timings: Optional[TimingSpans] = None,
+        frontier_cache: Optional[FrameFrontierCache] = None,
+    ):
+        with measure_stage(timings, "snapshot.frontier_preview"):
+            candidates = preview_frontier_candidates(
+                frame, state, timings=timings, frontier_cache=frontier_cache,
+            )
+        with measure_stage(timings, "snapshot.observation_points"):
+            points = frontier_observation_points(frame, candidates)
+            visible_points = {_xy_key(point) for point in points}
+            candidates = tuple(
+                item for item in candidates
+                if item.deferred_order is None and _xy_key(item.world_xy) in visible_points
+            )
+        with measure_stage(timings, "snapshot.image_projection"):
+            image = buffer_scan_image(frame, candidates)
+            has_visible_direction = has_frontier_direction_in_view(image, candidates)
+            candidates = visible_frontier_candidates({1: image}, candidates)
+        with measure_stage(timings, "snapshot.coverage"):
+            coverage = capture_semantic_view(frame, state.scan_observation_points or points)
+        with measure_stage(timings, "snapshot.depth_encode"):
+            depth_gzip = encode_depth(frame.depth, image.width_px, image.height_px)
         return _CapturedView(image, coverage, frame.obstacle_map.frame_id, depth_gzip), candidates, has_visible_direction
 
     def _capture_loop(self) -> None:
@@ -514,28 +538,6 @@ class QueuedSemanticObserver:
                 self._on_event = None
 
 
-def _compress_aligned_depth(
-    depth: Optional[DepthImage], width_px: int, height_px: int,
-) -> Optional[bytes]:
-    """复制与 RGB 同帧、同尺寸的米制深度；无效像素记为 null，压缩后不引用原始帧。"""
-    if depth is None:
-        return None
-    if len(depth) != height_px or any(len(row) != width_px for row in depth):
-        raise ValueError("快照深度必须与 RGB 对齐且尺寸相同")
-    rows = []
-    for row in depth:
-        values = []
-        for value in row:
-            number = float(value) if value is not None else float("nan")
-            values.append(number if math.isfinite(number) and number > 0.0 else None)
-        rows.append(values)
-    payload = {
-        "unit": "m", "width_px": width_px, "height_px": height_px, "values": rows,
-    }
-    encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    return gzip.compress(encoded, compresslevel=1, mtime=0)
-
-
 def _retain_clue_depth(
     folder: Path, view_count: int, target_view_ids: Optional[Tuple[int, ...]],
 ) -> Mapping[str, Any]:
@@ -544,8 +546,8 @@ def _retain_clue_depth(
         return {"status": "pending_detection"}
     retained, missing, errors = [], [], []
     for index in range(1, view_count + 1):
-        pending = folder / f"view-{index}.depth.pending.json.gz"
-        retained_path = folder / f"view-{index}.depth.json.gz"
+        pending = folder / f"view-{index}.depth.pending.f64.gz"
+        retained_path = folder / f"view-{index}.depth.f64.gz"
         try:
             if index in target_view_ids:
                 if pending.is_file():
@@ -570,17 +572,17 @@ def _write_snapshot(folder, views, candidates, goal, source, job_id):
     metadata = {"source": source, "goal": asdict(goal), "views": [], "candidates": []}
     for index, view in enumerate(views, 1):
         image = view.image
-        with gzip.open(folder / f"view-{index}.rgb.gz", "wb") as stream:
+        with gzip.open(folder / f"view-{index}.rgb.gz", "wb", compresslevel=1) as stream:
             stream.write(image.rgb_bytes)
         if view.depth_gzip is not None:
-            (folder / f"view-{index}.depth.pending.json.gz").write_bytes(view.depth_gzip)
+            (folder / f"view-{index}.depth.pending.f64.gz").write_bytes(view.depth_gzip)
         metadata["views"].append({
             "map_frame_id": view.map_frame_id, "coverage": asdict(view.coverage),
             "width_px": image.width_px, "height_px": image.height_px,
             "intrinsics": asdict(image.intrinsics), "camera_yaw_rad": image.camera_yaw_rad,
             "camera_extrinsics_in_robot": asdict(image.camera_extrinsics_in_robot),
             "frontier_projections": [asdict(projection) for projection in image.frontier_projections],
-            "depth": {"captured": view.depth_gzip is not None, "encoding": "gzip-json", "unit": "m"},
+            "depth": {"captured": view.depth_gzip is not None, "encoding": "gzip-float64-le-v1", "unit": "m"},
         })
     for index, candidate in enumerate(candidates, 1):
         item = asdict(replace(candidate, candidate_id=f"snapshot:{job_id}:{index}", frontier_cells=()))
@@ -640,8 +642,13 @@ def _read_clue_frame(directory: Path, clue: TargetClue, current: NavigationFrame
     if len(raw_rgb) != width * height * 3:
         raise ValueError("历史 RGB 数据长度错误")
     depth = None
-    depth_path = folder / f"view-{clue.view_id}.depth.json.gz"
+    depth_path = folder / f"view-{clue.view_id}.depth.f64.gz"
+    legacy_depth_path = folder / f"view-{clue.view_id}.depth.json.gz"
     if depth_path.exists():
+        depth = decode_depth(depth_path.read_bytes(), width, height)
+    elif legacy_depth_path.exists():
+        # 已保存的旧快照仍可读取；新任务仅写二进制深度。
+        depth_path = legacy_depth_path
         with gzip.open(depth_path, "rt", encoding="utf-8") as stream:
             raw_depth = json.load(stream)
         if raw_depth["unit"] != "m" or raw_depth["width_px"] != width or raw_depth["height_px"] != height:

@@ -47,6 +47,9 @@ MotionPlanCallback = Callable[
     None,
 ]
 
+# Hermes 地图是无符号字节：0 未知，1..127 自由，128..255 占用。
+_OCCUPANCY_VALUES = (None,) + (0.0,) * 127 + (1.0,) * 128
+
 
 class RgbdCamera(Protocol):
     """Hermes 组帧只要求采集与关闭，允许本地 USB 或远程 RGB-D 来源。"""
@@ -818,9 +821,7 @@ def _to_obstacle_map(source: SlamtecExploreMap) -> ObstacleMap:
     for row_index in range(source.height):
         offset = row_index * source.width
         raw_row = source.cells[offset : offset + source.width]
-        rows.append(
-            tuple(_convert_occupancy(value) for value in raw_row)
-        )
+        rows.append(tuple(map(_OCCUPANCY_VALUES.__getitem__, raw_row)))
     half_cell = 0.5 * source.resolution_m
     return ObstacleMap(
         occupancy=tuple(rows),
@@ -834,16 +835,13 @@ def _to_obstacle_map(source: SlamtecExploreMap) -> ObstacleMap:
     )
 
 
-def _convert_occupancy(value: int) -> Optional[float]:
-    # Hermes 6.3.2 实机：0 未知，1..127 可通行，128..255 为占用证据。
-    if value == 0:
-        return None
-    if value <= 127:
-        return 0.0
-    return 1.0
-
-
 def _convert_rgb(image: Any):
+    # RealSense/远程相机的 uint8 RGB 已是整数，避免逐通道重复 int() 转换。
+    if (
+        getattr(getattr(image, "dtype", None), "name", None) == "uint8"
+        and getattr(image, "ndim", None) == 3 and image.shape[2] == 3
+    ):
+        return tuple(tuple(map(tuple, row)) for row in image.tolist())
     rows = image.tolist() if hasattr(image, "tolist") else image
     return tuple(
         tuple((int(pixel[0]), int(pixel[1]), int(pixel[2])) for pixel in row)
@@ -852,6 +850,16 @@ def _convert_rgb(image: Any):
 
 
 def _convert_depth(image: Any):
+    if (
+        getattr(getattr(image, "dtype", None), "kind", None) == "f"
+        and getattr(image, "ndim", None) == 2
+    ):
+        # 硬件环境已有 NumPy；只操作副本，输出仍为原来的只读 tuple/None 契约。
+        import numpy as np
+
+        values = image.astype(object)
+        values[~(np.isfinite(image) & (image > 0.0))] = None
+        return tuple(map(tuple, values.tolist()))
     rows = image.tolist() if hasattr(image, "tolist") else image
     return tuple(
         tuple(

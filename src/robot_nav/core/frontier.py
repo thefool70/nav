@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Mapping, Optional, Sequence, Set, Tuple
 
 from .timing import TimingSpans, measure_stage
 from .geometry import grid_cell_center_to_world, world_to_nearest_grid_cell
-from .models import FrontierCandidate, ObstacleMap, Pose2D
+from .models import FrontierCandidate, NavigationFrame, ObstacleMap, Pose2D
 
 
 Cell = Tuple[int, int]
@@ -31,6 +31,37 @@ class FrontierExtraction:
     ignored_hole_count: int = 0
     ignored_hole_area_m2: float = 0.0
     ignored_frontier_cell_count: int = 0
+
+
+@dataclass
+class FrameFrontierCache:
+    """单周期、单帧的提取结果；排除点不同则重新计算，区域匹配仍由调用者执行。"""
+
+    frame: NavigationFrame
+    extractions: Dict[Tuple[Tuple[float, float], ...], FrontierExtraction] = field(default_factory=dict)
+
+
+def extract_frame_frontiers(
+    frame: NavigationFrame,
+    excluded_world_xy: Tuple[Tuple[float, float], ...],
+    cache: Optional[FrameFrontierCache] = None,
+    timings: Optional[TimingSpans] = None,
+) -> FrontierExtraction:
+    """只复用同一个只读帧和相同排除点的几何提取，不缓存状态相关的屏蔽与区域 ID。"""
+    use_cache = cache is not None and cache.frame is frame
+    excluded_points = _normalize_points(excluded_world_xy)
+    if use_cache and excluded_points in cache.extractions:
+        with measure_stage(timings, "frontier.cache_hit"):
+            return cache.extractions[excluded_points]
+    result = extract_frontiers(
+        frame.obstacle_map, frame.pose,
+        excluded_world_xy=excluded_points,
+        visibility_map=frame.visibility_map,
+        timings=timings,
+    )
+    if use_cache:
+        cache.extractions[excluded_points] = result
+    return result
 
 
 def is_world_point_reachable(

@@ -312,12 +312,14 @@
   请求内候选 ID 和原区域 ID；分数缓存必须同时匹配地图 frame、原区域 ID、
   世界目标坐标，不能只按新分配的预览 ID 套用。预览不提交核心区域编号。
 - `_CapturedView.depth_gzip` 在 `_capture` 时复制并压缩同帧对齐深度；不保留
-  原始帧引用。`_write_snapshot` 先写 `view-N.depth.pending.json.gz`，VLM 返回后
-  `_retain_clue_depth` 仅把命中 V 编号重命名为 `view-N.depth.json.gz`，删除其余
+  原始帧引用。`_write_snapshot` 先写 `view-N.depth.pending.f64.gz`，VLM 返回后
+  `_retain_clue_depth` 仅把命中 V 编号重命名为 `view-N.depth.f64.gz`，删除其余
   临时深度。检测列表为 `[]` 时全删临时深度，为 `None` 时保留待判定数据。
   队列退出或分析未完成时不清理这些临时文件，也不自动恢复任务。
-- 深度 gzip 内为 JSON：`unit=m`、`width_px`、`height_px`、二维 `values`；
-  无效、非正或非有限像素为 null，尺寸必须与原始 RGB 相同。`snapshot.json`
+- 深度由 `adapters/snapshot_depth.py` 编解码；gzip 内为 `<8sII` 头
+  （`RNDEPTH1`、宽、高）及按行排列的小端 float64 米制数据，None 编为零，
+  非正或非有限值解码为 None。`_read_clue_frame` 仍能读取旧 `.depth.json.gz`。
+  `snapshot.json` 的 `depth.encoding=gzip-float64-le-v1` 标明新格式；尺寸须与 RGB 相同。
   每张图的 `depth.captured` 只表示采集时是否有深度，不表示模型命中或测距可靠。
   实际保留情况见 `result.json.depth_retention.retained_view_ids`，命中但无文件见
   `missing_view_ids`；`pending_detection` 表示检测失败，`selection_failed` 的
