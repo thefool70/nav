@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Sequence, Set, Tuple
 
 from .geometry import grid_cell_center_to_world, world_to_nearest_grid_cell
@@ -17,6 +18,18 @@ PATH_DISTANCE_SCORE_WEIGHT = 0.05
 SEMANTIC_SCORE_WEIGHT = 1.5
 FRONTIER_CLEARANCE_SEARCH_M = 0.75
 FRONTIER_FRAGMENT_GAP_M = 0.30
+MAX_UNKNOWN_HOLE_AREA_M2 = 0.05
+
+
+@dataclass(frozen=True)
+class FrontierExtraction:
+    """有效候选与本次提取的小孔洞过滤统计；不修改输入地图。"""
+
+    candidates: Tuple[FrontierCandidate, ...] = ()
+    hole_filter_applied: bool = False
+    ignored_hole_count: int = 0
+    ignored_hole_area_m2: float = 0.0
+    ignored_frontier_cell_count: int = 0
 
 
 def is_world_point_reachable(
@@ -61,15 +74,18 @@ def reachable_free_distances(
     return _reachable_free_distances(seed, free_cells)
 
 
-def find_frontier_candidates(
+def extract_frontiers(
     obstacle_map: ObstacleMap,
     pose: Pose2D,
     semantic_scores: Optional[Mapping[str, float]] = None,
     excluded_world_xy: Sequence[Tuple[float, float]] = (),
     min_frontier_span_m: float = 0.5,
     min_goal_distance_m: float = 0.35,
-) -> Tuple[FrontierCandidate, ...]:
-    """保留完整连续边界，排除已尝试位置后，为每个有效区域选择一个可达代表点。"""
+    *,
+    visibility_map: Optional[ObstacleMap] = None,
+    max_unknown_hole_area_m2: float = MAX_UNKNOWN_HOLE_AREA_M2,
+) -> FrontierExtraction:
+    """提取可达候选并返回过滤统计；仅用同格网未膨胀图判断小孔洞。"""
     grid = _normalize_grid(obstacle_map)
     resolution = _positive_finite(obstacle_map.resolution_m, "resolution_m")
     minimum_span = _non_negative_finite(
@@ -80,10 +96,11 @@ def find_frontier_candidates(
     )
     normalized_scores = _normalize_semantic_scores(semantic_scores)
     excluded_points = _normalize_points(excluded_world_xy)
+    hole_area_limit = _non_negative_finite(max_unknown_hole_area_m2, "max_unknown_hole_area_m2")
 
     free_cells = _free_cells(grid)
     if not free_cells:
-        return ()
+        return FrontierExtraction()
 
     requested_seed = world_to_nearest_grid_cell(
         (pose.x_m, pose.y_m), obstacle_map
@@ -92,6 +109,31 @@ def find_frontier_candidates(
     reachable_distance = _reachable_free_distances(seed, free_cells)
     reachable_cells = set(reachable_distance)
     frontier_cells = _find_frontier_cells(grid, reachable_cells)
+    ignored_unknown = set()
+    hole_sizes = ()
+    filter_applied = False
+    original_frontier_count = len(frontier_cells)
+    # 未膨胀图与探索图同格网时才分类，避免膨胀切断未知区域后误判为小孔洞。
+    if visibility_map is not None and hole_area_limit > 0.0:
+        if not isinstance(visibility_map, ObstacleMap):
+            raise ValueError("visibility_map must be an ObstacleMap")
+        if (
+            visibility_map.frame_id == obstacle_map.frame_id
+            and visibility_map.origin == obstacle_map.origin
+            and visibility_map.resolution_m == obstacle_map.resolution_m
+            and len(visibility_map.occupancy) == len(grid)
+            and all(len(row) == len(grid[0]) for row in visibility_map.occupancy)
+        ):
+            raw_grid = _normalize_grid(visibility_map)
+            seeds = {
+                neighbor for row, col in frontier_cells
+                for neighbor in _eight_neighbors(row, col)
+                if 0 <= neighbor[0] < len(grid) and 0 <= neighbor[1] < len(grid[0])
+                and grid[neighbor[0]][neighbor[1]] is None
+            }
+            ignored_unknown, hole_sizes = _small_unknown_holes(raw_grid, seeds, resolution, hole_area_limit)
+            frontier_cells = _find_frontier_cells(grid, reachable_cells, ignored_unknown)
+            filter_applied = True
 
     clearance_search_steps = max(
         1,
@@ -99,7 +141,7 @@ def find_frontier_candidates(
     )
     candidate_groups = tuple(
         component
-        for component in _merge_frontier_fragments(frontier_cells, grid, resolution)
+        for component in _merge_frontier_fragments(frontier_cells, grid, resolution, ignored_unknown)
         if _frontier_span_m(component, resolution) >= minimum_span
     )
 
@@ -155,16 +197,61 @@ def find_frontier_candidates(
             candidate.candidate_id,
         )
     )
-    return tuple(candidates)
+    return FrontierExtraction(
+        candidates=tuple(candidates), hole_filter_applied=filter_applied,
+        ignored_hole_count=len(hole_sizes),
+        ignored_hole_area_m2=sum(hole_sizes) * resolution * resolution,
+        ignored_frontier_cell_count=original_frontier_count - len(frontier_cells),
+    )
+
+
+def _small_unknown_holes(
+    grid: GridValues, seeds: Set[Cell], resolution_m: float, max_area_m2: float,
+) -> Tuple[Set[Cell], Tuple[int, ...]]:
+    """只从候选邻接未知格开始八邻接搜索；超面积或连到图边即保留，不遍历整片外部未知区。"""
+    height, width = len(grid), len(grid[0])
+    cell_area = resolution_m * resolution_m
+    ignored, preserved = set(), set()
+    sizes = []
+    for seed in sorted(seeds):
+        if seed in ignored or seed in preserved or grid[seed[0]][seed[1]] is not None:
+            continue
+        component = {seed}
+        queue = deque([seed])
+        small_closed = cell_area <= max_area_m2
+        while queue and small_closed:
+            row, col = queue.popleft()
+            if row in (0, height - 1) or col in (0, width - 1):
+                small_closed = False
+                break
+            for neighbor in _eight_neighbors(row, col):
+                # 当前格不在图边，八邻格均在图内。
+                if grid[neighbor[0]][neighbor[1]] is not None or neighbor in component:
+                    continue
+                if neighbor in preserved:
+                    small_closed = False
+                    break
+                component.add(neighbor)
+                if len(component) * cell_area > max_area_m2:
+                    small_closed = False
+                    break
+                queue.append(neighbor)
+        if small_closed:
+            ignored.update(component)
+            sizes.append(len(component))
+        else:
+            preserved.update(component)
+    return ignored, tuple(sizes)
 
 
 def _merge_frontier_fragments(
     cells: Set[Cell], grid: GridValues, resolution: float,
+    ignored_unknown: Set[Cell],
 ) -> Tuple[Set[Cell], ...]:
     """合并未知侧朝向相近、自由区短路径不超过 0.30 m 的断段，不穿越障碍。"""
     components = _connected_components(cells)
     owners = {cell: index for index, part in enumerate(components) for cell in part}
-    normals = tuple(_unknown_side_normal(part, grid) for part in components)
+    normals = tuple(_unknown_side_normal(part, grid, ignored_unknown) for part in components)
     free = _free_cells(grid)
     steps = int(FRONTIER_FRAGMENT_GAP_M / resolution)
     links = set()
@@ -200,7 +287,9 @@ def _merge_frontier_fragments(
     return tuple(groups[index] for index in sorted(groups))
 
 
-def _unknown_side_normal(component: Set[Cell], grid: GridValues) -> Tuple[float, float]:
+def _unknown_side_normal(
+    component: Set[Cell], grid: GridValues, ignored_unknown: Set[Cell],
+) -> Tuple[float, float]:
     """用邻接未知格方向的均值区分边界朝向；方向不明确时不跨断口合并。"""
     dr_sum = dc_sum = 0
     for row, col in component:
@@ -208,6 +297,7 @@ def _unknown_side_normal(component: Set[Cell], grid: GridValues) -> Tuple[float,
             if (
                 0 <= near_row < len(grid) and 0 <= near_col < len(grid[0])
                 and grid[near_row][near_col] is None
+                and (near_row, near_col) not in ignored_unknown
             ):
                 dr_sum += near_row - row
                 dc_sum += near_col - col
@@ -297,13 +387,17 @@ def _reachable_free_distances(
     return distances
 
 
-def _find_frontier_cells(grid: GridValues, reachable: Set[Cell]) -> Set[Cell]:
+def _find_frontier_cells(
+    grid: GridValues, reachable: Set[Cell], ignored_unknown: Optional[Set[Cell]] = None,
+) -> Set[Cell]:
     """返回八邻域接触未知格的可达自由格。"""
     height, width = len(grid), len(grid[0])
+    ignored = ignored_unknown if ignored_unknown is not None else set()
     result = set()
     for row, col in reachable:
         if any(
             grid[near_row][near_col] is None
+            and (near_row, near_col) not in ignored
             for near_row, near_col in _eight_neighbors(row, col)
             if 0 <= near_row < height and 0 <= near_col < width
         ):
@@ -475,7 +569,8 @@ def _is_finite(value: object) -> bool:
 __all__ = [
     "PATH_DISTANCE_SCORE_WEIGHT",
     "SEMANTIC_SCORE_WEIGHT",
-    "find_frontier_candidates",
+    "extract_frontiers",
+    "FrontierExtraction",
     "is_world_point_reachable",
     "reachable_free_distances",
 ]

@@ -62,8 +62,8 @@ class L515ObservedMap:
         robot_pose: Pose2D,
         capture: L515Capture,
         camera_extrinsics: CameraExtrinsics,
-    ) -> ObstacleMap:
-        """更新当前 FOV 中的占用值，其余区域输出缓存；从未观察的格子为 None。"""
+    ) -> Tuple[ObstacleMap, ObstacleMap]:
+        """返回膨胀探索图、未膨胀视觉图；两图均只更新当前 FOV，视场外保留缓存。"""
         self._prepare_map_geometry(source)
         visible_cells = _cells_in_camera_fov(
             source,
@@ -90,6 +90,12 @@ class L515ObservedMap:
             self._raw_occupancy[key] = source.occupancy[row][col]
 
         occupancy = self._cached_occupancy_in(source, self._raw_occupancy)
+        visibility_map = ObstacleMap(
+            occupancy=tuple(tuple(row) for row in occupancy),
+            resolution_m=source.resolution_m,
+            origin=source.origin,
+            frame_id=source.frame_id,
+        )
         _inflate_obstacles(
             occupancy,
             source.resolution_m,
@@ -99,12 +105,13 @@ class L515ObservedMap:
         # 不能让视野内新障碍把视野外的未知格或历史自由格一并刷新。
         for (row, col), key in update_keys.items():
             self._inflated_occupancy[key] = occupancy[row][col]
-        return ObstacleMap(
+        obstacle_map = ObstacleMap(
             occupancy=tuple(tuple(row) for row in self._cached_occupancy_in(source, self._inflated_occupancy)),
             resolution_m=source.resolution_m,
             origin=source.origin,
             frame_id=source.frame_id,
         )
+        return obstacle_map, visibility_map
 
     def _prepare_map_geometry(self, obstacle_map: ObstacleMap) -> None:
         """坐标系、分辨率或方向变化时清空缓存；平移原点扩图时按世界位置复用。"""

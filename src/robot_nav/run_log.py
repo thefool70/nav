@@ -14,11 +14,13 @@ from typing import Any, Mapping, Optional, TextIO, Tuple
 
 from .adapters.perception import LocalPerceptionEvent
 from .core.geometry import world_to_nearest_grid_cell
+from .core.observation_coverage import camera_world_position
 from .core.models import (
     NavigationFrame,
     NavigationResult,
     ObservationNode,
     ObservationView,
+    ObstacleMap,
     Pose2D,
     RelativePoseCommand,
     SearchState,
@@ -276,6 +278,11 @@ def _camera_summary(frame: NavigationFrame) -> Mapping[str, Any]:
     return {
         "rgb_size": _image_size(frame.rgb),
         "depth_size": _image_size(frame.depth),
+        "visibility_map_source": "visibility_map" if frame.visibility_map is not None else "obstacle_map",
+        "origin_in_obstacle_map": _camera_origin_cell(frame, frame.obstacle_map),
+        "origin_in_visibility_map": _camera_origin_cell(
+            frame, frame.visibility_map if frame.visibility_map is not None else frame.obstacle_map,
+        ),
         "intrinsics": None
         if intrinsics is None
         else {
@@ -293,6 +300,17 @@ def _camera_summary(frame: NavigationFrame) -> Mapping[str, Any]:
             "roll_rad": extrinsics.roll_rad,
         },
     }
+
+
+def _camera_origin_cell(frame: NavigationFrame, obstacle_map: ObstacleMap) -> Mapping[str, Any]:
+    """记录光心在两种地图中的占用值，用于区分净空膨胀和真实遮挡。"""
+    row, col = world_to_nearest_grid_cell(camera_world_position(frame), obstacle_map)
+    grid = obstacle_map.occupancy
+    if not (0 <= row < len(grid) and 0 <= col < len(grid[row])):
+        return {"cell": (row, col), "state": "out_of_map", "value": None}
+    value = grid[row][col]
+    state = "unknown" if value is None else "free" if float(value) <= 0.5 else "occupied"
+    return {"cell": (row, col), "state": state, "value": value}
 
 
 def _image_size(image: Any) -> Optional[Tuple[int, int]]:
@@ -395,6 +413,12 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
         ),
         "object_approach": asdict(state.object_approach),
         "frontier_region_ids": tuple(region.region_id for region in state.frontier_regions),
+        "frontier_hole_filter": {
+            "applied": state.frontier_hole_filter_applied,
+            "ignored_hole_count": state.ignored_frontier_hole_count,
+            "ignored_hole_area_m2": state.ignored_frontier_hole_area_m2,
+            "ignored_frontier_cell_count": state.ignored_frontier_cell_count,
+        },
         "blocked_frontier_regions": tuple(
             {
                 "region_id": region.region_id,

@@ -213,8 +213,9 @@ class SlamtecL515Adapter:
             slamtec_map = self._client.get_explore_map()
             navigation_map = _to_obstacle_map(slamtec_map)
             obstacle_map = navigation_map
+            visibility_map = None
             if capture is not None:
-                obstacle_map = self._observed_map.update(
+                obstacle_map, visibility_map = self._observed_map.update(
                     obstacle_map,
                     pose,
                     capture,
@@ -227,6 +228,7 @@ class SlamtecL515Adapter:
                 capture=capture,
                 camera_extrinsics=self.config.camera_extrinsics_in_robot,
                 navigation_map=navigation_map,
+                visibility_map=visibility_map,
             )
 
     def _continuous_frame_loop(self) -> None:
@@ -765,6 +767,7 @@ def _build_navigation_frame(
     capture: Optional[L515Capture],
     camera_extrinsics: CameraExtrinsics,
     navigation_map: Optional[ObstacleMap] = None,
+    visibility_map: Optional[ObstacleMap] = None,
 ) -> NavigationFrame:
     """把两类设备数据冻结为 core 只读的同一地图坐标帧。"""
     if capture is None:
@@ -775,6 +778,7 @@ def _build_navigation_frame(
             camera_extrinsics_in_robot=camera_extrinsics,
             navigation_map=navigation_map,
             navigation_clearance_m=HERMES_OBSTACLE_INFLATION_RADIUS_M,
+            visibility_map=visibility_map,
         )
     return NavigationFrame(
         timestamp_s=timestamp_s,
@@ -786,6 +790,7 @@ def _build_navigation_frame(
         camera_extrinsics_in_robot=camera_extrinsics,
         navigation_map=navigation_map,
         navigation_clearance_m=HERMES_OBSTACLE_INFLATION_RADIUS_M,
+        visibility_map=visibility_map,
     )
 
 

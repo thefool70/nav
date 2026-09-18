@@ -47,6 +47,7 @@ def frontier_observation_points(
     使用边界格而非单个代表点，避免聚类缩减观察方向；不扫描隔墙或远处边界。
     """
     origin = camera_world_position(frame)
+    visibility_map = _visibility_map(frame)
     points = {
         grid_cell_center_to_world(row, col, frame.obstacle_map)
         for candidate in candidates
@@ -55,13 +56,14 @@ def frontier_observation_points(
     return tuple(
         point for point in sorted(points)
         if 0.10 < math.dist(origin, point) <= OBSERVATION_RANGE_M
-        and _has_map_line_of_sight(frame.obstacle_map, origin, point)
+        and _has_map_line_of_sight(visibility_map, origin, point)
     )
 
 
 def _local_coverage_points(frame: NavigationFrame) -> Tuple[WorldPoint, ...]:
     """采样当前图像可记录的局部覆盖；这些点本身不用于发起扫描。"""
     origin = camera_world_position(frame)
+    visibility_map = _visibility_map(frame)
     spacing = OBSERVATION_SPACING_M
     points = []
     for ix in range(
@@ -76,11 +78,11 @@ def _local_coverage_points(frame: NavigationFrame) -> Tuple[WorldPoint, ...]:
             distance = math.dist(origin, point)
             if (
                 MIN_OBSERVATION_DISTANCE_M <= distance <= OBSERVATION_RANGE_M
-                and _has_map_line_of_sight(frame.obstacle_map, origin, point)
+                and _has_map_line_of_sight(visibility_map, origin, point)
             ):
                 points.append(point)
     # 记录首层未知边界的覆盖，后续地图公开时可复用；不推测边界后方可见。
-    points.extend(_visible_unknown_boundary_points(frame.obstacle_map, origin))
+    points.extend(_visible_unknown_boundary_points(visibility_map, origin))
     return tuple(sorted(set(points)))
 
 
@@ -141,13 +143,14 @@ def capture_observation_view(
     """冻结当前图像的覆盖；调用方仅在语义检查成功后将它加入 observed_views。"""
     origin = camera_world_position(frame)
     heading = frame.pose.yaw_rad + camera_center_offset_rad
+    visibility_map = _visibility_map(frame)
     depth_available = _aligned_depth_available(frame)
     map_points = set(_local_coverage_points(frame))
     # Frontier 格心未必落在固定采样网格上，显式记录才能按同一点复用检查结果。
     map_points.update(
         point for point in observation_points
         if 0.10 < math.dist(origin, point) <= OBSERVATION_RANGE_M
-        and _has_map_line_of_sight(frame.obstacle_map, origin, point)
+        and _has_map_line_of_sight(visibility_map, origin, point)
     )
     in_view = tuple(
         point for point in sorted(map_points)
@@ -169,6 +172,11 @@ def capture_observation_view(
         map_visible_world_xy=in_view,
         depth_coverage_available=depth_available,
     )
+
+
+def _visibility_map(frame: NavigationFrame) -> ObstacleMap:
+    """视觉射线使用未膨胀遮挡图，避免把机器人净空带当作真实障碍。"""
+    return frame.visibility_map if frame.visibility_map is not None else frame.obstacle_map
 
 
 def _has_map_line_of_sight(

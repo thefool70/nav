@@ -131,19 +131,31 @@
   所有已见格，否则视场外地图会变化。FOV 不读取深度、不检查遮挡。
   启动点 0.50m 区域只初始化一次，扩图不补读该圆内的视场外新格。原点平移时
   按首次格网锚点投回当前数组；frame_id、分辨率或 yaw 变化才清空并重新初始化。
-  该规则只控制探索图 `obstacle_map`，不改变 Hermes 内部 SLAM 与避障地图。
+  该规则控制算法使用的 FOV 缓存，不改变 Hermes 内部 SLAM 与避障地图。
   `slamtec_l515/adapter.py::_read_frame_locked` 还将同次读取的完整未膨胀图保留为
   `navigation_map`，供物体障碍定位和停靠；`navigation_clearance_m=0.36` 只在
   停靠规划时排除障碍邻域。完整图不得回写到 `L515ObservedMap` 的视场外缓存。
+  `L515ObservedMap.update` 返回 `(obstacle_map, visibility_map)`；后者在膨胀前冻结，
+  与探索图使用相同 FOV 缓存。`observation_coverage.py` 的方向筛选、固定网格覆盖及
+  首层未知边界均使用视觉图，Frontier 格子仍从探索图转换为世界点。
+  JSONL 的 camera 字段记录 `visibility_map_source`、`origin_in_obstacle_map` 和
+  `origin_in_visibility_map`。底盘格为自由不代表前置相机光心也在自由格；若本地待查
+  数为 0，先检查光心是否落在导航膨胀带，勿直接当作旧视角复用。
 - 地图上的绿色轮廓来自 `rerun_view.py::_update_frontier_markers` 遍历每个
   候选的全部 `frontier_cells`，绿色格数不等于导航目标数。`Frontiers` 表格每行
   才是一个候选；JSONL 的 `frontier_candidates` 长度与各项
   `frontier_cell_count` 可分别核对候选数和边界格数，截图须关联周期后才能比较。
-- `frontier.py::find_frontier_candidates` 按八邻接保留完整连续边界，不按长度
+- `frontier.py::extract_frontiers` 返回候选及过滤统计，按八邻接保留完整连续边界，不按长度
   或跨度拆分。`_merge_frontier_fragments` 仅按 0.30 m 自由区短路径和未知侧
   朝向判断断段是否合并，不限制总跨度；合并后统一过滤跨度小于 0.50 m 的区域。
   每个有效区域只产生一个移动代表点，`frontier_cells` 保留完整边界供扫描与匹配。
   排查连续边界被分成多个候选时，先核对边界是否实际八邻接连通和候选刷新周期。
+  聚类前 `_small_unknown_holes` 仅从候选邻接的未知格开始，在同格网 `visibility_map`
+  上搜索面积不超过 `MAX_UNKNOWN_HOLE_AREA_M2=0.05` 的封闭八连通块；触图边、
+  超面积或连接到已确认保留的区域就停止。不得改用膨胀图判断连通性。
+  `_find_frontier_cells` 与 `_unknown_side_normal` 使用同一排除集，避免合并时重新
+  引入孔洞方向。排除集仅在本次提取有效；JSONL `state.frontier_hole_filter` 的
+  applied=false 表示未执行过滤，不能与执行后未发现孔洞混淆。
 - `core/navigator.py::_refresh_frontier_regions` 重提有效边界；
   `core/history.py::match_frontier_regions` 用世界坐标边界关联 ID。历史节点只保留
   实际尝试的 Frontier 移动，节点的出发位置也是本轮未选方向的父节点。

@@ -11,10 +11,11 @@ import math
 from dataclasses import replace
 from typing import Any, Mapping, Optional, Tuple
 
+
 from .frontier import (
     PATH_DISTANCE_SCORE_WEIGHT,
     SEMANTIC_SCORE_WEIGHT,
-    find_frontier_candidates,
+    extract_frontiers,
 )
 from .geometry import (
     world_point_to_robot,
@@ -1306,10 +1307,12 @@ def _refresh_frontier_regions(
     state: SearchState,
 ) -> Tuple[SearchState, Tuple[FrontierCandidate, ...]]:
     """重提边界、过滤仍被未知路径屏蔽的整片区域，再关联有效候选的稳定 ID。"""
-    candidates = find_frontier_candidates(
+    extraction = extract_frontiers(
         frame.obstacle_map, frame.pose,
         excluded_world_xy=_tried_candidate_points(state.observation_history),
+        visibility_map=frame.visibility_map,
     )
+    candidates = extraction.candidates
     candidates, blocked_regions = filter_blocked_frontier_regions(
         frame.obstacle_map, candidates, state.blocked_frontier_regions,
     )
@@ -1324,6 +1327,10 @@ def _refresh_frontier_regions(
         state, frontier_regions=regions, next_frontier_region_id=next_id,
         active_frontier_id=active_id,
         blocked_frontier_regions=blocked_regions,
+        frontier_hole_filter_applied=extraction.hole_filter_applied,
+        ignored_frontier_hole_count=extraction.ignored_hole_count,
+        ignored_frontier_hole_area_m2=extraction.ignored_hole_area_m2,
+        ignored_frontier_cell_count=extraction.ignored_frontier_cell_count,
     ), candidates
 
 
@@ -1571,6 +1578,14 @@ def _validation_error(
         return "frame.obstacle_map.resolution_m 必须为正有限值"
     if not isinstance(frame.obstacle_map.frame_id, str) or not frame.obstacle_map.frame_id:
         return "frame.obstacle_map.frame_id 必须为非空字符串"
+    if frame.visibility_map is not None:
+        if (
+            not isinstance(frame.visibility_map, ObstacleMap)
+            or frame.visibility_map.frame_id != frame.obstacle_map.frame_id
+            or not _is_finite(frame.visibility_map.resolution_m)
+            or float(frame.visibility_map.resolution_m) <= 0.0
+        ):
+            return "frame.visibility_map 必须为同坐标系、分辨率有效的未膨胀遮挡图"
     if frame.navigation_map is not None:
         if (
             not isinstance(frame.navigation_map, ObstacleMap)

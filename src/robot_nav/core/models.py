@@ -81,7 +81,10 @@ class NavigationFrame:
 
     navigation_map 可提供同坐标系的完整、未膨胀障碍图，仅用于物体定位与接近；
     navigation_clearance_m 为该图选停靠点时采用的机器人净空半径（米）。
-    未提供时沿用 obstacle_map，不额外膨胀。探索始终只使用 obstacle_map。
+    未提供时沿用 obstacle_map，不额外膨胀。Frontier 与探索路径仍使用 obstacle_map。
+
+    visibility_map 是同坐标系的未膨胀视觉遮挡图，公开范围遵循 Adapter 的观察规则；
+    仅用于观测方向与覆盖判定，不用于路径规划。未提供时沿用 obstacle_map。
 
     契约：pose 在进入 core 前必须已转换到 obstacle_map.frame_id 坐标系，
     core 内部不再做坐标转换。
@@ -98,6 +101,7 @@ class NavigationFrame:
     )
     navigation_map: Optional[ObstacleMap] = None
     navigation_clearance_m: float = 0.0
+    visibility_map: Optional[ObstacleMap] = None
 
 
 class SearchMode(str, Enum):
@@ -406,6 +410,11 @@ class SearchState:
     observation_history: Tuple[ObservationNode, ...] = ()
     scan_evidence: Tuple[ScanEvidence, ...] = ()
     frontier_regions: Tuple[FrontierRegion, ...] = ()
+    # 最近一次 Frontier 提取的孔洞过滤统计，每次刷新覆盖，不是累计屏蔽。
+    frontier_hole_filter_applied: bool = False
+    ignored_frontier_hole_count: int = 0
+    ignored_frontier_hole_area_m2: float = 0.0
+    ignored_frontier_cell_count: int = 0
     next_frontier_region_id: int = 0
     active_frontier_id: Optional[str] = None
     observed_views: Tuple[ObservationView, ...] = ()
