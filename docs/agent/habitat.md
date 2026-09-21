@@ -434,12 +434,18 @@
 - `adapters/hermes/adapter.py::_execute_action` 将 Action 创建、起始位姿读取和监控
   放在同一异常范围；`_cancel_active_action` 与 `close` 负责取消遗留动作。已获得
   ID 时还要确认终态；创建请求失败而没有 ID 时只能尝试取消，原异常仍终止运行。
-- CLI 的 `_optional_callback` 停用失败的 Rerun 周期/运动回调；Hermes 进度回调
-  与 JSONL `_write` 也隔离记录错误。直接调用 `run_navigation_cycle(on_cycle=...)`
-  的自定义回调仍由调用方负责。采集、路径检查、健康错误仍停止并收尾动作。
-- 正式扫描的快照落盘失败仍传播并停止；运动预采样失败记录 `prefetch_skipped`，
+- `runtime_reporting._optional_callback` 集中处理可视化的 I/O 与运行库故障；
+  类型或字段错误继续传播。Adapter 不再重复捕获回调异常；JSONL `_write` 只隔离
+  文件 I/O 错误，序列化错误直接暴露。直接传入 Adapter 或周期函数的自定义回调
+  由调用方负责。采集、路径检查、健康错误仍停止并收尾动作。
+- 正式扫描的快照落盘失败仍传播并停止；运动预采样的文件 I/O 失败记录 `prefetch_skipped`，
   不登记已检查。`snapshot_failed` 与普通日志丢失不同；结果落盘失败时内存结果
   仍交给主循环。队列停止后运行中的 HTTP 可能完成，退出不自动续跑剩余任务。
+
+- `SemanticPerception._run_worker` 只负责把后台异常传到 `begin_cycle` / `wait_for_result`，
+  不转成普通检测失败。排查队列停止先看原始异常堆栈；不要通过增加宽泛捕获恢复等待。
+- `core/navigation_io.py` 只检查进入决策的物理数据，不遍历检查 `SearchState` 的字段类型。
+  状态错误应回到创建或更新该状态的行为模块修复。
 
 ## 离线读取 RRD
 

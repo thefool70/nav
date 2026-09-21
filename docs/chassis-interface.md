@@ -22,6 +22,11 @@
 | 控制命令 | `RelativePoseCommand(forward_m, left_m, yaw_rad)`，机器人坐标系，向前 / 向左 / 逆时针为正 |
 | 状态 | `NavigationStatus`：`OK`、`NO_SOLUTION`、输入/数据错误，或请求目标观测、场景判断、Frontier 评分和目标确认 |
 
+Adapter 负责将设备数据转换成契约规定的类型。内部函数不兼容字符串数值或
+任意对象，也不逐层重查 dataclass 类型。Hermes 的本地与远程相机统一输出
+H×W×3 uint8 RGB 数组及 H×W 米制浮点深度数组；进入核心时转换为只读行序列，
+无效深度归一为 `None`。未知地图、缺测深度和不可达目标仍按原有算法处理。
+
 ## 坐标系契约
 
 - `NavigationFrame.pose` 在进入 core 前必须已转换到
