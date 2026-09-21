@@ -99,6 +99,24 @@ class ChassisControls:
                            "y": pose.y_m + value * math.sin(pose.yaw_rad), "z": 0.0}}
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Hermes 本地浏览器操作面板")
+    parser.add_argument("--base-url", default="http://127.0.0.1:11448")
+    parser.add_argument("--port", type=int, default=8088)
+    args = parser.parse_args()
+    controls = ChassisControls(args.base_url)
+    controls.client()  # 仅校验地址，不连接底盘。
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(controls, secrets.token_hex(24)))
+    print(f"底盘面板：http://127.0.0.1:{server.server_port}  →  {args.base_url}", flush=True)
+    print("关闭页面或服务不会取消底盘任务；退出前请点击停止并确认停稳。", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
 def handler_for(controls, token):
     """只允许本地页面访问固定操作；不提供任意底盘 API 代理。"""
     page = Path(__file__).with_name("chassis_gui.html").read_text().replace("__TOKEN__", token)
@@ -153,24 +171,6 @@ def handler_for(controls, token):
                 self.respond(502, {"error": f"{exc}；若发送时通信失败，任务可能已受理，请查询状态，不要重复点击。"})
 
     return Handler
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Hermes 本地浏览器操作面板")
-    parser.add_argument("--base-url", default="http://127.0.0.1:11448")
-    parser.add_argument("--port", type=int, default=8088)
-    args = parser.parse_args()
-    controls = ChassisControls(args.base_url)
-    controls.client()  # 仅校验地址，不连接底盘。
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(controls, secrets.token_hex(24)))
-    print(f"底盘面板：http://127.0.0.1:{server.server_port}  →  {args.base_url}", flush=True)
-    print("关闭页面或服务不会取消底盘任务；退出前请点击停止并确认停稳。", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
 
 
 if __name__ == "__main__":
