@@ -1,17 +1,17 @@
 """可被不同底盘 Adapter 复用的 Intel RealSense 设备边界。"""
 
-from .l515_camera import L515Camera, L515Capture, L515Config
-from .l515_motion import (
-    L515MotionConfig,
-    L515MotionSensor,
-    L515StationaryMotion,
-)
+from .d435i_camera import D435iCalibrationCamera, D435iCamera, D435iConfig
+from .rgbd_camera import RgbdCamera, RgbdCameraConfig, RgbdCapture
+
+# D435iCapture 是导航与地图刷新共用的对齐 RGB-D 帧类型。
+D435iCapture = RgbdCapture
 
 __all__ = [
-    "L515Camera",
-    "L515Capture",
-    "L515Config",
-    "L515MotionConfig",
-    "L515MotionSensor",
-    "L515StationaryMotion",
+    "D435iCalibrationCamera",
+    "D435iCamera",
+    "D435iCapture",
+    "D435iConfig",
+    "RgbdCamera",
+    "RgbdCameraConfig",
+    "RgbdCapture",
 ]

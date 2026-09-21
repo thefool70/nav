@@ -79,14 +79,14 @@ def main() -> int:
 
 def _load_model(kind, request, progress):
     if kind == "yolo":
-        from .yolo_world_sam2 import YoloWorldSam2Config, YoloWorldDetector
-        return YoloWorldDetector(YoloWorldSam2Config(
+        from .yolo_world import YoloWorldConfig, YoloWorldDetector
+        return YoloWorldDetector(YoloWorldConfig(
             class_text=request["class_text"], model_path=Path(request["yolo_model"]),
             device=request["device"],
         ), on_stage=progress)
-    from .sam2_observer import Sam2BoxSegmenter, Sam2ObserverConfig
+    from .sam2_segmenter import Sam2BoxSegmenter, Sam2Config
     progress("loading_sam2")
-    return Sam2BoxSegmenter(Sam2ObserverConfig(
+    return Sam2BoxSegmenter(Sam2Config(
         checkpoint_path=Path(request["sam2_checkpoint"]), device=request["device"],
     ))
 

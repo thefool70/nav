@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .core.actions import action_command
+
 import json
 import math
 import threading
@@ -12,7 +14,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional, TextIO, Tuple
 
-from .adapters.perception import LocalPerceptionEvent
 from .core.geometry import world_to_nearest_grid_cell
 from .core.observation_coverage import camera_world_position
 from .core.models import (
@@ -126,22 +127,6 @@ class NavigationRunLogger:
         """队列事件记录任务 ID 与拍摄快照路径，允许关联迟到的模型结果。"""
         self._write("semantic_queue", queue_event=event.get("event"), details=dict(event))
 
-    def log_local_perception(
-        self,
-        frame: NavigationFrame,
-        event: LocalPerceptionEvent,
-    ) -> None:
-        """记录运动期间本地检测摘要，不复制 RGB、深度或掩码。"""
-        self._write(
-            "local_perception",
-            cycle=self._current_cycle,
-            sequence=event.sequence_index,
-            frame_timestamp_s=event.frame_timestamp_s,
-            pose=_pose_summary(frame.pose),
-            observation=_observation_summary(event.observation),
-            inference_s=event.inference_s,
-            candidate_count=event.candidate_count,
-        )
 
     def log_error(self, exc: BaseException) -> None:
         self._write(
@@ -206,7 +191,13 @@ def _result_summary(
         "stage": result.debug.stage,
         "message": result.debug.message,
         "details": _compact_debug_details(result.debug.details, pose),
-        "command": _command_summary(result.command, pose),
+        "action": ({"kind": result.action.action.value,
+                    "purpose": result.action.purpose.value,
+                    "constraint": result.action.constraint.value,
+                    "candidate_id": result.action.candidate_id,
+                    "node_id": result.action.node_id}
+                   if result.action is not None else None),
+        "command": _command_summary(action_command(result.action, pose), pose),
         "state": _state_summary(result.state),
     }
 
@@ -403,9 +394,6 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
             for evidence in state.scan_evidence
         ),
         "initial_scan_complete": state.initial_scan_complete,
-        "target_approach_attempts": state.target_approach_attempts,
-        "pending_target_world_xy": state.pending_target_world_xy,
-        "rejected_target_world_xy": state.rejected_target_world_xy,
         "history_node_count": len(state.observation_history),
         "history_direction_counts": direction_counts,
         "active_frontier_id": state.active_frontier_id,

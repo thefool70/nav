@@ -95,148 +95,10 @@ def pack_rgb_image(image: RgbImage) -> VlmInputImage:
     )
 
 
-def annotate_bbox_image(
-    image: VlmInputImage,
-    bbox_norm: Tuple[float, float, float, float],
-    color: Tuple[int, int, int] = (0, 255, 80),
-) -> VlmInputImage:
-    """在实际 VLM 输入上画归一化候选框，帮助模型区分待确认实例。"""
-    x_min, y_min, x_max, y_max = bbox_norm
-    if not (
-        0.0 <= x_min < x_max <= 1.0
-        and 0.0 <= y_min < y_max <= 1.0
-    ):
-        raise ValueError("bbox_norm 必须是 0 到 1 内的有效边界框")
-    expected_bytes = image.width_px * image.height_px * 3
-    if len(image.rgb_bytes) != expected_bytes:
-        raise ValueError("VLM RGB 数据长度与尺寸不匹配")
-
-    left = max(0, min(image.width_px - 1, math.floor(x_min * image.width_px)))
-    top = max(0, min(image.height_px - 1, math.floor(y_min * image.height_px)))
-    right = max(0, min(image.width_px - 1, math.ceil(x_max * image.width_px) - 1))
-    bottom = max(0, min(image.height_px - 1, math.ceil(y_max * image.height_px) - 1))
-    thickness = max(2, round(min(image.width_px, image.height_px) / 160))
-    annotated = bytearray(image.rgb_bytes)
-    _fill_rectangle(
-        annotated,
-        image.width_px,
-        image.height_px,
-        left,
-        top,
-        right - left + 1,
-        thickness,
-        color,
-    )
-    _fill_rectangle(
-        annotated,
-        image.width_px,
-        image.height_px,
-        left,
-        bottom - thickness + 1,
-        right - left + 1,
-        thickness,
-        color,
-    )
-    _fill_rectangle(
-        annotated,
-        image.width_px,
-        image.height_px,
-        left,
-        top,
-        thickness,
-        bottom - top + 1,
-        color,
-    )
-    _fill_rectangle(
-        annotated,
-        image.width_px,
-        image.height_px,
-        right - thickness + 1,
-        top,
-        thickness,
-        bottom - top + 1,
-        color,
-    )
-    return VlmInputImage(
-        width_px=image.width_px,
-        height_px=image.height_px,
-        rgb_bytes=bytes(annotated),
-    )
 
 
-def build_scan_contact_sheet(
-    scan_images: Mapping[int, BufferedScanImage],
-) -> VlmInputImage:
-    """按扫描顺序拼接全部 RGB，供 VLM 判断当前位置的整体场景。"""
-    if not scan_images:
-        raise ValueError("没有可用的扫描 RGB")
-    ordered_frames = tuple(frame for _, frame in sorted(scan_images.items()))
-    first_frame = ordered_frames[0]
-    tile_width = min(TILE_MAX_WIDTH_PX, first_frame.width_px)
-    tile_height = max(
-        1,
-        round(tile_width * first_frame.height_px / first_frame.width_px),
-    )
-    tiles = tuple(
-        _resize_rgb(frame, tile_width, tile_height)
-        for frame in ordered_frames
-    )
-    return _compose_sheet(tiles, tile_width, [tile_height] * len(tiles))
 
 
-def build_frontier_score_sheet(
-    scan_images: Mapping[int, BufferedScanImage],
-    candidates: Sequence[FrontierCandidate],
-) -> Tuple[VlmInputImage, Tuple[FrontierImageMarker, ...]]:
-    """只标注能投影到本轮图像内的候选；未拍摄方向不伪装成画面边缘目标。"""
-    if not scan_images:
-        raise ValueError("没有可用的扫描 RGB")
-    if not candidates:
-        raise ValueError("没有待评分的 Frontier")
-
-    ordered_frames = tuple(sorted(scan_images.items()))
-    assignments: Dict[int, list] = {index: [] for index, _ in ordered_frames}
-    markers = []
-    for marker_index, candidate in enumerate(candidates, start=1):
-        projection = _best_scan_frame(candidate, ordered_frames)
-        if projection is None:
-            continue
-        frame_index, source_x = projection
-        label = str(marker_index)
-        assignments[frame_index].append((label, source_x))
-        markers.append(FrontierImageMarker(label, candidate.candidate_id))
-
-    if not markers:
-        raise ValueError("本轮图像没有覆盖任何 Frontier 方位")
-
-    used_frames = tuple(
-        (index, frame)
-        for index, frame in ordered_frames
-        if assignments[index]
-    )
-    first_frame = used_frames[0][1]
-    tile_width = min(TILE_MAX_WIDTH_PX, first_frame.width_px)
-    tile_height = max(
-        1,
-        round(tile_width * first_frame.height_px / first_frame.width_px),
-    )
-    tiles = []
-    for frame_index, frame in used_frames:
-        tile = _resize_rgb(frame, tile_width, tile_height)
-        scaled_markers = tuple(
-            (
-                label,
-                source_x * tile_width / frame.width_px,
-            )
-            for label, source_x in assignments[frame_index]
-        )
-        _draw_markers(tile, tile_width, tile_height, scaled_markers)
-        tiles.append(tile)
-
-    return (
-        _compose_sheet(tuple(tiles), tile_width, [tile_height] * len(tiles)),
-        tuple(markers),
-    )
 
 
 def visible_frontier_candidates(
@@ -426,29 +288,6 @@ def _resize_rgb(
     return result
 
 
-def _draw_markers(
-    image: bytearray,
-    width: int,
-    height: int,
-    markers: Sequence[Tuple[str, float]],
-) -> None:
-    """数字标记放在画面下部，x 坐标仍对应 Frontier 的水平方位。"""
-    placed = []
-    for label, raw_x in sorted(markers, key=lambda item: item[1]):
-        x = int(round(max(8.0, min(width - 9.0, raw_x))))
-        occupied_layers = {
-            layer
-            for previous_x, layer in placed
-            if abs(previous_x - x) < 34
-        }
-        layer = next(
-            (candidate for candidate in range(3) if candidate not in occupied_layers),
-            len(placed) % 3,
-        )
-        y = int(round(height * (0.62 + 0.13 * layer)))
-        _draw_vertical_line(image, width, height, x, y, height - 1, MARKER_RGB)
-        _draw_number_label(image, width, height, x, y, label)
-        placed.append((x, layer))
 
 
 def _draw_number_label(
@@ -561,18 +400,6 @@ def _draw_digit(
             )
 
 
-def _draw_vertical_line(
-    image: bytearray,
-    width: int,
-    height: int,
-    x: int,
-    start_y: int,
-    end_y: int,
-    color: Tuple[int, int, int],
-) -> None:
-    for y in range(max(0, start_y), min(height, end_y + 1)):
-        _set_pixel(image, width, height, x, y, color)
-        _set_pixel(image, width, height, x + 1, y, color)
 
 
 def _fill_rectangle(
@@ -656,11 +483,8 @@ _DIGITS = {
 __all__ = [
     "BufferedScanImage",
     "FrontierImageMarker",
-    "annotate_bbox_image",
     "buffer_scan_image",
-    "build_frontier_score_sheet",
     "build_semantic_analysis_sheet",
-    "build_scan_contact_sheet",
     "has_frontier_direction_in_view",
     "pack_rgb_image",
     "visible_frontier_candidates",

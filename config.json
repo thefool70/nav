@@ -1,0 +1,69 @@
+{
+  "navigation": {
+    "target": null,
+    "search_mode": "object",
+    "max_cycles": 200,
+    "debug_random_score": false,
+    "debug_frontier": false
+  },
+  "habitat": {
+    "scene": "data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb",
+    "seed": 1,
+    "gpu_device_id": -1
+  },
+  "hermes": {
+    "base_url": "http://192.168.11.1:1448",
+    "action_timeout_s": 120.0,
+    "action_stall_timeout_s": 1.0,
+    "max_unknown_path_m": 1.5,
+    "min_localization_quality": 1,
+    "startup_forward_m": 1.0,
+    "request_timeout_s": 5.0,
+    "action_poll_interval_s": 0.2,
+    "action_progress_interval_s": 2.0,
+    "action_stall_translation_m": 0.02,
+    "action_stall_rotation_deg": 1.0,
+    "action_arrival_position_m": 0.3,
+    "action_arrival_hold_s": 0.001,
+    "motion_frame_interval_s": 0.5,
+    "position_tolerance_m": 0.03,
+    "yaw_tolerance_deg": 5.0
+  },
+  "camera": {
+    "camera_source": "local",
+    "camera_endpoint": "ipc:///tmp/robot-nav-camera.sock",
+    "camera_topic": "ngd.frame",
+    "camera_timeout_s": 3.0,
+    "camera_serial": null,
+    "camera_calibration": "data/hermes_d435i/extrinsics.json",
+    "camera_height_m": null,
+    "camera_forward_m": null,
+    "camera_left_m": null,
+    "camera_yaw_deg": null,
+    "camera_pitch_down_deg": null,
+    "camera_roll_deg": null
+  },
+  "perception": {
+    "vlm_endpoint": "https://opencode.ai/zen/go/v1/messages",
+    "vlm_model": "qwen3.7-plus",
+    "vlm_api_format": "anthropic_messages",
+    "vlm_timeout_s": 90.0,
+    "vlm_max_output_tokens": 2048,
+    "object_class": null,
+    "object_python": null,
+    "object_device": "cuda",
+    "object_yolo_model": "data/models/yolo-world/yolov8s-world.pt",
+    "object_sam_checkpoint": "data/models/sam2/sam2.1_hiera_small.pt",
+    "object_timeout_s": 120.0
+  },
+  "logging": {
+    "no_rerun": false,
+    "rerun_save": null,
+    "run_log": null
+  },
+  "calibration": {
+    "output": "data/hermes_d435i/extrinsics.json",
+    "turn_angle_deg": 30.0,
+    "drive_distance_m": 0.2
+  }
+}

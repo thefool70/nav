@@ -1,62 +1,76 @@
-"""顶层单周期入口，串联底盘读取与导航算法。"""
+"""运行层：把底盘、语义感知与搜索核心连成完整的导航循环。
+
+本模块是“导航怎么跑起来”的阅读入口，单个周期的顺序固定为：
+
+1. 读取一帧底盘数据。
+2. 向感知模块取回已完成的分析结果（新增覆盖与目标线索）。
+3. 推进搜索核心一次决策，得到显式请求的动作或外部能力请求。
+4. 按请求向感知模块补充一次结果（扫描拍摄、Frontier 评分、物体定位）。
+5. 同步执行动作，并把执行结果交回核心解释。
+6. 记录本周期诊断，判断退出条件。
+
+本模块只负责编排：换点、遮蔽区域、跳过父节点、放弃目标线索都由搜索核心决定。
+它不解析 ``debug`` 字符串来改变行为，只按 ``NavigationAction`` 的类型执行。
+"""
+
+from __future__ import annotations
 
 from dataclasses import replace
 from time import monotonic
-from typing import Callable, Optional, Tuple
-
-from .core.frontier import FrameFrontierCache
-from .core.timing import TimingSpans, measure_stage
+from typing import Any, Callable, Mapping, Optional
 
 from .adapters.chassis import (
     ChassisInterface,
     KnownSpaceChassisInterface,
-    MotionInterruptedError,
     MotionPathUnknownError,
     MotionStalledError,
     RecoverableMotionError,
 )
-from .adapters.perception import (
-    ContinuousTargetObserver,
-    ScanObservationContext,
-    TargetObserver,
-)
-from .adapters.queued_semantics import QueuedSemanticObserver
+from .adapters.perception import ScanObservationContext
+from .core.actions import action_command
+from .core.perception_flow import capture_context, receive_perception, target_handling_active
+from .core.frontier import FrameFrontierCache
 from .core.models import (
+    ActionKind,
+    ActionConstraint,
+    ActionPurpose,
+    ActionOutcome,
+    ActionExecutionResult,
+    NavigationAction,
     NavigationFrame,
     NavigationResult,
     NavigationStatus,
     SearchPhase,
+    SearchMode,
     SearchState,
     TargetObservation,
     TargetSearchGoal,
-    TargetVisibility,
 )
 from .core.navigator import (
-    continue_after_motion_stall,
-    continue_after_target_detection,
+    apply_execution_result,
     navigate,
-    recover_from_motion_failure,
 )
-
+from .core.timing import TimingSpans, measure_stage
+from .perception import SemanticPerception
+from .run_log import NavigationRunLogger
+from .runtime_reporting import _with_run_log, _with_frontier_debug, _optional_callback, _print_cycle
 
 NavigationCycleCallback = Callable[
     [NavigationFrame, Optional[TargetObservation], NavigationResult],
     None,
 ]
 
-
 def run_navigation_cycle(
     chassis: ChassisInterface,
     goal: TargetSearchGoal,
     state: Optional[SearchState] = None,
-    observer: Optional[TargetObserver] = None,
+    perception: Optional[SemanticPerception] = None,
     on_cycle: Optional[NavigationCycleCallback] = None,
     on_timing: Optional[Callable[[dict], None]] = None,
 ) -> NavigationResult:
     """执行一个完整导航周期，并在需要时调用感知与底盘接口。
 
-    本函数只负责编排一次“读取 → 决策 → 感知补充 → 执行动作”；核心跨周期
-    状态由 ``SearchState`` 显式传入和返回，后台任务与缓存由观察器管理。
+    跨周期状态由 ``SearchState`` 显式传入和返回；后台任务与快照由感知模块管理。
     ``on_timing`` 在执行动作前接收本周期阶段计时，不包含运动时长。
     """
     started = monotonic()
@@ -66,313 +80,276 @@ def run_navigation_cycle(
     frontier_cache = FrameFrontierCache(frame)
     if timings is not None:
         timings.extend(frame.acquisition_timings)
-    with measure_stage(timings, "cycle.prepare_observer"):
-        if isinstance(observer, QueuedSemanticObserver):
-            state = observer.prepare_cycle(frame, state or SearchState())
-            clue = observer.take_target_clue(state)
-            if clue is not None:
-                state = replace(state, active_target_clue=clue)
-            state = _observer_state(observer, frame, state)
+
+    if perception is not None:
+        perception.set_goal(goal)
+    working_state = _prepare_state(frame, perception, state or SearchState())
     with measure_stage(timings, "cycle.navigate"):
-        result = navigate(frame, goal, state, timings=timings, frontier_cache=frontier_cache)
-    with measure_stage(timings, "cycle.object_localization"):
-        result = _apply_object_localization(frame, goal, result, observer,
+        decision = navigate(frame, goal, working_state, timings=timings, frontier_cache=frontier_cache)
+    with measure_stage(timings, "cycle.supply_perception"):
+        decision = _supply_perception(frame, goal, decision, perception,
             timings=timings, frontier_cache=frontier_cache,
         )
-    with measure_stage(timings, "cycle.observe"):
-        result, observation = _apply_target_observation(
-            frame,
-            goal,
-            state,
-            result,
-            observer,
-            timings=timings, frontier_cache=frontier_cache,
-        )
-    with measure_stage(timings, "cycle.scene_assessment"):
-        result = _apply_scene_assessment(result, frame, goal, observer,
-            timings=timings, frontier_cache=frontier_cache,
-        )
-    with measure_stage(timings, "cycle.target_confirmation"):
-        result = _apply_target_confirmation(
-            result,
-            frame,
-            goal,
-            observation,
-            observer,
-            timings=timings, frontier_cache=frontier_cache,
-        )
-    with measure_stage(timings, "cycle.frontier_scores"):
-        result = _apply_frontier_scores(result, frame, goal, observer,
-            timings=timings, frontier_cache=frontier_cache,
-        )
-    if isinstance(observer, QueuedSemanticObserver):
-        result = replace(
-            result, state=_observer_state(observer, frame, result.state),
-            debug=replace(result.debug, details={**result.debug.details, **observer.diagnostics()}),
-        )
+    if perception is not None:
+        _sync_perception(frame, decision.state, perception)
+        decision = _merge_perception_diagnostics(decision, perception)
 
     with measure_stage(timings, "cycle.callbacks"):
         if on_cycle is not None:
-            on_cycle(frame, observation, result)
+            on_cycle(frame, None, decision)
     if on_timing is not None:
         ended = monotonic()
         on_timing({
             "started_monotonic_s": started,
             "ended_monotonic_s": ended,
             "duration_s": ended - started,
-            "stage": result.debug.stage,
-            "has_command": result.status is NavigationStatus.OK and result.command is not None,
+            "stage": decision.debug.stage,
+            "has_command": decision.status is NavigationStatus.OK and decision.action is not None,
             "spans": timings,
         })
-    return _execute_command(chassis, result, observer, frame)
+    return _execute_action(chassis, decision, perception, frame)
 
 
-def _apply_target_observation(
+def _prepare_state(
+    frame: NavigationFrame,
+    perception: Optional[SemanticPerception],
+    state: SearchState,
+) -> SearchState:
+    """取回后台结果并同步感知计数；返回给核心作为本周期输入的显式状态。"""
+    if perception is None:
+        return state
+    intake = perception.begin_cycle(frame)
+    clue = perception.take_target_clue(busy=target_handling_active(state))
+    pending, failed, pending_views = perception.pending_counts()
+    working_state = receive_perception(state, intake.observed_views,
+        pending=pending, failed=failed, pending_views=pending_views, clue=clue)
+    _sync_perception(frame, working_state, perception)
+    return working_state
+
+
+def _sync_perception(frame, state, perception):
+    """向采样线程发布冻结上下文，退出扫描时提交部分批次。"""
+    if state.phase is not SearchPhase.SCANNING or target_handling_active(state):
+        perception.flush_scan()
+    perception.bind_frame(frame, capture_context(frame, state))
+    perception.pause_for_target_handling(
+        target_handling_active(state) or perception.has_target_clues(),
+        reason="target_handling",
+    )
+
+
+def _supply_perception(
     frame: NavigationFrame,
     goal: TargetSearchGoal,
-    state: Optional[SearchState],
-    result: NavigationResult,
-    observer: Optional[TargetObserver],
-    timings: Optional[TimingSpans] = None,
-    frontier_cache: Optional[FrameFrontierCache] = None,
-) -> Tuple[NavigationResult, Optional[TargetObservation]]:
-    """按状态机需要读取当前视觉结果；持续观察器可抢占普通决策。"""
-    if (
-        observer is None
-        or result.state.phase in (SearchPhase.COMPLETE, SearchPhase.STOPPED)
-        or (state is not None and state.active_target_clue is not None)
-    ):
-        return result, None
-
-    observation_requested = result.status in {
-        NavigationStatus.NEEDS_OBSERVATION,
-        NavigationStatus.NEEDS_TARGET_CONFIRMATION,
-    }
-    if not observation_requested and not isinstance(
-        observer,
-        ContinuousTargetObserver,
-    ):
-        return result, None
-
-    _observer_state(observer, frame, result.state)
-    with measure_stage(timings, "observer.observe"):
-        if isinstance(observer, QueuedSemanticObserver):
-            observation = observer.observe(
-                frame, goal, _scan_observation_context(result),
-                timings=timings, frontier_cache=frontier_cache,
-            )
-        else:
-            observation = observer.observe(frame, goal, _scan_observation_context(result))
-    # 显式视觉请求应继续 result.state；持续检测旁路普通命令时则从周期入口
-    # state 重新决策，避免在命令执行前误把“命令后的状态”当作当前位置状态。
-    decision_state = result.state if observation_requested else state
-    if isinstance(observer, QueuedSemanticObserver):
-        decision_state = _observer_state(observer, frame, decision_state or SearchState())
-    return navigate(frame, goal, decision_state, observation,
-        timings=timings, frontier_cache=frontier_cache,
-    ), observation
-
-
-def _apply_scene_assessment(
-    result: NavigationResult,
-    frame: NavigationFrame,
-    goal: TargetSearchGoal,
-    observer: Optional[TargetObserver],
+    decision: NavigationResult,
+    perception: Optional[SemanticPerception],
+    *,
     timings: Optional[TimingSpans] = None,
     frontier_cache: Optional[FrameFrontierCache] = None,
 ) -> NavigationResult:
-    """保留同步观察器的场景判断；异步线索返回不进入此步骤。"""
-    if (
-        observer is None
-        or result.status is not NavigationStatus.NEEDS_SCENE_ASSESSMENT
+    """按核心返回的显式请求，向感知模块补充一次结果并重新推进核心。"""
+    if perception is None or decision.status in (
+        NavigationStatus.INVALID_INPUT,
+        NavigationStatus.MISSING_DATA,
+        NavigationStatus.NO_SOLUTION,
     ):
-        return result
-    current_state = _observer_state(observer, frame, result.state)
-    assessment = observer.assess_scene(goal)
-    return navigate(
-        frame,
-        goal,
-        current_state,
-        scene_assessment=assessment,
-        timings=timings, frontier_cache=frontier_cache,
-    )
+        return decision
+
+    perception.set_goal(goal)
+    if decision.status is NavigationStatus.NEEDS_OBJECT_LOCALIZATION:
+        clue = decision.state.active_target_clue
+        if clue is None:
+            return decision
+        with measure_stage(timings, "observer.localize_object"):
+            localization = perception.localize_object(frame, goal, clue)
+        return navigate(frame, goal, decision.state, object_localization=localization,
+            timings=timings, frontier_cache=frontier_cache,
+        )
+
+    if decision.status is NavigationStatus.NEEDS_FRONTIER_SCORES:
+        request = decision.frontier_score_request
+        if request is None:
+            return decision
+        with measure_stage(timings, "observer.score_frontiers"):
+            scores = perception.score_frontiers(request)
+        return navigate(frame, goal, decision.state, frontier_scores=scores,
+            timings=timings, frontier_cache=frontier_cache,
+        )
+
+    if decision.status is NavigationStatus.NEEDS_SCAN_CAPTURE:
+        _sync_perception(frame, decision.state, perception)
+        return _capture_scan_direction(frame, goal, decision, perception,
+            timings=timings, frontier_cache=frontier_cache,
+        )
+    return decision
 
 
-def _apply_object_localization(
-    frame, goal, result, observer,
-    timings: Optional[TimingSpans] = None,
-    frontier_cache: Optional[FrameFrontierCache] = None,
-) -> NavigationResult:
-    """按请求读取历史 RGB-D；本周期只消费一次定位结果。"""
-    if result.status is not NavigationStatus.NEEDS_OBJECT_LOCALIZATION:
-        return result
-    if not isinstance(observer, QueuedSemanticObserver):
-        return result
-    state = _observer_state(observer, frame, result.state)
-    with measure_stage(timings, "observer.localize_object"):
-        localization = observer.localize_object(frame, goal, state)
-    return navigate(frame, goal, state, object_localization=localization,
-        timings=timings, frontier_cache=frontier_cache,
-    )
-
-
-def _apply_target_confirmation(
-    result: NavigationResult,
+def _capture_scan_direction(
     frame: NavigationFrame,
     goal: TargetSearchGoal,
-    observation: Optional[TargetObservation],
-    observer: Optional[TargetObserver],
+    decision: NavigationResult,
+    perception: SemanticPerception,
+    *,
     timings: Optional[TimingSpans] = None,
     frontier_cache: Optional[FrameFrontierCache] = None,
 ) -> NavigationResult:
-    """候选接近后调用一次 VLM 最终确认。"""
-    if (
-        observer is None
-        or result.status is not NavigationStatus.NEEDS_TARGET_CONFIRMATION
-    ):
-        return result
-    confirmation_observation = observation or TargetObservation(
-        visibility=TargetVisibility.UNCERTAIN,
-        reason="最终确认缺少本地检测结果。",
-    )
-    current_state = _observer_state(observer, frame, result.state)
-    confirmation = observer.confirm_target(
-        frame,
-        goal,
-        confirmation_observation,
-    )
-    return navigate(
-        frame,
-        goal,
-        current_state,
-        observation=observation,
-        target_confirmation=confirmation,
+    """采集当前扫描方向并推进核心登记结果；这是扫描的常规推进路径。"""
+    from .core.scan_behavior import record_scanned_direction
+
+    state = decision.state
+    context = _scan_context(state)
+    if context is None:
+        return decision
+    with measure_stage(timings, "observer.capture_scan"):
+        perception.capture_scan_view(frame, context,
+            timings=timings, frontier_cache=frontier_cache,
+        )
+    pending, failed, pending_views = perception.pending_counts()
+    state = receive_perception(state, pending=pending, failed=failed, pending_views=pending_views)
+    return record_scanned_direction(frame, goal, state, _current_scan_heading(state),
         timings=timings, frontier_cache=frontier_cache,
     )
 
 
-def _apply_frontier_scores(
-    result: NavigationResult,
-    frame: NavigationFrame,
-    goal: TargetSearchGoal,
-    observer: Optional[TargetObserver],
-    timings: Optional[TimingSpans] = None,
-    frontier_cache: Optional[FrameFrontierCache] = None,
+def _scan_context(state: SearchState) -> Optional[ScanObservationContext]:
+    """当前扫描方向在一轮扫描中的编号；不在扫描计划内时返回 None。"""
+    count = len(state.scan_headings_world_rad)
+    if count < 1 or not 0 <= state.next_scan_index < count:
+        return None
+    return ScanObservationContext(index=state.next_scan_index, count=count)
+
+
+def _current_scan_heading(state: SearchState) -> float:
+    return state.scan_headings_world_rad[state.next_scan_index]
+
+
+def _merge_perception_diagnostics(
+    decision: NavigationResult,
+    perception: SemanticPerception,
 ) -> NavigationResult:
-    """多个 Frontier 待排序时，一次取得整批语义分数。"""
-    request = result.frontier_score_request
-    if (
-        observer is None
-        or result.status is not NavigationStatus.NEEDS_FRONTIER_SCORES
-        or request is None
-    ):
-        return result
-    current_state = _observer_state(observer, frame, result.state)
-    with measure_stage(timings, "observer.score_frontiers"):
-        scores = observer.score_frontiers(request, goal)
-    return navigate(
-        frame,
-        goal,
-        current_state,
-        frontier_scores=scores,
-        timings=timings, frontier_cache=frontier_cache,
-    )
+    """把观测器诊断并入日志详情；仅用于解释与记录，不参与决策。"""
+    details: Mapping[str, Any] = perception.diagnostics()
+    return replace(decision, debug=replace(decision.debug, details={**decision.debug.details, **details}))
 
 
-def _execute_command(
+def _execute_action(
     chassis: ChassisInterface,
-    result: NavigationResult,
-    observer: Optional[TargetObserver],
+    decision: NavigationResult,
+    perception: Optional[SemanticPerception],
     frame: NavigationFrame,
 ) -> NavigationResult:
-    """等待整条目标位置命令结束，再返回下一周期状态；期间不重新选择 Frontier。"""
-    if result.status is not NavigationStatus.OK or result.command is None:
-        return result
+    """同步执行动作并交回执行结果；期间按动作类型决定是否允许运动预采样。"""
+    action = decision.action
+    if decision.status is not NavigationStatus.OK or action is None:
+        return decision
 
-    continuous_observer = (
-        observer
-        if isinstance(observer, ContinuousTargetObserver)
-        else None
-    )
-    stage = result.debug.details.get("next_stage", result.debug.stage)
-    if continuous_observer is not None:
-        continuous_observer.set_motion_interrupt_enabled(
-            stage not in ("target.approach", "target.revisit", "target.revisit_turn")
-        )
-    if isinstance(observer, QueuedSemanticObserver):
-        observer.set_motion_prefetch_enabled(
-            stage in ("explore.select", "backtrack.return", "backtrack.resume")
-            and (result.command.forward_m != 0.0 or result.command.left_m != 0.0)
-        )
+    if perception is not None:
+        perception.set_motion_prefetch_enabled(_prefetch_allowed(action))
     try:
-        if stage in ("explore.select", "backtrack.return", "backtrack.resume", "target.revisit", "object.fallback_return", "object.approach") and isinstance(
-            chassis, KnownSpaceChassisInterface,
-        ):
-            # 物体停靠与选点使用同一份完整地图；探索和返回仍约束在 FOV 缓存图中。
-            path_map = (
-                frame.navigation_map
-                if stage == "object.approach" and frame.navigation_map is not None
-                else frame.obstacle_map
-            )
-            chassis.send_relative_pose_in_known_space(
-                result.command, path_map, reference_pose=frame.pose,
-            )
+        _send(chassis, action, frame)
+    except (MotionStalledError, MotionPathUnknownError, RecoverableMotionError) as exc:
+        if isinstance(exc, MotionPathUnknownError):
+            execution = ActionExecutionResult(ActionOutcome.PATH_UNKNOWN, str(exc),
+                rejected_path_world_xy=exc.path_world_xy,
+                unknown_length_m=exc.unknown_length_m, limit_m=exc.limit_m,
+                total_path_length_m=exc.total_path_length_m)
         else:
-            chassis.send_relative_pose(result.command)
-    except MotionInterruptedError as exc:
-        continued = continue_after_target_detection(result, str(exc))
-        if continued is None:
-            raise
-        return continued
-    except MotionStalledError as exc:
-        continued = continue_after_motion_stall(result, str(exc))
-        if continued is None:
-            raise
-        return continued
-    except MotionPathUnknownError as exc:
-        recovered = recover_from_motion_failure(
-            result, str(exc), rejected_path_world_xy=exc.path_world_xy,
-        )
-        if recovered is None:
-            raise
-        return replace(recovered, debug=replace(recovered.debug, details={
-            **recovered.debug.details,
-            "unknown_path_length_m": exc.unknown_length_m,
-            "unknown_path_limit_m": exc.limit_m,
-            "checked_path_length_m": exc.total_path_length_m,
-        }))
-    except RecoverableMotionError as exc:
-        recovered = recover_from_motion_failure(result, str(exc))
+            execution = ActionExecutionResult(
+                ActionOutcome.STALLED if isinstance(exc, MotionStalledError)
+                else ActionOutcome.INTERRUPTED, str(exc))
+        recovered = apply_execution_result(decision, execution)
         if recovered is None:
             raise
         return recovered
     finally:
-        if isinstance(observer, QueuedSemanticObserver):
-            observer.set_motion_prefetch_enabled(False)
-        if continuous_observer is not None:
-            continuous_observer.set_motion_interrupt_enabled(False)
-    return result
+        if perception is not None:
+            perception.set_motion_prefetch_enabled(False)
+    return apply_execution_result(decision, ActionExecutionResult(ActionOutcome.SUCCEEDED))
 
 
-def _observer_state(observer, frame: NavigationFrame, state: SearchState) -> SearchState:
-    """入队后刷新工作计数，防止同周期误将尚未检查的画面视为已耗尽。"""
-    if isinstance(observer, QueuedSemanticObserver):
-        state = observer.sync_state(state)
-        observer.bind_context(frame, state)
-    return state
+def _prefetch_allowed(action: NavigationAction) -> bool:
+    """只在探索与返回的平移动作期间做视觉预采样，目标接近不预采样。"""
+    if action.action is not ActionKind.MOVE_TO_POSE:
+        return False
+    if action.purpose in (ActionPurpose.APPROACH, ActionPurpose.FALLBACK, ActionPurpose.REVISIT):
+        return False
+    return action.destination is not None
 
 
-def _scan_observation_context(
-    result: NavigationResult,
-) -> Optional[ScanObservationContext]:
-    """仅扫描观测帧需要编号，供整轮场景判断和 Frontier 评分。"""
-    stage = result.debug.details.get("next_stage", result.debug.stage)
-    if stage != "scan.observe":
-        return None
-    count = result.debug.details.get("scan_heading_count")
-    if not isinstance(count, int):
-        return None
-    index = len(result.state.scan_evidence)
-    if count < 1 or not 0 <= index < count:
-        return None
-    return ScanObservationContext(index=index, count=count)
+def _send(chassis: ChassisInterface, action: NavigationAction, frame: NavigationFrame) -> None:
+    """按动作类型与约束选择已校验的已知空间移动或直接相对移动。"""
+    command = action_command(action, frame.pose)
+    if command is None:
+        raise RecoverableMotionError("动作缺少相对移动量。")
+    if (action.constraint is ActionConstraint.REQUIRE_KNOWN_PATH
+            and isinstance(chassis, KnownSpaceChassisInterface)):
+        path_map = (frame.navigation_map
+                    if action.purpose is ActionPurpose.APPROACH and frame.navigation_map is not None
+                    else frame.obstacle_map)
+        chassis.send_relative_pose_in_known_space(command, path_map, reference_pose=frame.pose)
+    else:
+        # Habitat 由 navmesh 限制可达路径；Hermes 提供额外的已知地图路径校验。
+        chassis.send_relative_pose(command)
+
+
+__all__ = ["NavigationCycleCallback", "run_navigation_cycle", "run_navigation"]
+
+
+def run_navigation(
+    chassis: ChassisInterface,
+    target_text: str,
+    search_mode: SearchMode,
+    max_cycles: int,
+    perception: SemanticPerception,
+    *,
+    on_cycle=None,
+    debug_frontier: bool,
+    run_logger: Optional[NavigationRunLogger] = None,
+) -> int:
+    """重复执行环境无关的单周期入口，直到完成、失败或达到上限。"""
+
+    goal = TargetSearchGoal(target_text, search_mode)
+    state = None
+    cycle_index = 0
+    decision_cycles = 0
+    on_cycle = _optional_callback(on_cycle, "导航可视化")
+    while decision_cycles < max_cycles:
+        cycle_index += 1
+        cycle_callback = _with_frontier_debug(on_cycle, debug_frontier)
+        if run_logger is not None:
+            run_logger.log_cycle_start(cycle_index)
+            cycle_callback = _with_run_log(cycle_callback, run_logger, cycle_index)
+        result = run_navigation_cycle(
+            chassis,
+            goal,
+            state,
+            perception,
+            on_cycle=cycle_callback,
+            on_timing=None if run_logger is None else run_logger.log_cycle_timing,
+        )
+        state = result.state
+        if run_logger is not None:
+            run_logger.log_cycle_result(cycle_index, result)
+        _print_cycle(cycle_index, result)
+
+        if result.status is NavigationStatus.OK and state.phase is SearchPhase.WAITING_FOR_SEMANTICS:
+            perception.wait_for_result()
+            continue
+        decision_cycles += 1
+
+        if state.phase is SearchPhase.COMPLETE:
+            return 0
+        if state.phase is SearchPhase.STOPPED:
+            return 3
+        if result.status in {
+            NavigationStatus.NEEDS_SCAN_CAPTURE,
+            NavigationStatus.NEEDS_FRONTIER_SCORES,
+            NavigationStatus.NEEDS_OBJECT_LOCALIZATION,
+        }:
+            # 一次周期只消费一组外部感知输入，状态机请求下一组输入时读取下一帧。
+            continue
+        if state.phase is SearchPhase.FAILED or result.status is not NavigationStatus.OK:
+            return 1
+
+    print(f"达到最大导航决策周期数 {max_cycles}（不含队列等待），搜索尚未结束。")
+    return 1

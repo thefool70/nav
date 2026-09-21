@@ -1,6 +1,12 @@
 """robot_nav：机器人导航算法的最小 Python 框架。"""
 
 from .core.models import (
+    ActionKind,
+    ActionPurpose,
+    ActionConstraint,
+    ActionExecutionResult,
+    ActionOutcome,
+    NavigationAction,
     BlockedFrontierRegion,
     CameraIntrinsics,
     FrontierCandidate,
@@ -18,8 +24,6 @@ from .core.models import (
     Pose2D,
     RelativePoseCommand,
     ScanEvidence,
-    SceneAssessment,
-    SceneAssessmentResult,
     SemanticAnalysis,
     SearchDirection,
     SearchDirectionState,
@@ -28,7 +32,6 @@ from .core.models import (
     SearchState,
     TargetConfirmation,
     TargetClue,
-    TargetConfirmationResult,
     TargetEstimate,
     TargetObservation,
     TargetSearchGoal,
@@ -37,6 +40,12 @@ from .core.models import (
 from .core.navigator import navigate
 
 __all__ = [
+    "ActionKind",
+    "ActionConstraint",
+    "ActionExecutionResult",
+    "ActionOutcome",
+    "NavigationAction",
+    "ActionPurpose",
     "BlockedFrontierRegion",
     "CameraIntrinsics",
     "FrontierCandidate",
@@ -54,8 +63,6 @@ __all__ = [
     "Pose2D",
     "RelativePoseCommand",
     "ScanEvidence",
-    "SceneAssessment",
-    "SceneAssessmentResult",
     "SemanticAnalysis",
     "SearchDirection",
     "SearchDirectionState",
@@ -64,7 +71,6 @@ __all__ = [
     "SearchState",
     "TargetConfirmation",
     "TargetClue",
-    "TargetConfirmationResult",
     "TargetEstimate",
     "TargetObservation",
     "TargetSearchGoal",

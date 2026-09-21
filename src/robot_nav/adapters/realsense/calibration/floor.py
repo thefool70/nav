@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Tuple
 
-from ..l515_camera import L515Capture
+from ..rgbd_camera import RgbdCapture
 
 
 _DEPTH_RANGE_M = (0.25, 4.0)
@@ -27,7 +27,7 @@ class FloorEstimate:
 
 
 def estimate_floor(
-    capture: L515Capture,
+    capture: RgbdCapture,
     up_hint: Any,
     np: Any,
 ) -> FloorEstimate:

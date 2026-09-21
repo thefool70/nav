@@ -8,17 +8,11 @@ from __future__ import annotations
 import random
 from typing import Any, Mapping, Optional, Tuple
 
-from .perception import ScanObservationContext
 from .frontier_overlay import BufferedScanImage
 from ..core.models import (
-    FrontierScoreRequest,
     FrontierCandidate,
     NavigationFrame,
-    SceneAssessment,
-    SceneAssessmentResult,
     SemanticAnalysis,
-    TargetConfirmation,
-    TargetConfirmationResult,
     TargetObservation,
     TargetSearchGoal,
     TargetVisibility,
@@ -35,20 +29,6 @@ class RandomScoreTargetObserver:
     def __init__(self) -> None:
         self._random = random.Random()
 
-    def observe(
-        self,
-        frame: NavigationFrame,
-        goal: TargetSearchGoal,
-        scan_context: Optional[ScanObservationContext] = None,
-    ) -> TargetObservation:
-        return TargetObservation(
-            visibility=TargetVisibility.NOT_VISIBLE,
-            reason=(
-                "调试随机感知：不识别视觉内容，"
-                "无法找到或到达语义目标。"
-            ),
-        )
-
     def analyze_views(
         self, images: Mapping[int, BufferedScanImage],
         candidates: Tuple[FrontierCandidate, ...], goal: TargetSearchGoal,
@@ -59,37 +39,10 @@ class RandomScoreTargetObserver:
             candidate.candidate_id: self._random.random() for candidate in candidates
         })
 
-    def score_frontiers(
-        self,
-        request: FrontierScoreRequest,
-        goal: TargetSearchGoal,
-    ) -> Mapping[str, float]:
-        return {
-            candidate.candidate_id: self._random.random()
-            for candidate in request.candidates
-        }
-
-    def assess_scene(
-        self,
-        goal: TargetSearchGoal,
-    ) -> SceneAssessmentResult:
-        """随机评分模式不读取图像，不能判断目的场景。"""
-        return SceneAssessmentResult(
-            SceneAssessment.UNCERTAIN,
-            "随机调试模式不执行目的场景判断。",
-        )
-
-    def confirm_target(
-        self,
-        frame: NavigationFrame,
-        goal: TargetSearchGoal,
-        observation: TargetObservation,
-    ) -> TargetConfirmationResult:
-        """随机调试模式不会产生目标候选，保留显式兜底。"""
-        return TargetConfirmationResult(
-            TargetConfirmation.UNCERTAIN,
-            "随机调试模式不执行目标最终确认。",
-        )
+    def locate_object(self, frame: NavigationFrame, goal: TargetSearchGoal, *, context=None) -> TargetObservation:
+        """随机模式不识别物体；正常运行不创建物体定位器。"""
+        return TargetObservation(TargetVisibility.NOT_VISIBLE, source="random",
+                                 reason="随机评分模式不执行物体定位。")
 
 
 __all__ = ["RandomScoreTargetObserver"]

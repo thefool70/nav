@@ -11,10 +11,8 @@ import math
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from .models import (
-    SceneAssessment,
     SemanticAnalysis,
     SearchMode,
-    TargetConfirmation,
     TargetVisibility,
 )
 
@@ -117,20 +115,6 @@ def parse_semantic_analysis_response(
     )
 
 
-def build_target_visibility_prompt(target_text: str) -> str:
-    """构造完整 RGB 图上的目标可见性问题。"""
-    target = _target_json(target_text)
-    return (
-        "You are the target-presence detector for the robot's current view. "
-        f"The target description is {target}. Decide only from the complete "
-        "current RGB image whether the target is visible. Inspect image edges, "
-        "distant regions, and partially occluded objects. Do not infer presence "
-        "from room-level common sense. Choose exactly one of the two labels. "
-        "Return exactly one of these JSON objects, without Markdown: "
-        '{"visibility":"visible"} or {"visibility":"not_visible"}'
-    )
-
-
 def build_object_localization_prompt(target_text: str) -> str:
     """用同一次请求判断目标身份并取得框，供历史定位和到达后的新图确认共用。"""
     return (
@@ -140,99 +124,6 @@ def build_object_localization_prompt(target_text: str) -> str:
         '{"visibility":"visible","bbox_2d":[xmin,ymin,xmax,ymax]} '
         "with coordinates from 0 to 1000 relative to the full image. "
         'If no matching object is visible, return {"visibility":"not_visible"}.'
-    )
-
-
-def build_frontier_scores_prompt(
-    target_text: str,
-    marker_labels: Sequence[str],
-    search_mode: SearchMode = SearchMode.OBJECT,
-) -> str:
-    """构造一次性评分多视角 RGB 中全部 Frontier 标记的问题。"""
-    target = _target_json(target_text)
-    labels = tuple(str(label).strip() for label in marker_labels)
-    if (
-        not labels
-        or any(not label for label in labels)
-        or len(set(labels)) != len(labels)
-    ):
-        raise ValueError("Frontier 标记必须是不重复的非空字符串")
-    score_template = {label: 0.5 for label in labels}
-    if search_mode is SearchMode.SCENE:
-        scoring_rule = (
-            f"The destination scene description is {target}. For every marker, "
-            "score the likelihood that exploring beyond that marker will lead the "
-            "robot into the destination scene"
-        )
-    else:
-        scoring_rule = (
-            f"The target description is {target}. For every marker, score the "
-            "likelihood of finding the target by exploring beyond that marker"
-        )
-    prompt_body = (
-        "The image is a multi-view RGB contact sheet from one robot scan. Each "
-        "colored numeric marker denotes a Frontier exploration direction. "
-        f"{scoring_rule}. " + _frontier_scoring_rules() + " "
-        "Return every marker exactly once. Return JSON only, with no reasons, "
-        "explanation, or Markdown: "
-        + json.dumps({"scores": score_template}, ensure_ascii=False)
-    )
-    return prompt_body
-
-
-def build_scene_assessment_prompt(scene_text: str) -> str:
-    """构造整轮扫描拼图上的目的场景判断问题。"""
-    scene = _target_json(scene_text)
-    return (
-        "The image is a multi-view RGB contact sheet captured from one robot "
-        "position after observing the surrounding directions. The destination "
-        f"scene description is {scene}. Decide whether the robot's current position "
-        "is already inside or at that destination scene. Judge from the overall "
-        "surroundings across all views. Do not match merely because the scene is "
-        "visible in the distance or through a doorway, or because a related object "
-        "or sign is visible. Return exactly one JSON object without Markdown: "
-        '{"scene":"matched"} or {"scene":"not_matched"}'
-    )
-
-
-def build_target_grounding_prompt(target_text: str) -> str:
-    """构造目标已确认可见时的边界框定位问题。"""
-    target = _target_json(target_text)
-    return (
-        f"The target {target} has already been confirmed visible in the complete "
-        "current RGB image. Locate the single best-matching instance. The bounding "
-        "box must tightly enclose all visible parts of that instance without large "
-        "background regions. Use bbox_2d=[x_min,y_min,x_max,y_max], with every "
-        "coordinate expressed on a 0-to-1000 image-relative scale. Return JSON "
-        "only, without Markdown: "
-        '{"bbox_2d":[100,100,900,900]}'
-    )
-
-
-def build_target_confirmation_prompt(
-    target_text: str,
-    bbox_norm: Optional[Tuple[float, float, float, float]],
-) -> str:
-    """构造机器人接近候选后的二元最终确认问题。"""
-    target = _target_json(target_text)
-    box_text = (
-        "not available"
-        if bbox_norm is None
-        else json.dumps(
-            [round(float(value), 4) for value in bbox_norm],
-            ensure_ascii=False,
-        )
-    )
-    return (
-        "The robot has approached a candidate detected for the target "
-        f"{target}. Inspect the current RGB image and decide whether the "
-        "candidate clearly matches the target description. The local detector's "
-        f"normalized candidate box [x_min,y_min,x_max,y_max] is {box_text}. "
-        "When available, the same candidate is outlined in green in the image. "
-        "Confirm only when the visible candidate itself matches; reject lookalikes, "
-        "background context, and ambiguous instances. Return exactly one JSON "
-        "object without Markdown: "
-        '{"confirmation":"confirmed"} or {"confirmation":"rejected"}'
     )
 
 
@@ -247,25 +138,6 @@ def parse_target_visibility_response(
     if raw_visibility == TargetVisibility.NOT_VISIBLE.value:
         return TargetVisibility.NOT_VISIBLE
     raise ValueError("目标可见性必须是 visible 或 not_visible")
-
-
-def parse_frontier_scores_response(
-    text: str,
-    marker_labels: Sequence[str],
-) -> Mapping[str, float]:
-    """解析一次返回的全部 Frontier 0-1 分数。"""
-    labels = tuple(str(label).strip() for label in marker_labels)
-    payload = _extract_json_mapping(text, "Frontier 评分")
-    raw_scores = payload.get("scores")
-    if not isinstance(raw_scores, Mapping):
-        raise ValueError("Frontier 评分回答缺少 scores 对象")
-    scores = {}
-    for label in labels:
-        score = _finite_float(raw_scores.get(label))
-        if score is None or not 0.0 <= score <= 1.0:
-            raise ValueError(f"Frontier {label} 分数必须是 0 到 1 的有限数")
-        scores[label] = score
-    return scores
 
 
 def parse_target_grounding_response(
@@ -295,28 +167,6 @@ def parse_target_grounding_response(
         x_max / 1000.0,
         y_max / 1000.0,
     )
-
-
-def parse_target_confirmation_response(text: str) -> TargetConfirmation:
-    """解析最终确认；格式不合法时抛出 ValueError。"""
-    payload = _extract_json_mapping(text, "目标最终确认")
-    raw_confirmation = str(payload.get("confirmation", "")).strip().lower()
-    if raw_confirmation == TargetConfirmation.CONFIRMED.value:
-        return TargetConfirmation.CONFIRMED
-    if raw_confirmation == TargetConfirmation.REJECTED.value:
-        return TargetConfirmation.REJECTED
-    raise ValueError("目标最终确认必须是 confirmed 或 rejected")
-
-
-def parse_scene_assessment_response(text: str) -> SceneAssessment:
-    """解析目的场景判断；格式不合法时抛出 ValueError。"""
-    payload = _extract_json_mapping(text, "目的场景判断")
-    raw_scene = str(payload.get("scene", "")).strip().lower()
-    if raw_scene == SceneAssessment.MATCHED.value:
-        return SceneAssessment.MATCHED
-    if raw_scene == SceneAssessment.NOT_MATCHED.value:
-        return SceneAssessment.NOT_MATCHED
-    raise ValueError("目的场景判断必须是 matched 或 not_matched")
 
 
 def _target_json(target_text: str) -> str:
@@ -353,16 +203,8 @@ def _finite_float(value: Any) -> Optional[float]:
 
 __all__ = [
     "build_object_localization_prompt",
-    "build_frontier_scores_prompt",
-    "build_scene_assessment_prompt",
     "build_semantic_analysis_prompt",
-    "build_target_confirmation_prompt",
-    "build_target_grounding_prompt",
-    "build_target_visibility_prompt",
-    "parse_frontier_scores_response",
-    "parse_scene_assessment_response",
     "parse_semantic_analysis_response",
-    "parse_target_confirmation_response",
     "parse_target_grounding_response",
     "parse_target_visibility_response",
 ]

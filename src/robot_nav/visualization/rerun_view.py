@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..core.actions import action_command
+
 import math
 import json
 import os
@@ -13,7 +15,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from ..adapters.perception import LocalPerceptionEvent, VlmInteraction
+from ..adapters.perception import VlmInteraction
 from ..core.geometry import world_to_nearest_grid_cell
 from ..core.models import (
     DepthImage,
@@ -349,68 +351,7 @@ class RerunVisualizer:
         else:
             self._clear("map/occupancy/motion_plan/path")
 
-    def log_local_perception(
-        self,
-        frame: NavigationFrame,
-        event: LocalPerceptionEvent,
-    ) -> None:
-        """更新后台检测面板，不重复写入导航帧、地图或轨迹。"""
-        with self._log_lock:
-            observation = event.observation
-            if self._sample_index == 0:
-                self._begin_sample()
-            else:
-                self._set_frame_time(self._sample_index)
-            self._log_local_detection_image(frame, observation)
-            self._log_sam2_result(frame, observation)
-            confidence = (
-                "-"
-                if observation.confidence is None
-                else f"{observation.confidence:.3f}"
-            )
-            status_lines = (
-                "YOLO-World + SAM2 live detection",
-                f"sequence: {event.sequence_index}",
-                f"visibility: {observation.visibility.value}",
-                f"confidence: {confidence}",
-                f"candidates: {event.candidate_count}",
-                f"inference: {event.inference_s:.3f} s",
-                f"reason: {observation.reason or '-'}",
-            )
-            if self._panel_font is None:
-                self._log(
-                    "model/yolo_world/status",
-                    self._rr.TextDocument(
-                        "\n".join(_ascii_only(line) for line in status_lines),
-                        media_type="text/plain",
-                    ),
-                )
-            else:
-                self._log(
-                    "model/yolo_world/status",
-                    self._rr.Image(
-                        _render_status_image(self._panel_font, status_lines)
-                    ),
-                )
 
-    def _log_local_detection_image(
-        self,
-        frame: NavigationFrame,
-        observation: TargetObservation,
-    ) -> None:
-        """显示后台推理实际处理的 RGB，不覆盖主相机视图。"""
-        if frame.rgb is None or len(frame.rgb) == 0 or len(frame.rgb[0]) == 0:
-            self._clear("model/yolo_world/latest")
-            return
-
-        image = _rgb_to_numpy(frame.rgb)
-        if observation.target_mask is not None:
-            image = _overlay_target_mask(image, observation.target_mask)
-        else:
-            image = image.copy()
-        if observation.bbox_norm is not None:
-            _draw_bbox_outline(image, observation.bbox_norm, BBOX_RGB)
-        self._log("model/yolo_world/latest", self._rr.Image(image))
 
     def log_vlm_interaction(
         self,
@@ -772,7 +713,7 @@ class RerunVisualizer:
 
     def _log_command(self, frame: NavigationFrame, result: NavigationResult) -> None:
         """在 world 和 map 中显示本周期平移目标与目标朝向。"""
-        command = result.command
+        command = action_command(result.action, frame.pose)
         if command is None:
             self._log("world/command", self._rr.Clear(recursive=True))
             self._log(
@@ -1547,8 +1488,8 @@ def _motion_status_text(
             f"yaw={math.degrees(headings[scan_index]):.1f}deg"
         )
         lines.append(_scan_basis_text(result.debug.details["scan_mode"]))
-    if result.command is not None:
-        command = result.command
+    if action_command(result.action, frame.pose) is not None:
+        command = action_command(result.action, frame.pose)
         lines.append(
             f"command move={math.hypot(command.forward_m, command.left_m):.2f}m "
             f"turn={math.degrees(command.yaw_rad):.1f}deg"
@@ -1815,8 +1756,8 @@ def _status_lines(
             f"yaw={math.degrees(frame.pose.yaw_rad):.1f} deg"
         ),
     ]
-    if result.command is not None:
-        command = result.command
+    if action_command(result.action, frame.pose) is not None:
+        command = action_command(result.action, frame.pose)
         world_vector = _command_world_vector(command, frame.pose)
         target_world = (
             frame.pose.x_m + world_vector[0],

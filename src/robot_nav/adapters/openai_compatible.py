@@ -11,21 +11,21 @@ import time
 import zlib
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Mapping,
+    Optional,
+    Tuple,
+)
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from ..core.models import (
-    FrontierScoreRequest,
     FrontierCandidate,
     NavigationFrame,
-    SceneAssessment,
-    SceneAssessmentResult,
-    SearchMode,
     SemanticAnalysis,
-    TargetConfirmation,
-    TargetConfirmationResult,
     TargetObservation,
     TargetSearchGoal,
     TargetVisibility,
@@ -33,29 +33,16 @@ from ..core.models import (
 from ..core.vision import (
     build_semantic_analysis_prompt,
     parse_semantic_analysis_response,
-    build_frontier_scores_prompt,
-    build_scene_assessment_prompt,
-    build_target_confirmation_prompt,
-    build_target_grounding_prompt,
-    build_target_visibility_prompt,
     build_object_localization_prompt,
-    parse_frontier_scores_response,
-    parse_scene_assessment_response,
-    parse_target_confirmation_response,
     parse_target_grounding_response,
     parse_target_visibility_response,
 )
 from .frontier_overlay import (
     BufferedScanImage,
-    annotate_bbox_image,
-    buffer_scan_image,
-    build_frontier_score_sheet,
-    build_scan_contact_sheet,
     build_semantic_analysis_sheet,
     pack_rgb_image,
 )
 from .perception import (
-    ScanObservationContext,
     VlmInputImage,
     VlmInteraction,
 )
@@ -84,7 +71,7 @@ class OpenAICompatibleConfig:
 
 
 class OpenAICompatibleTargetObserver:
-    """处理物体观测、整轮场景判断和 Frontier 批量评分。"""
+    """为固定快照提供联合语义分析与历史物体框定位。"""
 
     def __init__(
         self,
@@ -98,7 +85,6 @@ class OpenAICompatibleTargetObserver:
         self._on_vlm_interaction = on_vlm_interaction
         self._interaction_index = 0
         self._interaction_lock = threading.Lock()
-        self._scan_images: Dict[int, BufferedScanImage] = {}
 
     def analyze_views(
         self,
@@ -176,318 +162,6 @@ class OpenAICompatibleTargetObserver:
         )
         return TargetObservation(visibility, bbox_norm=bbox, source="vlm")
 
-    def observe(
-        self,
-        frame: NavigationFrame,
-        goal: TargetSearchGoal,
-        scan_context: Optional[ScanObservationContext] = None,
-    ) -> TargetObservation:
-        """物体模式判断单帧；场景模式只缓存当前扫描 RGB。"""
-        if frame.rgb is None:
-            return _uncertain("当前帧没有 RGB 图像。")
-
-        try:
-            if scan_context is not None:
-                buffered = self._record_scan_image(frame, scan_context)
-                image = VlmInputImage(
-                    buffered.width_px,
-                    buffered.height_px,
-                    buffered.rgb_bytes,
-                )
-            else:
-                image = pack_rgb_image(frame.rgb)
-        except Exception as exc:
-            return _uncertain(_failure_reason("RGB 输入准备失败", exc))
-
-        if goal.search_mode is SearchMode.SCENE:
-            if scan_context is None:
-                return _uncertain("场景模式只能在扫描方向中采集 RGB。")
-            return TargetObservation(
-                visibility=TargetVisibility.NOT_VISIBLE,
-                reason="场景模式已缓存当前扫描方向，整轮结束后统一判断。",
-                source="scene_scan",
-            )
-
-        prompt = build_target_visibility_prompt(goal.target_text)
-        interaction = self._begin_interaction(
-            "target_visibility",
-            prompt,
-            image,
-            context=_frame_trace_context(frame, "current_view"),
-        )
-        assistant_text = ""
-        response_json = ""
-        try:
-            response_payload, response_json = self._request_model(
-                prompt,
-                image,
-            )
-            assistant_text = self._response_text(response_payload)
-            visibility_text = assistant_text
-            visibility = parse_target_visibility_response(visibility_text)
-        except Exception as exc:
-            self._finish_interaction(
-                interaction,
-                assistant_text=assistant_text,
-                response_json=response_json,
-                error=_exception_text(exc),
-            )
-            return _uncertain(_failure_reason("目标可见性判断失败", exc))
-        self._finish_interaction(
-            interaction,
-            assistant_text=assistant_text,
-            response_json=response_json,
-            parsed_result=json.dumps(
-                {"visibility": visibility.value},
-                ensure_ascii=False,
-            ),
-        )
-
-        if visibility is TargetVisibility.NOT_VISIBLE:
-            return TargetObservation(visibility=TargetVisibility.NOT_VISIBLE)
-        return self._observe_visible_target(
-            goal, image, context={**interaction.context, "parent_request_id": interaction.interaction_id},
-        )
-
-    def score_frontiers(
-        self,
-        request: FrontierScoreRequest,
-        goal: TargetSearchGoal,
-    ) -> Mapping[str, float]:
-        """把本轮 Frontier 编号到多视角 RGB，只调用模型一次。"""
-        try:
-            image, markers = build_frontier_score_sheet(
-                self._scan_images,
-                request.candidates,
-            )
-            marker_labels = tuple(marker.label for marker in markers)
-            prompt = build_frontier_scores_prompt(
-                goal.target_text,
-                marker_labels,
-                goal.search_mode,
-            )
-        except Exception:
-            self._scan_images.clear()
-            return {}
-
-        interaction = self._begin_interaction(
-            "frontier_scores",
-            prompt,
-            image,
-        )
-        assistant_text = ""
-        response_json = ""
-        try:
-            response_payload, response_json = self._request_model(
-                prompt,
-                image,
-            )
-            assistant_text = self._response_text(response_payload)
-            marker_scores = parse_frontier_scores_response(
-                assistant_text,
-                marker_labels,
-            )
-            candidate_scores = {
-                marker.candidate_id: marker_scores[marker.label]
-                for marker in markers
-            }
-        except Exception as exc:
-            self._finish_interaction(
-                interaction,
-                assistant_text=assistant_text,
-                response_json=response_json,
-                error=_exception_text(exc),
-            )
-            # 语义评分失败不得阻塞纯地图 Frontier 探索。
-            return {}
-        finally:
-            self._scan_images.clear()
-        self._finish_interaction(
-            interaction,
-            assistant_text=assistant_text,
-            response_json=response_json,
-            parsed_result=json.dumps(
-                candidate_scores,
-                ensure_ascii=False,
-            ),
-        )
-        return candidate_scores
-
-    def assess_scene(
-        self,
-        goal: TargetSearchGoal,
-    ) -> SceneAssessmentResult:
-        """把本轮全部扫描 RGB 拼成一张图，请求一次目的场景判断。"""
-        try:
-            image = build_scan_contact_sheet(self._scan_images)
-            prompt = build_scene_assessment_prompt(goal.target_text)
-        except Exception as exc:
-            return SceneAssessmentResult(
-                SceneAssessment.UNCERTAIN,
-                _failure_reason("目的场景输入准备失败", exc),
-            )
-        interaction = self._begin_interaction(
-            "scene_assessment",
-            prompt,
-            image,
-        )
-        assistant_text = ""
-        response_json = ""
-        try:
-            response_payload, response_json = self._request_model(prompt, image)
-            assistant_text = self._response_text(response_payload)
-            assessment = parse_scene_assessment_response(assistant_text)
-        except Exception as exc:
-            self._finish_interaction(
-                interaction,
-                assistant_text=assistant_text,
-                response_json=response_json,
-                error=_exception_text(exc),
-            )
-            return SceneAssessmentResult(
-                SceneAssessment.UNCERTAIN,
-                _failure_reason("目的场景判断失败", exc),
-            )
-
-        self._finish_interaction(
-            interaction,
-            assistant_text=assistant_text,
-            response_json=response_json,
-            parsed_result=json.dumps(
-                {"scene": assessment.value},
-                ensure_ascii=False,
-            ),
-        )
-        return SceneAssessmentResult(assessment)
-
-    def record_scan_frame(
-        self,
-        frame: NavigationFrame,
-        context: ScanObservationContext,
-    ) -> None:
-        """只缓存扫描 RGB，供整轮场景判断和 Frontier 评分。"""
-        self._record_scan_image(frame, context)
-
-    def confirm_target(
-        self,
-        frame: NavigationFrame,
-        goal: TargetSearchGoal,
-        observation: TargetObservation,
-    ) -> TargetConfirmationResult:
-        """机器人接近候选后，用当前 RGB 做一次二元最终确认。"""
-        if frame.rgb is None:
-            return TargetConfirmationResult(
-                TargetConfirmation.UNCERTAIN,
-                "当前帧没有 RGB 图像，无法最终确认目标。",
-            )
-        try:
-            image = pack_rgb_image(frame.rgb)
-            if observation.bbox_norm is not None:
-                image = annotate_bbox_image(image, observation.bbox_norm)
-            prompt = build_target_confirmation_prompt(
-                goal.target_text,
-                observation.bbox_norm,
-            )
-        except Exception as exc:
-            return TargetConfirmationResult(
-                TargetConfirmation.UNCERTAIN,
-                _failure_reason("最终确认输入准备失败", exc),
-            )
-
-        interaction = self._begin_interaction(
-            "target_confirmation",
-            prompt,
-            image,
-            bbox_norm=observation.bbox_norm,
-            context=_frame_trace_context(frame, "target_confirmation"),
-        )
-        assistant_text = ""
-        response_json = ""
-        try:
-            response_payload, response_json = self._request_model(prompt, image)
-            assistant_text = self._response_text(response_payload)
-            confirmation = parse_target_confirmation_response(assistant_text)
-        except Exception as exc:
-            self._finish_interaction(
-                interaction,
-                assistant_text=assistant_text,
-                response_json=response_json,
-                error=_exception_text(exc),
-            )
-            return TargetConfirmationResult(
-                TargetConfirmation.UNCERTAIN,
-                _failure_reason("目标最终确认失败", exc),
-            )
-
-        self._finish_interaction(
-            interaction,
-            assistant_text=assistant_text,
-            response_json=response_json,
-            parsed_result=json.dumps(
-                {"confirmation": confirmation.value},
-                ensure_ascii=False,
-            ),
-            bbox_norm=observation.bbox_norm,
-        )
-        return TargetConfirmationResult(confirmation)
-
-    def _record_scan_image(
-        self,
-        frame: NavigationFrame,
-        context: ScanObservationContext,
-    ) -> BufferedScanImage:
-        """按扫描下标覆盖重复观测；新一轮从下标 0 重置。"""
-        if context.index == 0:
-            self._scan_images.clear()
-        buffered = buffer_scan_image(frame)
-        self._scan_images[context.index] = buffered
-        return buffered
-
-    def _observe_visible_target(
-        self,
-        goal: TargetSearchGoal,
-        image: VlmInputImage,
-        *, context: Optional[Mapping[str, Any]] = None,
-    ) -> TargetObservation:
-        """目标可见时取得目标框；没有可靠目标框时不允许导航接近。"""
-        prompt = build_target_grounding_prompt(goal.target_text)
-        interaction = self._begin_interaction(
-            "target_grounding",
-            prompt,
-            image,
-            context=context,
-        )
-        assistant_text = ""
-        response_json = ""
-        try:
-            response_payload, response_json = self._request_model(
-                prompt,
-                image,
-            )
-            assistant_text = self._response_text(response_payload)
-            bbox_norm = parse_target_grounding_response(assistant_text)
-        except Exception as exc:
-            self._finish_interaction(
-                interaction,
-                assistant_text=assistant_text,
-                response_json=response_json,
-                error=_exception_text(exc),
-            )
-            return _uncertain(_failure_reason("目标框定位失败", exc))
-        self._finish_interaction(
-            interaction,
-            assistant_text=assistant_text,
-            response_json=response_json,
-            parsed_result=json.dumps(
-                {"bbox_norm": bbox_norm},
-                ensure_ascii=False,
-            ),
-            bbox_norm=bbox_norm,
-        )
-        return TargetObservation(
-            visibility=TargetVisibility.VISIBLE,
-            bbox_norm=bbox_norm,
-        )
 
     def _request_model(
         self,

@@ -148,35 +148,11 @@ class TargetObservation:
 
 
 class TargetConfirmation(Enum):
-    """接近候选目标后的 VLM 最终确认结果。"""
+    """历史画面中 VLM 检测结论的诊断值，不触发到达后确认。"""
 
     CONFIRMED = "confirmed"
     REJECTED = "rejected"
     UNCERTAIN = "uncertain"
-
-
-@dataclass(frozen=True)
-class TargetConfirmationResult:
-    """VLM 最终确认及其可选失败原因。"""
-
-    confirmation: TargetConfirmation
-    reason: str = ""
-
-
-class SceneAssessment(Enum):
-    """VLM 根据当前画面判断是否已经位于目的场景。"""
-
-    MATCHED = "matched"
-    NOT_MATCHED = "not_matched"
-    UNCERTAIN = "uncertain"
-
-
-@dataclass(frozen=True)
-class SceneAssessmentResult:
-    """目的场景判断及其可选失败原因。"""
-
-    assessment: SceneAssessment
-    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -336,12 +312,9 @@ class RelativePoseCommand:
 
 
 class SearchPhase(Enum):
-    """语义目标搜索的阶段。"""
+    """语义目标搜索的阶段。只保留异步视觉队列导航流程使用的阶段。"""
 
     SCANNING = "scanning"
-    VERIFYING_SCENE = "verifying_scene"
-    LOCALIZING_TARGET = "localizing_target"
-    VERIFYING_TARGET = "verifying_target"
     EXPLORING = "exploring"
     BACKTRACKING = "backtracking"
     WAITING_FOR_SEMANTICS = "waiting_for_semantics"
@@ -404,7 +377,8 @@ class SearchState:
     backtrack_node_id 是正在返回的栈顶父节点，到达后才检查该节点的暂存方向。
     active_target_clue 在物体定位、接近和保底返回期间保留拍摄位姿与快照编号。
     object_approach 保存定位和重试记录，以及所有历史无法定位时的保底返回线索。
-    pending_target_world_xy 与 rejected_target_world_xy 用于同步观测的目标最终确认。"""
+
+    本状态只由搜索核心更新；感知模块与运行层只读取，不代为修改。"""
 
     phase: SearchPhase = SearchPhase.SCANNING
     scan_headings_world_rad: Tuple[float, ...] = ()
@@ -422,10 +396,7 @@ class SearchState:
     observed_views: Tuple[ObservationView, ...] = ()
     scan_observation_points: Tuple[Tuple[float, float], ...] = ()
     scan_local_point_count: int = 0
-    target_approach_attempts: int = 0
     initial_scan_complete: bool = False
-    pending_target_world_xy: Optional[Tuple[float, float]] = None
-    rejected_target_world_xy: Tuple[Tuple[float, float], ...] = ()
     blocked_frontier_regions: Tuple[BlockedFrontierRegion, ...] = ()
     backtrack_node_id: Optional[str] = None
     branch_node_ids: Tuple[str, ...] = ()
@@ -443,18 +414,91 @@ class NavigationStatus(Enum):
     OK = "ok"
     INVALID_INPUT = "invalid_input"
     NO_SOLUTION = "no_solution"
-    NEEDS_OBSERVATION = "needs_observation"
-    NEEDS_SCENE_ASSESSMENT = "needs_scene_assessment"
+    NEEDS_SCAN_CAPTURE = "needs_scan_capture"
     NEEDS_FRONTIER_SCORES = "needs_frontier_scores"
-    NEEDS_TARGET_CONFIRMATION = "needs_target_confirmation"
     NEEDS_OBJECT_LOCALIZATION = "needs_object_localization"
     MISSING_DATA = "missing_data"
 
 
+class ActionKind(Enum):
+    """搜索核心要求执行的动作类型。运行层按类型执行，不解析字符串步骤名。
+
+    MOVE_TO_POSE 指定世界系目标位姿，路径约束单独声明；TURN_IN_PLACE 为原地转向；
+    MOVE_RELATIVE 为不校验未知路径的直接相对移动。"""
+
+    MOVE_TO_POSE = "move_to_pose"
+    TURN_IN_PLACE = "turn_in_place"
+    MOVE_RELATIVE = "move_relative"
+
+
+class ActionConstraint(Enum):
+    """动作的执行约束。REQUIRE_KNOWN_PATH 表示未知路径超限时按可恢复失败处理。"""
+
+    NONE = "none"
+    REQUIRE_KNOWN_PATH = "require_known_path"
+
+
+class ActionPurpose(Enum):
+    """动作的算法用途，供采样策略和失败恢复使用。"""
+
+    OTHER = "other"
+    SCAN_TURN = "scan.turn"
+    EXPLORE = "explore.move"
+    RESUME = "explore.resume"
+    BACKTRACK = "backtrack.return"
+    REVISIT = "target.revisit"
+    REVISIT_TURN = "target.revisit_turn"
+    APPROACH = "object.approach"
+    FALLBACK = "object.fallback_return"
+    FALLBACK_TURN = "object.fallback_turn"
+
+
+@dataclass(frozen=True)
+class NavigationAction:
+    """搜索核心请求执行的一个动作。
+
+    destination 为世界系目标位姿；command 为相对移动量；两者按
+    action 类型择一。purpose 用于核心解释执行结果后决定后续，例如区分
+    "扫描转向"与"接近目标转向"的可恢复失败处理。
+    """
+
+    action: ActionKind
+    constraint: ActionConstraint = ActionConstraint.NONE
+    destination: Optional[Pose2D] = None
+    command: Optional[RelativePoseCommand] = None
+    purpose: ActionPurpose = ActionPurpose.OTHER
+    candidate_id: Optional[str] = None
+    node_id: Optional[str] = None
+
+
+class ActionOutcome(Enum):
+    """动作的执行结果类别；SUCCEEDED 以外的可恢复类别由核心决定后续。"""
+
+    SUCCEEDED = "succeeded"
+    STALLED = "stalled"
+    INTERRUPTED = "interrupted"
+    PATH_UNKNOWN = "path_unknown"
+
+
+@dataclass(frozen=True)
+class ActionExecutionResult:
+    """运行层交付的同步执行反馈；设备离线等系统错误直接抛出异常。"""
+
+    outcome: ActionOutcome
+    reason: str = ""
+    rejected_path_world_xy: tuple = ()
+    unknown_length_m: Optional[float] = None
+    limit_m: Optional[float] = None
+    total_path_length_m: Optional[float] = None
+
+
 @dataclass(frozen=True)
 class NavigationDebug:
-    """供排错使用的可读信息。stage 为当前算法步骤，message 为人类可读说明，
-    details 为附加键值。"""
+    """供排错使用的可读信息。stage 为当前算法步骤的说明性标签，
+    message 为人类可读说明，details 为附加键值。
+
+    本结构与动作执行无关：运行层按 NavigationAction 执行动作，
+    不读取 stage 字符串来判断或改变行为。"""
 
     stage: str
     message: str = ""
@@ -463,11 +507,11 @@ class NavigationDebug:
 
 @dataclass(frozen=True)
 class NavigationResult:
-    """导航单周期输出。command 仅在 status 为 OK 时有意义，否则为 None；
+    """导航单周期输出。action 仅在 status 为 OK 时有意义，否则为 None；
     state 为周期结束后的显式搜索状态，调用方应将其作为下一周期的输入。"""
 
     status: NavigationStatus
-    command: Optional[RelativePoseCommand]
+    action: Optional[NavigationAction]
     debug: NavigationDebug
     state: SearchState
     frontier_score_request: Optional[FrontierScoreRequest] = None

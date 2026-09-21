@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from ....core.models import Pose2D
-from ..l515_camera import L515Capture
+from ..rgbd_camera import RgbdCapture
 
 
 _DEPTH_RANGE_M = (0.25, 4.0)
@@ -22,7 +22,7 @@ _MAX_RELATIVE_TILT_RAD = math.radians(5.0)
 class CapturedFrame:
     label: str
     base_pose: Pose2D
-    camera: L515Capture
+    camera: RgbdCapture
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ class MotionPair:
     visual_inliers: int
 
 
-def require_visual_features(capture: L515Capture, cv2: Any) -> None:
+def require_visual_features(capture: RgbdCapture, cv2: Any) -> None:
     """运动前检查纹理是否同时具有后续 PnP 可用的深度，避免远景特征误通过。"""
     gray = cv2.cvtColor(capture.rgb, cv2.COLOR_RGB2GRAY)
     keypoints = cv2.ORB_create(nfeatures=_ORB_FEATURE_COUNT).detect(gray, None)
@@ -92,8 +92,8 @@ def estimate_motion_pairs(
 
 
 def _estimate_camera_motion(
-    source: L515Capture,
-    target: L515Capture,
+    source: RgbdCapture,
+    target: RgbdCapture,
     up_in_color: Any,
     cv2: Any,
     np: Any,
@@ -195,7 +195,7 @@ def _estimate_camera_motion(
 
 
 def _rgbd_correspondences(
-    source: L515Capture,
+    source: RgbdCapture,
     target_points: Any,
     source_points: Any,
     matches: Sequence[Any],
@@ -219,7 +219,7 @@ def _rgbd_correspondences(
     return object_points, image_points
 
 
-def _usable_depth(capture: L515Capture, pixel: Tuple[float, float]) -> Optional[float]:
+def _usable_depth(capture: RgbdCapture, pixel: Tuple[float, float]) -> Optional[float]:
     """前置检查与匹配使用同一像素取深度规则和米制范围。"""
     col, row = int(round(pixel[0])), int(round(pixel[1]))
     depth = capture.depth_m

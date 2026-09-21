@@ -155,7 +155,7 @@ class SemanticWorldNodes:
                 self._set_node_state(self._clues.get(fallback.clue_id), "stopped", result.debug.message)
         if clue is not None and clue.job_id is not None and clue.view_id is not None:
             state = "returning" if "return" in result.debug.stage or "turn" in result.debug.stage else "approaching"
-            if result.command is not None:
+            if result.action is not None:
                 self._set_node_state(view_node_path(clue.job_id, clue.view_id), state)
         if self._active_local_path is not None:
             if result.state.phase.value == "complete":
