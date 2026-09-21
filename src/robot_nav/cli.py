@@ -94,11 +94,6 @@ def _add_hermes_parser(adapters):
         help="活跃 Action 无足够位姿变化的终止秒数，默认 1",
     )
     hermes.add_argument(
-        "--max-unknown-path-m",
-        type=_non_negative_float,
-        help="当前剩余路径允许经过未知区的累计长度（米），超过才取消，默认 1.5",
-    )
-    hermes.add_argument(
         "--run-log",
         help="Hermes 导航 JSONL 日志路径；默认自动保存到 data/run_logs/",
     )
@@ -177,6 +172,12 @@ def _add_navigation_arguments(
     parser: argparse.ArgumentParser,
 ) -> None:
     _add_vlm_arguments(parser)
+    parser.add_argument(
+        "--max-unknown-path-m",
+        type=_non_negative_float,
+        help="当前剩余路径允许经过未知区的累计长度（米），超过才取消，默认 1.5",
+    )
+
     parser.add_argument(
         "--target",
         help="要搜索的具体物体或目的场景描述",

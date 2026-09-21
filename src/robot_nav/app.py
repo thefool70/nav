@@ -281,8 +281,9 @@ def _send(chassis: ChassisInterface, action: NavigationAction, frame: Navigation
     command = action_command(action, frame.pose)
     if command is None:
         raise RecoverableMotionError("动作缺少相对移动量。")
-    if (action.constraint is ActionConstraint.REQUIRE_KNOWN_PATH
-            and isinstance(chassis, KnownSpaceChassisInterface)):
+    if action.constraint is ActionConstraint.REQUIRE_KNOWN_PATH:
+        if not isinstance(chassis, KnownSpaceChassisInterface):
+            raise RuntimeError("Adapter 不支持动作要求的未知路径检查，不能降级执行")
         path_map = (frame.navigation_map
                     if action.purpose is ActionPurpose.APPROACH and frame.navigation_map is not None
                     else frame.obstacle_map)

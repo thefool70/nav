@@ -4,7 +4,8 @@
     "search_mode": "object",
     "max_cycles": 200,
     "debug_random_score": false,
-    "debug_frontier": false
+    "debug_frontier": false,
+    "max_unknown_path_m": 1.5
   },
   "habitat": {
     "scene": "data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb",
@@ -15,7 +16,6 @@
     "base_url": "http://192.168.11.1:1448",
     "action_timeout_s": 120.0,
     "action_stall_timeout_s": 1.0,
-    "max_unknown_path_m": 1.5,
     "min_localization_quality": 1,
     "startup_forward_m": 1.0,
     "request_timeout_s": 5.0,

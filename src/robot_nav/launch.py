@@ -60,6 +60,7 @@ def _run_habitat(args: argparse.Namespace, api_key: str) -> int:
         scene_path=args.scene,
         seed=args.seed,
         gpu_device_id=args.gpu_device_id,
+        max_unknown_path_m=args.max_unknown_path_m,
     )
     with _build_perception(
         args, api_key, on_vlm_interaction, on_semantic_event,

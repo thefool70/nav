@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
-from ..chassis import RecoverableMotionError
+from ..chassis import MotionPathUnknownError, RecoverableMotionError
+from ...core.path_validation import measure_unknown_path_length
 from ...core.models import (
     CameraExtrinsics,
     CameraIntrinsics,
@@ -48,6 +49,7 @@ class HabitatConfig:
     observed_range_m: float = 5.0
     seed: int = 1
     gpu_device_id: int = -1
+    max_unknown_path_m: float = 1.5
 
 
 class HabitatChassisAdapter:
@@ -114,6 +116,8 @@ class HabitatChassisAdapter:
         )
         if not all(_is_finite(value) and float(value) > 0.0 for value in numeric_values):
             raise ValueError("相机和地图参数必须为正有限值")
+        if not _is_finite(config.max_unknown_path_m) or config.max_unknown_path_m < 0.0:
+            raise ValueError("max_unknown_path_m 必须为非负有限米数")
         if not 0.0 < config.hfov_deg < 180.0:
             raise ValueError("hfov_deg 必须位于 (0, 180)")
         if (
@@ -342,6 +346,21 @@ class HabitatChassisAdapter:
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
         """沿 navmesh 逐步移动到相对目标，再转到命令指定朝向。"""
+        self._send_relative_pose(command)
+
+    def send_relative_pose_in_known_space(
+        self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
+        *, reference_pose: Pose2D,
+    ) -> None:
+        """使用决策位姿还原目标，按固定决策地图检查剩余路径。"""
+        self._send_relative_pose(command, reference_pose=reference_pose,
+                                 known_space_map=obstacle_map)
+
+    def _send_relative_pose(
+        self, command: RelativePoseCommand, *, reference_pose: Optional[Pose2D] = None,
+        known_space_map: Optional[ObstacleMap] = None,
+    ) -> None:
+        """规划、检查、离散执行，最后保留命令要求的世界朝向。"""
         self._require_open()
         if not isinstance(command, RelativePoseCommand) or not all(
             _is_finite(value)
@@ -350,7 +369,7 @@ class HabitatChassisAdapter:
             raise ValueError("command 必须为有限 RelativePoseCommand")
 
         state = self._agent.get_state()
-        start_pose = self._pose_from_agent_state(state)
+        start_pose = reference_pose or self._pose_from_agent_state(state)
         target_yaw_world = start_pose.yaw_rad + command.yaw_rad
         translation_m = math.hypot(command.forward_m, command.left_m)
         if translation_m > 1.0e-9:
@@ -362,7 +381,9 @@ class HabitatChassisAdapter:
             target_world_xy = (float(target[0]), -float(target[2]))
             self._report_motion_plan(target_world_xy, path_world_xy)
             try:
-                self._follow_path(target)
+                if known_space_map is not None:
+                    self._check_known_space_path(target, known_space_map)
+                self._follow_path(target, known_space_map=known_space_map)
             finally:
                 self._report_motion_plan(None, ())
         self._turn_to_world_yaw(target_yaw_world)
@@ -380,8 +401,8 @@ class HabitatChassisAdapter:
         world_dy = command.forward_m * sine + command.left_m * cosine
 
         requested = state.position.copy()
-        requested[0] = float(state.position[0]) + world_dx
-        requested[2] = float(state.position[2]) - world_dy
+        requested[0] = pose.x_m + world_dx
+        requested[2] = -pose.y_m - world_dy
         snapped = self._pathfinder.snap_point(requested)
         if not all(_is_finite(snapped[index]) for index in range(3)):
             raise RecoverableMotionError(
@@ -398,9 +419,14 @@ class HabitatChassisAdapter:
                 "Habitat 相对位姿目标离可导航区域过远"
             )
 
+        return snapped, self._path_to_target(snapped)
+
+    def _path_to_target(self, target: Any) -> Tuple[Tuple[float, float], ...]:
+        """读取当前位姿到实际目标的 navmesh 剩余路径，并转换到地图坐标系。"""
+        state = self._agent.get_state()
         shortest_path = self._habitat_sim.ShortestPath()
         shortest_path.requested_start = state.position
-        shortest_path.requested_end = snapped
+        shortest_path.requested_end = target
         if not self._pathfinder.find_path(shortest_path) or not shortest_path.points:
             raise RecoverableMotionError(
                 "Habitat 找不到相对位姿目标的可行路径"
@@ -409,9 +435,9 @@ class HabitatChassisAdapter:
             (float(point[0]), -float(point[2]))
             for point in shortest_path.points
         )
-        return snapped, path_world_xy
+        return path_world_xy
 
-    def _follow_path(self, target: Any) -> None:
+    def _follow_path(self, target: Any, *, known_space_map: Optional[ObstacleMap] = None) -> None:
         """用 Habitat GreedyGeodesicFollower 执行到目标的离散动作。"""
         follower = self._sim.make_greedy_follower(agent_id=0)
         try:
@@ -424,7 +450,24 @@ class HabitatChassisAdapter:
         for action in actions:
             if action is None:
                 break
+            if known_space_map is not None:
+                self._check_known_space_path(target, known_space_map)
             self._step_action(action)
+
+    def _check_known_space_path(self, target: Any, obstacle_map: ObstacleMap) -> None:
+        """每个离散动作前检查剩余路径；超限时尚未下发下一步，直接返回失败。"""
+        pose = self._pose_from_agent_state(self._agent.get_state())
+        path = ((pose.x_m, pose.y_m),) + self._path_to_target(target)
+        self._report_motion_plan((float(target[0]), -float(target[2])), path)
+        measurement = measure_unknown_path_length(path, obstacle_map)
+        limit_m = self.config.max_unknown_path_m
+        if measurement.unknown_length_m > limit_m + 1e-9:
+            raise MotionPathUnknownError(
+                f"Habitat 剩余路径未知长度 {measurement.unknown_length_m:.3f} m "
+                f"超过上限 {limit_m:.3f} m",
+                path_world_xy=path, unknown_length_m=measurement.unknown_length_m,
+                limit_m=limit_m, total_path_length_m=measurement.total_length_m,
+            )
 
     def _turn_to_world_yaw(self, target_yaw_world: float) -> None:
         """用 Habitat 默认转向动作逼近世界系目标朝向。"""

@@ -51,7 +51,7 @@ class ChassisInterface(Protocol):
 
 @runtime_checkable
 class KnownSpaceChassisInterface(Protocol):
-    """可检查实际规划路径的底盘扩展，当前由 Hermes 实现。"""
+    """可检查实际规划路径的底盘扩展，由 Hermes 与 Habitat 实现。"""
 
     def send_relative_pose_in_known_space(
         self, command: RelativePoseCommand, obstacle_map: ObstacleMap,

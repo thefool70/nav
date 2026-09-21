@@ -7,9 +7,9 @@ from pathlib import Path
 
 # 这里只定义字段归属；运行默认值唯一保存在根目录 config.json。
 FIELDS = {
-    "navigation": "target search_mode max_cycles debug_random_score debug_frontier",
+    "navigation": "target search_mode max_cycles debug_random_score debug_frontier max_unknown_path_m",
     "habitat": "scene seed gpu_device_id",
-    "hermes": "base_url action_timeout_s action_stall_timeout_s max_unknown_path_m min_localization_quality startup_forward_m request_timeout_s action_poll_interval_s action_progress_interval_s action_stall_translation_m action_stall_rotation_deg action_arrival_position_m action_arrival_hold_s motion_frame_interval_s position_tolerance_m yaw_tolerance_deg",
+    "hermes": "base_url action_timeout_s action_stall_timeout_s min_localization_quality startup_forward_m request_timeout_s action_poll_interval_s action_progress_interval_s action_stall_translation_m action_stall_rotation_deg action_arrival_position_m action_arrival_hold_s motion_frame_interval_s position_tolerance_m yaw_tolerance_deg",
     "camera": "camera_source camera_endpoint camera_topic camera_timeout_s camera_serial camera_calibration camera_height_m camera_forward_m camera_left_m camera_yaw_deg camera_pitch_down_deg camera_roll_deg",
     "perception": "vlm_endpoint vlm_model vlm_api_format vlm_timeout_s vlm_max_output_tokens object_class object_python object_device object_yolo_model object_sam_checkpoint object_timeout_s",
     "logging": "no_rerun rerun_save run_log",
