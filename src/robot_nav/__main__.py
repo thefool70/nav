@@ -1,6 +1,6 @@
 """robot-nav 启动入口：读取参数并分派导航或标定。
 
-本模块只做三件事：解析参数、校验参数组合、把控制权交给 :mod:`~robot_nav.launch`。
+本模块只做三件事：读取参数、按需读取凭据、把控制权交给 :mod:`~robot_nav.launch`。
 参数定义在 ``cli.py``，运行装配在 ``launch.py``，导航循环在 ``app.py``，外参标定在 ``calibration_launch.py``。
 """
 
@@ -12,9 +12,8 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .calibration_launch import run_calibration_entries
-from .core.models import SearchMode
 from .cli import parse_arguments
-from .launch import MISSING_VLM_CREDENTIAL, run_entries
+from .launch import run_entries
 
 
 def _resolve_vlm_api_key() -> str:
@@ -47,26 +46,18 @@ def _resolve_vlm_api_key() -> str:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """解析运行环境并启动所选入口。"""
     parser, args = parse_arguments(argv)
-    api_key = _resolve_vlm_api_key()
-    if (
-        getattr(args, "search_mode", SearchMode.OBJECT.value)
-        == SearchMode.SCENE.value
-        and getattr(args, "debug_random_score", False)
-    ):
-        parser.error("场景搜索需要 VLM，不能与 --debug-random-score 同时使用")
-
-    if args.adapter in ("habitat", "hermes"):
-        if not getattr(args, "preflight_only", False) and not args.debug_random_score and not api_key:
-            parser.error(MISSING_VLM_CREDENTIAL)
-        return run_entries(args, api_key)
-
     if args.adapter == "calibrate-hermes":
-        if not args.enable_motion:
-            parser.error("外参标定会移动真机，必须显式提供 --enable-motion")
         return run_calibration_entries(args)
 
-    parser.error(f"未知 Adapter：{args.adapter}")
-    return 2
+    api_key = ""
+    if not args.preflight_only and not args.debug_random_score:
+        api_key = _resolve_vlm_api_key()
+        if not api_key:
+            parser.error(
+                "缺少视觉模型凭据：设置 ROBOT_NAV_VLM_API_KEY，"
+                "或先用 opencode auth login 登录 OpenCode Go"
+            )
+    return run_entries(args, api_key)
 
 
 if __name__ == "__main__":

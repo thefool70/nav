@@ -7,7 +7,7 @@ from pathlib import Path
 from .core.models import SearchMode
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser():
     """定义运行入口与标定入口的参数。"""
     parser = argparse.ArgumentParser(description="运行机器人语义目标搜索")
     adapters = parser.add_subparsers(dest="adapter", required=True)
@@ -15,13 +15,14 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_habitat_parser(adapters)
     _add_hermes_parser(adapters)
     _add_calibration_parser(adapters)
-    return parser
+    return parser, adapters.choices
 
 
 def _add_habitat_parser(adapters):
     """仿真场景、起点与渲染参数。"""
     habitat = adapters.add_parser("habitat", help="使用 Habitat-Sim Adapter")
     habitat.add_argument("--scene", help="Habitat .glb 场景路径")
+    habitat.set_defaults(preflight_only=False)
     _add_navigation_arguments(habitat)
     habitat.add_argument(
         "--seed",
@@ -92,10 +93,6 @@ def _add_hermes_parser(adapters):
         "--action-stall-timeout-s",
         type=_positive_float,
         help="活跃 Action 无足够位姿变化的终止秒数，默认 1",
-    )
-    hermes.add_argument(
-        "--run-log",
-        help="Hermes 导航 JSONL 日志路径；默认自动保存到 data/run_logs/",
     )
     hermes.add_argument(
         "--min-localization-quality",
@@ -176,6 +173,10 @@ def _add_navigation_arguments(
         "--max-unknown-path-m",
         type=_non_negative_float,
         help="当前剩余路径允许经过未知区的累计长度（米），超过才取消，默认 1.5",
+    )
+    parser.add_argument(
+        "--run-log",
+        help="导航 JSONL 日志路径；默认自动保存到 data/run_logs/",
     )
 
     parser.add_argument(
@@ -309,23 +310,35 @@ def parse_arguments(argv=None):
     selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     selector.add_argument("--config", type=Path, default=Path("config.json"))
     selected, remaining = selector.parse_known_args(argv)
-    parser = _build_parser()
+    parser, subparsers = _build_parser()
     parser.add_argument("--config", help="统一 JSON 配置文件，默认当前目录 config.json")
     if "--help" in argv or "-h" in argv:
         return parser, parser.parse_args(remaining)
     try:
-        apply_config(parser, load_config(selected.config), selected.config.resolve().parent)
+        apply_config(subparsers, load_config(selected.config), selected.config.resolve().parent)
     except (ValueError, OSError) as exc:
-        parser.error(str(exc))
+        parser.error(f"配置 {selected.config} 无效：{exc}")
     args = parser.parse_args(remaining)
     args.config = selected.config.resolve()
-    if args.adapter == "habitat" and not args.scene:
-        parser.error("必须设置 habitat.scene 或 --scene")
-    if args.adapter in ("habitat", "hermes") and not getattr(args, "preflight_only", False) and not args.target:
-        parser.error("必须设置 navigation.target 或 --target")
-    if hasattr(args, "object_python") and args.object_python is None:
+    _validate_arguments(parser, args)
+    if args.adapter != "calibrate-hermes" and args.object_python is None:
         args.object_python = _default_object_python()
     return parser, args
+
+
+def _validate_arguments(parser, args):
+    """按入口检查参数组合，后续装配直接使用已解析的字段。"""
+    if args.adapter == "calibrate-hermes":
+        if not args.enable_motion:
+            parser.error("外参标定会移动真机，必须显式提供 --enable-motion")
+        return
+
+    if args.adapter == "habitat" and not args.scene:
+        parser.error("必须设置 habitat.scene 或 --scene")
+    if not args.preflight_only and not args.target:
+        parser.error("必须设置 navigation.target 或 --target")
+    if args.search_mode == SearchMode.SCENE.value and args.debug_random_score:
+        parser.error("场景搜索需要 VLM，不能与 --debug-random-score 同时使用")
 
 
 def _add_hermes_tuning(parser):
