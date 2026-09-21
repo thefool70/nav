@@ -19,6 +19,12 @@
 5. `src/robot_nav/core/models.py`：算法输入、输出和跨周期状态。
 6. 当前使用的 Adapter：Habitat 或 Hermes + D435i。
 
+启动、配置和主要算法模块按“入口 → 主要步骤 → 内部辅助实现”阅读；
+Adapter 先列公共操作，再列内部实现。数据类型仍先于使用它们的函数定义。`launch.py` 的
+`_assemble_and_run` 展示组件连接，`app.py` 从 `run_navigation` 总循环读到
+`run_navigation_cycle` 单周期；计时与显示细节集中在 `runtime_reporting.py`。
+函数前缀 `_` 表示模块内部接口，不表示它是否属于算法计算。
+
 算法细节见 [算法说明](docs/algorithm.md)，坐标和接口约定见
 [底盘接口标准](docs/chassis-interface.md)。
 
@@ -54,6 +60,8 @@ ChassisInterface ──► NavigationFrame
   也不修改搜索状态。
 - `adapters/` 负责设备协议、坐标转换、地图归一化和视觉模型请求。
 - `visualization/` 与 `run_log.py` 只记录过程，不参与决策。
+  `rerun_view.py` 组织 Rerun 记录，`panels.py` 生成状态文本与模型卡片，
+  `view_geometry.py` 计算显示坐标、机器人轮廓与路径线段。
 
 ## 搜索方式
 

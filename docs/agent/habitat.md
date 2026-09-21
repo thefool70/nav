@@ -21,7 +21,7 @@
   （`_build_perception`），两种模式共用同一套感知与搜索核心。探索队列不接受
   同步观察器；物体接近通过 `--object-*` 接入独立模型进程；运动帧预采样由
   `set_motion_prefetch_enabled` 在动作期间开关。
-- 两种入口共用 `launch.py::_run_navigation`；`hermes` 由 `environment.py::create_chassis` 创建 `HermesAdapter`（`adapters/hermes/`）。
+- 两种入口共用 `launch.py::_assemble_and_run`；`hermes` 由 `environment.py::create_chassis` 创建 `HermesAdapter`（`adapters/hermes/`）。
   地图缓存、REST、Action 监控与路径检查全部在开发机执行；本地直连与经随车笔记本
   转发共用同一实现；底盘改 `--base-url`，远程相机另设 `--camera-source remote` 与 `--camera-endpoint`。
 - 检测链先检查 `launch.py::_build_perception` 与 `_build_analyzer`，不能仅凭
@@ -434,7 +434,7 @@
 - `adapters/hermes/adapter.py::_execute_action` 将 Action 创建、起始位姿读取和监控
   放在同一异常范围；`_cancel_active_action` 与 `close` 负责取消遗留动作。已获得
   ID 时还要确认终态；创建请求失败而没有 ID 时只能尝试取消，原异常仍终止运行。
-- `runtime_reporting._optional_callback` 集中处理可视化的 I/O 与运行库故障；
+- `runtime_reporting.optional_callback` 集中处理可视化的 I/O 与运行库故障；
   类型或字段错误继续传播。Adapter 不再重复捕获回调异常；JSONL `_write` 只隔离
   文件 I/O 错误，序列化错误直接暴露。直接传入 Adapter 或周期函数的自定义回调
   由调用方负责。采集、路径检查、健康错误仍停止并收尾动作。
@@ -449,8 +449,8 @@
 
 ## 离线读取 RRD
 
-- `visualization/vlm_trace.py` 只保存轻量摘要，`rerun_view.py` 写完整卡片和 World
-  叠加。`model/vlm/summary` 是简表，`model/interaction` 是最新完整事件；
+- `visualization/vlm_trace.py` 只保存轻量摘要，`panels.py` 生成完整卡片，
+  `rerun_view.py` 记录卡片和 World 叠加；显示坐标转换在 `view_geometry.py`。`model/vlm/summary` 是简表，`model/interaction` 是最新完整事件；
   `model/vlm/requests/R000001` 保留单次会话，`/text` 保留不依赖字体的完整文本，
   `model/vlm/jobs/J000001` 保留任务事件与接收／排序周期。
 - VLM 请求、返回及队列事件均调用 `_begin_sample`，不能恢复旧 `_vlm_samples`
