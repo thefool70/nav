@@ -200,6 +200,58 @@ class HermesAdapter:
         self._raise_continuous_frame_error()
         return self._read_frame_locked()
 
+    def send_relative_pose(self, command: RelativePoseCommand) -> None:
+        """执行普通运动，用于启动、标定、转向和相对位姿运动。"""
+        self._send_relative_pose(command)
+
+    def send_relative_pose_in_known_space(
+        self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
+        *, reference_pose: Pose2D,
+    ) -> None:
+        """按决策位姿固定探索／回退的世界目标，用决策地图约束实际路径。"""
+        self._send_relative_pose(
+            command, known_space_map=obstacle_map, reference_pose=reference_pose,
+        )
+
+    def close(self) -> None:
+        """退出先取消遗留动作，再关闭采集；取消失败仍显式上报。"""
+        cancellation_error = None
+        try:
+            self._cancel_active_action()
+        except RuntimeError as exc:
+            cancellation_error = exc
+        self._continuous_frame_stop.set()
+        frame_thread = self._continuous_frame_thread
+        self._continuous_frame_thread = None
+        if frame_thread is not None and frame_thread is not threading.current_thread():
+            camera_timeout_s = (
+                self.config.camera.wait_timeout_s
+                if self.config.camera is not None
+                else 0.0
+            )
+            frame_thread.join(
+                timeout=min(
+                    30.0,
+                    2.0 * self.config.request_timeout_s
+                    + camera_timeout_s
+                    + 2.0,
+                )
+            )
+        self._on_continuous_frame = None
+        self._on_motion_frame = None
+        camera = self._camera
+        self._camera = None
+        if camera is not None:
+            camera.close()
+        if cancellation_error is not None:
+            raise RuntimeError(f"退出时取消 Hermes Action 失败：{cancellation_error}") from cancellation_error
+
+    def __enter__(self) -> "HermesAdapter":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.close()
+
     def _read_frame_locked(self) -> NavigationFrame:
         """串行读取相机和 Hermes，避免主循环与运动监控线程争用设备。"""
         timings = []
@@ -225,6 +277,7 @@ class HermesAdapter:
                 hermes_map = self._client.get_explore_map()
             with measure_stage(timings, "frame.convert_map"):
                 navigation_map = _to_obstacle_map(hermes_map)
+            # 完整图用于物体定位与停靠；探索图和视觉图随后按相机 FOV 限制公开范围。
             obstacle_map = navigation_map
             visibility_map = None
             if capture is not None:
@@ -275,19 +328,6 @@ class HermesAdapter:
             "Hermes/D435i 连续视觉帧失败："
             f"{str(error) or type(error).__name__}"
         ) from error
-
-    def send_relative_pose(self, command: RelativePoseCommand) -> None:
-        """执行普通运动，用于启动、标定、转向和相对位姿运动。"""
-        self._send_relative_pose(command)
-
-    def send_relative_pose_in_known_space(
-        self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
-        *, reference_pose: Pose2D,
-    ) -> None:
-        """按决策位姿固定探索／回退的世界目标，用决策地图约束实际路径。"""
-        self._send_relative_pose(
-            command, known_space_map=obstacle_map, reference_pose=reference_pose,
-        )
 
     def _send_relative_pose(
         self,
@@ -707,45 +747,6 @@ class HermesAdapter:
             return
         self._on_motion_frame(self.read_frame())
         self._last_motion_frame_s = now
-
-    def close(self) -> None:
-        """退出先取消遗留动作，再关闭采集；取消失败仍显式上报。"""
-        cancellation_error = None
-        try:
-            self._cancel_active_action()
-        except RuntimeError as exc:
-            cancellation_error = exc
-        self._continuous_frame_stop.set()
-        frame_thread = self._continuous_frame_thread
-        self._continuous_frame_thread = None
-        if frame_thread is not None and frame_thread is not threading.current_thread():
-            camera_timeout_s = (
-                self.config.camera.wait_timeout_s
-                if self.config.camera is not None
-                else 0.0
-            )
-            frame_thread.join(
-                timeout=min(
-                    30.0,
-                    2.0 * self.config.request_timeout_s
-                    + camera_timeout_s
-                    + 2.0,
-                )
-            )
-        self._on_continuous_frame = None
-        self._on_motion_frame = None
-        camera = self._camera
-        self._camera = None
-        if camera is not None:
-            camera.close()
-        if cancellation_error is not None:
-            raise RuntimeError(f"退出时取消 Hermes Action 失败：{cancellation_error}") from cancellation_error
-
-    def __enter__(self) -> "HermesAdapter":
-        return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        self.close()
 
 
 def _build_navigation_frame(

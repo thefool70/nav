@@ -35,4 +35,5 @@ def decode_capture(parts, msgpack, np, timestamp_s):
         raise ValueError("深度单位和焦距必须为正数")
     rgb = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape(height, width, 3).copy()
     depth = np.frombuffer(depth_bytes, dtype="<u2").reshape(height, width).astype(np.float32) * scale
+    # 使用调用方提供的本机接收时刻，避免把随车端单调时钟当成本机时钟。
     return D435iCapture(timestamp_s, rgb, depth, intrinsics)

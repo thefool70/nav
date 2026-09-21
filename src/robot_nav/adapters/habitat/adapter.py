@@ -82,6 +82,39 @@ class HabitatChassisAdapter:
             self.close()
             raise
 
+    def read_frame(self) -> NavigationFrame:
+        """读取当前同步 RGB-D，并生成仅暴露局部已知区域的障碍图。"""
+        self._require_open()
+        observations = self._sim.get_sensor_observations()
+        pose = self._pose_from_agent_state(self._agent.get_state())
+        self._update_observed_cells(pose)
+        return self._build_navigation_frame(observations, pose)
+
+    def send_relative_pose(self, command: RelativePoseCommand) -> None:
+        """沿 navmesh 逐步移动到相对目标，再转到命令指定朝向。"""
+        self._send_relative_pose(command)
+
+    def send_relative_pose_in_known_space(
+        self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
+        *, reference_pose: Pose2D,
+    ) -> None:
+        """使用决策位姿还原目标，按固定决策地图检查剩余路径。"""
+        self._send_relative_pose(command, reference_pose=reference_pose,
+                                 known_space_map=obstacle_map)
+
+    def close(self) -> None:
+        """幂等释放 Habitat 资源。"""
+        simulator = self._sim
+        self._sim = None
+        if simulator is not None:
+            simulator.close()
+
+    def __enter__(self) -> "HabitatChassisAdapter":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.close()
+
     @staticmethod
     def _import_habitat_sim() -> Any:
         """延迟导入 Habitat，使普通核心环境无需安装仿真依赖。"""
@@ -199,14 +232,6 @@ class HabitatChassisAdapter:
             y_m=-last_sample_z,
             yaw_rad=0.0,
         )
-
-    def read_frame(self) -> NavigationFrame:
-        """读取当前同步 RGB-D，并生成仅暴露局部已知区域的障碍图。"""
-        self._require_open()
-        observations = self._sim.get_sensor_observations()
-        pose = self._pose_from_agent_state(self._agent.get_state())
-        self._update_observed_cells(pose)
-        return self._build_navigation_frame(observations, pose)
 
     def _build_navigation_frame(
         self,
@@ -344,18 +369,6 @@ class HabitatChassisAdapter:
             frame_id="habitat_world",
         )
 
-    def send_relative_pose(self, command: RelativePoseCommand) -> None:
-        """沿 navmesh 逐步移动到相对目标，再转到命令指定朝向。"""
-        self._send_relative_pose(command)
-
-    def send_relative_pose_in_known_space(
-        self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
-        *, reference_pose: Pose2D,
-    ) -> None:
-        """使用决策位姿还原目标，按固定决策地图检查剩余路径。"""
-        self._send_relative_pose(command, reference_pose=reference_pose,
-                                 known_space_map=obstacle_map)
-
     def _send_relative_pose(
         self, command: RelativePoseCommand, *, reference_pose: Optional[Pose2D] = None,
         known_space_map: Optional[ObstacleMap] = None,
@@ -450,6 +463,7 @@ class HabitatChassisAdapter:
         for action in actions:
             if action is None:
                 break
+            # 检查地图冻结在决策时，不能用运动中新公开的区域放宽本次路径约束。
             if known_space_map is not None:
                 self._check_known_space_path(target, known_space_map)
             self._step_action(action)
@@ -514,19 +528,6 @@ class HabitatChassisAdapter:
         """拒绝在 Adapter 关闭后继续读写仿真。"""
         if self._sim is None:
             raise RuntimeError("HabitatChassisAdapter 已关闭")
-
-    def close(self) -> None:
-        """幂等释放 Habitat 资源。"""
-        simulator = self._sim
-        self._sim = None
-        if simulator is not None:
-            simulator.close()
-
-    def __enter__(self) -> "HabitatChassisAdapter":
-        return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        self.close()
 
 
 def _convert_rgb(image: Any):

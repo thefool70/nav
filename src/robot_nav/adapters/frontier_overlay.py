@@ -268,6 +268,7 @@ def _resize_rgb(
     target_width: int,
     target_height: int,
 ) -> bytearray:
+    """用最近邻缩放打包 RGB，返回按行连续的三通道字节缓冲区。"""
     result = bytearray(target_width * target_height * 3)
     source = frame.rgb_bytes
     for target_y in range(target_height):
@@ -298,6 +299,7 @@ def _draw_number_label(
     center_y: int,
     text: str,
 ) -> None:
+    """在锚点附近绘制编号底色与字形，并把标签框限制在图像内。"""
     glyph_width = 3 * MARKER_SCALE
     glyph_gap = MARKER_SCALE
     text_width = len(text) * glyph_width + max(0, len(text) - 1) * glyph_gap
@@ -383,6 +385,7 @@ def _draw_digit(
     digit: str,
     color: Tuple[int, int, int],
 ) -> None:
+    """按内置点阵放大绘制单个字符，直接修改 RGB 缓冲区。"""
     glyph = _DIGITS[digit]
     for row_index, row in enumerate(glyph):
         for col_index, enabled in enumerate(row):
@@ -440,6 +443,7 @@ def _copy_tile(
     target_x: int,
     target_y: int,
 ) -> None:
+    """将一块连续 RGB 图按行复制到拼图指定位置；目标区域由布局调用方预留。"""
     for row in range(tile_height):
         source_start = row * tile_width * 3
         target_start = ((target_y + row) * sheet_width + target_x) * 3

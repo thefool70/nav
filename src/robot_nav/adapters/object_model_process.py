@@ -77,6 +77,10 @@ class ObjectModelProcess:
         finally:
             self._request_lock.release()
 
+    def close(self):
+        self._closed.set()
+        self._stop()
+
     def _ensure_started(self):
         with self._process_lock:
             if self._closed.is_set():
@@ -84,6 +88,7 @@ class ObjectModelProcess:
             return self._start_process()
 
     def _start_process(self):
+        """复用存活模型进程，否则以指定 Python 启动；stdout 只传消息，stderr 写模型日志。"""
         if self._process is not None and self._process.poll() is None:
             return self._process, self._messages
         if self._process is not None:
@@ -108,6 +113,7 @@ class ObjectModelProcess:
         return self._process, messages
 
     def _stop(self):
+        """先终止、超时再强制结束模型进程，并释放请求管道。"""
         with self._process_lock:
             process = self._process
             self._process = None
@@ -128,12 +134,9 @@ class ObjectModelProcess:
         except OSError:
             pass
 
-    def close(self):
-        self._closed.set()
-        self._stop()
-
 
 def _read_messages(stream, messages):
+    """把逐行 JSON 协议转入线程队列；流结束或损坏时用 None 通知请求方。"""
     try:
         for line in stream:
             message = json.loads(line)

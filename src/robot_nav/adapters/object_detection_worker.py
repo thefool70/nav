@@ -14,6 +14,7 @@ import traceback
 
 
 def main() -> int:
+    """持续接收单行 JSON 请求；模型首次请求时加载，此后复用并返回阶段事件和结果。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=("yolo", "sam2"), required=True)
     kind = parser.parse_args().model
@@ -35,6 +36,7 @@ def main() -> int:
         # 长时间未返回时保留 Python 栈，以区分加载、图像编码和掩码推理。
         faulthandler.dump_traceback_later(20.0, repeat=True, file=sys.stderr)
         try:
+            # 第三方模型常向 stdout 打印；重定向后，stdout 才能保持逐行 JSON 协议。
             with redirect_stdout(sys.stderr):
                 progress("importing")
                 import numpy as np
@@ -92,6 +94,7 @@ def _load_model(kind, request, progress):
 
 
 def _send(message):
+    """协议写入原始 stdout，避免模型库的普通打印混入父进程消息。"""
     sys.__stdout__.write(json.dumps(message, ensure_ascii=False) + "\n")
     sys.__stdout__.flush()
 

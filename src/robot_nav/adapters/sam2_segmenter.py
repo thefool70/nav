@@ -86,6 +86,7 @@ class Sam2BoxSegmenter:
 
 
 def _build_predictor(config: Sam2Config) -> Any:
+    """检查权重与推理设备，加载 SAM2 图像预测器；图像编码在后续 set_image 完成。"""
     checkpoint_path = Path(config.checkpoint_path)
     if not checkpoint_path.is_file():
         raise RuntimeError(f"缺少 SAM2 模型文件：{checkpoint_path}")

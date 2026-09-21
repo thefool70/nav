@@ -307,6 +307,7 @@ class HermesRestClient:
         path: str,
         body: Optional[Mapping[str, Any]] = None,
     ) -> bytes:
+        """发送底盘 HTTP 请求并返回原始字节；网络错误附带接口路径后向上传播。"""
         data = None
         headers = {"Accept": "application/json, application/octet-stream"}
         if body is not None:

@@ -200,6 +200,7 @@ def _rgbd_correspondences(
     source_points: Any,
     matches: Sequence[Any],
 ) -> Tuple[List[Tuple[float, float, float]], List[Tuple[float, float]]]:
+    """将有深度的源帧特征反投影为相机系三维点，配对目标帧像素供 PnP 使用。"""
     object_points = []
     image_points = []
     intrinsics = source.camera_intrinsics

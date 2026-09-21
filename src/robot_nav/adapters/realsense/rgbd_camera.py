@@ -61,48 +61,6 @@ class RgbdCamera:
             self.close()
             raise
 
-    def _start(self) -> None:
-        """启动 RGB8 与 Z16 数据流；对齐后输出尺寸跟随彩色图。"""
-        rs = self._rs
-        pipeline = rs.pipeline()
-        stream_config = rs.config()
-        if self.config.serial_number is not None:
-            stream_config.enable_device(self.config.serial_number.strip())
-        stream_config.enable_stream(
-            rs.stream.color,
-            self.config.color_width,
-            self.config.color_height,
-            rs.format.rgb8,
-            self.config.fps,
-        )
-        stream_config.enable_stream(
-            rs.stream.depth,
-            self.config.depth_width,
-            self.config.depth_height,
-            rs.format.z16,
-            self.config.fps,
-        )
-
-        self._pipeline = pipeline
-        profile = pipeline.start(stream_config)
-        self._started = True
-        depth_scale = float(
-            profile.get_device().first_depth_sensor().get_depth_scale()
-        )
-        if not math.isfinite(depth_scale) or depth_scale <= 0.0:
-            raise RuntimeError(f"{self.device_label} 返回了无效的 depth_scale")
-        self._depth_scale_m = depth_scale
-        depth_profile = profile.get_stream(rs.stream.depth)
-        color_profile = profile.get_stream(rs.stream.color)
-        extrinsics = depth_profile.get_extrinsics_to(color_profile)
-        column_major = tuple(float(value) for value in extrinsics.rotation)
-        self._depth_to_color_rotation = tuple(
-            column_major[column * 3 + row]
-            for row in range(3)
-            for column in range(3)
-        )
-        self._align = rs.align(rs.stream.color)
-
     @property
     def depth_to_color_rotation(self) -> Tuple[float, ...]:
         """返回把深度/IMU方向转到彩色光学坐标系的按行展开矩阵。"""
@@ -167,6 +125,49 @@ class RgbdCamera:
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         self.close()
+
+    def _start(self) -> None:
+        """启动 RGB8 与 Z16 数据流；对齐后输出尺寸跟随彩色图。"""
+        rs = self._rs
+        pipeline = rs.pipeline()
+        stream_config = rs.config()
+        if self.config.serial_number is not None:
+            stream_config.enable_device(self.config.serial_number.strip())
+        stream_config.enable_stream(
+            rs.stream.color,
+            self.config.color_width,
+            self.config.color_height,
+            rs.format.rgb8,
+            self.config.fps,
+        )
+        stream_config.enable_stream(
+            rs.stream.depth,
+            self.config.depth_width,
+            self.config.depth_height,
+            rs.format.z16,
+            self.config.fps,
+        )
+
+        self._pipeline = pipeline
+        profile = pipeline.start(stream_config)
+        self._started = True
+        depth_scale = float(
+            profile.get_device().first_depth_sensor().get_depth_scale()
+        )
+        if not math.isfinite(depth_scale) or depth_scale <= 0.0:
+            raise RuntimeError(f"{self.device_label} 返回了无效的 depth_scale")
+        self._depth_scale_m = depth_scale
+        depth_profile = profile.get_stream(rs.stream.depth)
+        color_profile = profile.get_stream(rs.stream.color)
+        extrinsics = depth_profile.get_extrinsics_to(color_profile)
+        # SDK 旋转矩阵按列展开；转为行优先后供后续光轴深度转换使用。
+        column_major = tuple(float(value) for value in extrinsics.rotation)
+        self._depth_to_color_rotation = tuple(
+            column_major[column * 3 + row]
+            for row in range(3)
+            for column in range(3)
+        )
+        self._align = rs.align(rs.stream.color)
 
     def _require_open(self) -> Any:
         if self._pipeline is None or not self._started or self._align is None:

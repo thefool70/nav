@@ -82,6 +82,7 @@ class HermesObservedMap:
                     source,
                 )
             )
+        # 缓存按世界格位置索引，底盘扩图导致行列变化时仍能复用旧观测。
         update_keys = {
             cell: self._cell_to_world_key(cell, source)
             for cell in visible_cells

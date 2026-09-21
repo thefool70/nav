@@ -140,6 +140,7 @@ def _translation_residual(
     yaw_rad: float,
     np: Any,
 ) -> float:
+    """按安装偏移补偿转弯引起的相机平移，返回预测底盘平移与实测值的 RMS 米数。"""
     camera_to_base = _rotation_2d(yaw_rad, np)
     identity = np.eye(2, dtype=float)
     squared_errors = []

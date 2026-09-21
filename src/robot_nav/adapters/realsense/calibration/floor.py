@@ -99,6 +99,7 @@ def mount_angles_from_up(up_in_color: Any) -> Tuple[float, float]:
 
 
 def _ransac_floor_mask(points: Any, up_hint: Any, np: Any) -> Any:
+    """用 IMU 向上方向约束候选平面，返回米制距离阈值内支持点最多的地面掩码。"""
     rng = np.random.default_rng(0)
     best_mask = None
     best_count = 0

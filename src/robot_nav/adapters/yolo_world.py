@@ -92,6 +92,7 @@ class YoloWorldDetector:
 
 
 def _normalized_box(values: Any) -> Optional[Tuple[float, float, float, float]]:
+    """将模型输出的归一化 xyxy 框裁到 [0, 1]，丢弃非有限或无面积的框。"""
     try:
         x_min, y_min, x_max, y_max = (float(value) for value in values)
     except (TypeError, ValueError):
