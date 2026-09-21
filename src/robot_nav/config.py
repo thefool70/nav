@@ -41,20 +41,12 @@ BOOLS = {"debug_random_score", "debug_frontier", "no_rerun"}
 INTS = {"seed", "gpu_device_id", "max_cycles", "min_localization_quality", "vlm_max_output_tokens"}
 
 
-def _unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"配置存在重复字段：{key}")
-        result[key] = value
-    return result
-
-
 def load_config(path):
     """完整配置文件必须包含已声明的分组和字段，拼写错误与危险开关直接拒绝。"""
     data = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
     if not isinstance(data, dict) or set(data) != set(FIELDS):
         raise ValueError("配置顶层必须包含且仅包含：" + ", ".join(FIELDS))
+    # JSON 分组用于人工阅读；内部按参数名展开，供 argparse 的默认值统一使用。
     flattened = {}
     for group, fields in FIELDS.items():
         values = data[group]
@@ -66,6 +58,37 @@ def load_config(path):
             raise ValueError(f"配置 {group} 字段错误：未知 {sorted(unknown)}，缺少 {sorted(missing)}")
         flattened.update(values)
     return flattened
+
+
+def apply_config(subparsers, values, directory):
+    """将文件值设为子命令默认值；后续 parse_args 自然应用显式 CLI 覆盖。"""
+    actions = {}
+    for parser in subparsers.values():
+        for action in parser._actions:
+            actions[action.dest] = action
+
+    converted = {}
+    for name, value in values.items():
+        try:
+            converted[name] = _convert(name, value, actions[name], directory)
+        except (ValueError, argparse.ArgumentTypeError) as exc:
+            raise ValueError(f"配置字段 {name} 无效：{exc}") from exc
+
+    # 只给子命令实际注册的参数赋默认值，随后显式命令行参数自然覆盖它们。
+    for parser in subparsers.values():
+        defaults = {action.dest: converted[action.dest]
+                    for action in parser._actions if action.dest in converted}
+        parser.set_defaults(**defaults)
+
+
+def _unique_object(pairs):
+    """在 JSON 对象转成字典之前检查重复键，防止同名配置被后值静默覆盖。"""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"配置存在重复字段：{key}")
+        result[key] = value
+    return result
 
 
 def _validate_type(name, value, action):
@@ -107,23 +130,3 @@ def _convert(name, value, action, directory):
     if action.choices is not None and value not in action.choices:
         raise ValueError(f"必须是 {tuple(action.choices)} 之一")
     return value
-
-
-def apply_config(subparsers, values, directory):
-    """将文件值设为子命令默认值；后续 parse_args 自然应用显式 CLI 覆盖。"""
-    actions = {}
-    for parser in subparsers.values():
-        for action in parser._actions:
-            actions[action.dest] = action
-
-    converted = {}
-    for name, value in values.items():
-        try:
-            converted[name] = _convert(name, value, actions[name], directory)
-        except (ValueError, argparse.ArgumentTypeError) as exc:
-            raise ValueError(f"配置字段 {name} 无效：{exc}") from exc
-
-    for parser in subparsers.values():
-        defaults = {action.dest: converted[action.dest]
-                    for action in parser._actions if action.dest in converted}
-        parser.set_defaults(**defaults)

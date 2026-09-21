@@ -7,6 +7,30 @@ from pathlib import Path
 from .core.models import SearchMode
 
 
+def parse_arguments(argv=None):
+    """配置文件提供默认值，显式 CLI 参数覆盖；--config 可放在子命令前后。"""
+    from .config import load_config, apply_config
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--config", type=Path, default=Path("config.json"))
+    selected, remaining = selector.parse_known_args(argv)
+    parser, subparsers = _build_parser()
+    parser.add_argument("--config", help="统一 JSON 配置文件，默认当前目录 config.json")
+    if "--help" in argv or "-h" in argv:
+        return parser, parser.parse_args(remaining)
+    try:
+        apply_config(subparsers, load_config(selected.config), selected.config.resolve().parent)
+    except (ValueError, OSError) as exc:
+        parser.error(f"配置 {selected.config} 无效：{exc}")
+    args = parser.parse_args(remaining)
+    args.config = selected.config.resolve()
+    _validate_arguments(parser, args)
+    if args.adapter != "calibrate-hermes" and args.object_python is None:
+        args.object_python = _default_object_python()
+    return parser, args
+
+
 def _build_parser():
     """定义运行入口与标定入口的参数。"""
     parser = argparse.ArgumentParser(description="运行机器人语义目标搜索")
@@ -168,6 +192,7 @@ def _add_calibration_parser(adapters):
 def _add_navigation_arguments(
     parser: argparse.ArgumentParser,
 ) -> None:
+    """注册仿真与真机共用的导航选项；文件默认值稍后由 apply_config 注入。"""
     _add_vlm_arguments(parser)
     parser.add_argument(
         "--max-unknown-path-m",
@@ -300,30 +325,6 @@ def _add_vlm_arguments(parser):
                         help="覆盖配置，开启可视化")
     parser.add_argument("--no-debug-random-score", dest="debug_random_score", action="store_false", default=argparse.SUPPRESS)
     parser.add_argument("--no-debug-frontier", dest="debug_frontier", action="store_false", default=argparse.SUPPRESS)
-
-
-def parse_arguments(argv=None):
-    """配置文件提供默认值，显式 CLI 参数覆盖；--config 可放在子命令前后。"""
-    from .config import load_config, apply_config
-
-    argv = list(sys.argv[1:] if argv is None else argv)
-    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    selector.add_argument("--config", type=Path, default=Path("config.json"))
-    selected, remaining = selector.parse_known_args(argv)
-    parser, subparsers = _build_parser()
-    parser.add_argument("--config", help="统一 JSON 配置文件，默认当前目录 config.json")
-    if "--help" in argv or "-h" in argv:
-        return parser, parser.parse_args(remaining)
-    try:
-        apply_config(subparsers, load_config(selected.config), selected.config.resolve().parent)
-    except (ValueError, OSError) as exc:
-        parser.error(f"配置 {selected.config} 无效：{exc}")
-    args = parser.parse_args(remaining)
-    args.config = selected.config.resolve()
-    _validate_arguments(parser, args)
-    if args.adapter != "calibrate-hermes" and args.object_python is None:
-        args.object_python = _default_object_python()
-    return parser, args
 
 
 def _validate_arguments(parser, args):

@@ -4,6 +4,7 @@ from .adapters.realsense.d435i_camera import D435iCamera, D435iCalibrationCamera
 
 
 def camera_factory(args, *, calibration=False):
+    """返回供 Adapter 调用的相机构造函数；远程源仅支持导航所需的 RGB-D，不提供标定 IMU。"""
     if args.camera_source == "local":
         return D435iCalibrationCamera if calibration else D435iCamera
     if calibration:

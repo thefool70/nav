@@ -2,6 +2,7 @@
 
 两种环境共用同一套装配；设备创建与准备在 environment.py。
 导航循环由 app.run_navigation 执行。
+阅读顺序：入口分派 → 运行日志生命周期 → 组件装配 → 各组件与回调的构造。
 
 ``__main__.py`` 只负责解析参数并调用本模块；标定流程在
 :mod:`~robot_nav.calibration_launch` 中保持独立入口。
@@ -10,8 +11,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from uuid import uuid4
 
 from .environment import create_chassis, prepare_navigation, run_preflight, validate_environment
@@ -26,48 +28,32 @@ from .perception.object_localizer import ObjectLocalizerConfig
 from .core.models import SearchMode
 from .perception import SemanticPerception
 from .app import run_navigation
-from .runtime_reporting import _optional_callback
+from .runtime_reporting import optional_callback
 from .run_log import NavigationRunLogger, default_run_log_path
+
 
 def run_entries(args: argparse.Namespace, api_key: str) -> int:
     """环境准备独立分派，正式导航只走一套公共装配。"""
+    # 此处的 args 已完成文件配置与命令行合并；设备准备条件由 environment 检查。
     validate_environment(args)
     if args.preflight_only:
         return run_preflight(args)
-    return _run_navigation(args, api_key)
+    return _run_logged_navigation(args, api_key)
 
 
-def _run_navigation(args: argparse.Namespace, api_key: str) -> int:
-    """统一创建感知、日志及回调，并在退出时先关闭设备再关闭感知。"""
+def _run_logged_navigation(args: argparse.Namespace, api_key: str) -> int:
+    """记录一次运行的开始、异常与结束；组件装配和导航交给下一层。"""
     run_logger = _build_run_logger(args)
     return_code = 1
     error_message = None
     try:
-        on_cycle, on_motion_frame, on_vlm_interaction, on_motion_plan, on_semantic_event = (
-            _build_visualization(args)
-        )
-        with _build_perception(
-            args, api_key, on_vlm_interaction,
-            on_semantic_event=_perception_event_callback(on_semantic_event, run_logger),
-            object_config=_object_config(args),
-        ) as perception, create_chassis(
-            args,
-            on_motion_frame=on_motion_frame,
-            on_sample_frame=_motion_prefetch_callback(on_motion_frame, perception),
-            on_motion_plan=on_motion_plan,
-            on_action_progress=_action_progress_callback(run_logger),
-        ) as chassis:
-            prepare_navigation(args, chassis)
-            return_code = run_navigation(
-                chassis, args.target, SearchMode(args.search_mode), args.max_cycles,
-                perception, on_cycle=on_cycle, debug_frontier=args.debug_frontier,
-                run_logger=run_logger,
-            )
+        return_code = _assemble_and_run(args, api_key, run_logger)
     except RuntimeError as exc:
         return_code = 1
         error_message = str(exc)
         run_logger.log_error(exc)
         print(f"{args.adapter} 导航停止：{exc}")
+    # 中断和其他异常只记录后重抛；finally 仍负责写结束记录、关闭日志。
     except BaseException as exc:
         return_code = 1
         error_message = f"{type(exc).__name__}: {exc}"
@@ -79,6 +65,27 @@ def _run_navigation(args: argparse.Namespace, api_key: str) -> int:
         finally:
             run_logger.close()
     return return_code
+
+
+def _assemble_and_run(args: argparse.Namespace, api_key: str, run_logger: NavigationRunLogger) -> int:
+    """创建显示、感知和设备，完成准备后进入两种环境共用的导航循环。"""
+    visualization = _build_visualization(args)
+    # 感知先创建，设备后创建；退出时先关闭设备，避免继续向已关闭队列送帧。
+    with _build_perception(args, api_key, visualization, run_logger) as perception:
+        with create_chassis(
+            args,
+            on_motion_frame=visualization.on_motion_frame,
+            on_sample_frame=_motion_prefetch_callback(visualization.on_motion_frame, perception),
+            on_motion_plan=visualization.on_motion_plan,
+            on_action_progress=_action_progress_callback(run_logger),
+        ) as chassis:
+            # 仅真机执行启动前移；随后两种环境进入完全相同的导航循环。
+            prepare_navigation(args, chassis)
+            return run_navigation(
+                chassis, args.target, SearchMode(args.search_mode), args.max_cycles,
+                perception, on_cycle=visualization.on_cycle, debug_frontier=args.debug_frontier,
+                run_logger=run_logger,
+            )
 
 
 def _build_run_logger(args: argparse.Namespace) -> NavigationRunLogger:
@@ -104,14 +111,35 @@ def _build_run_logger(args: argparse.Namespace) -> NavigationRunLogger:
     return logger
 
 
-def _action_progress_callback(run_logger: NavigationRunLogger):
-    """同时输出并落盘设备 Action 反馈。"""
+def _build_visualization(args: argparse.Namespace) -> _VisualizationCallbacks:
+    """将 Rerun 的记录方法按用途命名；关闭显示时各字段为 None。"""
+    if args.no_rerun:
+        return _VisualizationCallbacks()
 
-    def callback(message: str) -> None:
-        print(message)
-        run_logger.log_action_progress(message)
+    from .visualization import RerunVisualizer
 
-    return callback
+    visualizer = RerunVisualizer(args.target, recording_path=args.rerun_save)
+    return _VisualizationCallbacks(
+        on_cycle=visualizer.log_cycle,
+        on_motion_frame=visualizer.log_motion_frame,
+        on_vlm_interaction=optional_callback(visualizer.log_vlm_interaction, "VLM 交互可视化"),
+        on_motion_plan=optional_callback(visualizer.log_motion_plan, "路径可视化"),
+        on_semantic_event=visualizer.log_semantic_queue_event,
+    )
+
+
+def _build_perception(
+    args: argparse.Namespace,
+    api_key: str,
+    visualization: _VisualizationCallbacks,
+    run_logger: NavigationRunLogger,
+) -> SemanticPerception:
+    """连接队列事件、物体定位配置和模型分析器，构造公共感知模块。"""
+    on_event = _perception_event_callback(visualization.on_semantic_event, run_logger)
+    object_config = _object_config(args)
+    # analyzer 封装模型请求；perception 管理快照、队列和结果交付。
+    analyzer = _build_analyzer(args, api_key, visualization.on_vlm_interaction)
+    return SemanticPerception(analyzer, on_event=on_event, object_config=object_config)
 
 
 def _build_analyzer(
@@ -145,19 +173,8 @@ def _build_analyzer(
     )
 
 
-def _build_perception(
-    args: argparse.Namespace,
-    api_key: str,
-    on_vlm_interaction=None,
-    on_semantic_event=None,
-    *, object_config: Optional[ObjectLocalizerConfig] = None,
-) -> SemanticPerception:
-    """所有 Adapter 与搜索模式共用同一条后台检测与评分链。"""
-    analyzer = _build_analyzer(args, api_key, on_vlm_interaction)
-    return SemanticPerception(analyzer, on_event=on_semantic_event, object_config=object_config)
-
-
 def _object_config(args) -> Optional[ObjectLocalizerConfig]:
+    # 场景搜索和随机评分不需要启动 YOLO/SAM2 的物体定位链。
     if args.debug_random_score or args.search_mode != SearchMode.OBJECT.value:
         return None
     return ObjectLocalizerConfig(
@@ -169,9 +186,10 @@ def _object_config(args) -> Optional[ObjectLocalizerConfig]:
 
 def _motion_prefetch_callback(on_motion_frame, perception: SemanticPerception):
     """把最新帧送往语义预采样，并旁路记录到 Rerun。"""
-    visualization = _optional_callback(on_motion_frame, "运动帧可视化")
+    visualization = optional_callback(on_motion_frame, "运动帧可视化")
 
     def callback(frame) -> None:
+        # 回调由 Adapter 提供帧；感知只接收它，不在这里再次读取设备。
         perception.observe_motion_frame(frame)
         if visualization is not None:
             visualization(frame)
@@ -181,7 +199,7 @@ def _motion_prefetch_callback(on_motion_frame, perception: SemanticPerception):
 
 def _perception_event_callback(on_event, run_logger: NavigationRunLogger):
     """队列事件分别送往 Rerun 和 JSONL，显示故障不影响日志。"""
-    visualization = _optional_callback(on_event, "VLM 队列可视化")
+    visualization = optional_callback(on_event, "VLM 队列可视化")
 
     def callback(event):
         run_logger.log_semantic_queue_event(event)
@@ -191,20 +209,25 @@ def _perception_event_callback(on_event, run_logger: NavigationRunLogger):
     return callback
 
 
-def _build_visualization(args: argparse.Namespace):
-    if args.no_rerun:
-        return None, None, None, None, None
+def _action_progress_callback(run_logger: NavigationRunLogger):
+    """同时输出并落盘设备 Action 反馈。"""
 
-    from .visualization import RerunVisualizer
+    def callback(message: str) -> None:
+        print(message)
+        run_logger.log_action_progress(message)
 
-    visualizer = RerunVisualizer(args.target, recording_path=args.rerun_save)
-    return (
-        visualizer.log_cycle,
-        visualizer.log_motion_frame,
-        _optional_callback(visualizer.log_vlm_interaction, "VLM 交互可视化"),
-        _optional_callback(visualizer.log_motion_plan, "路径可视化"),
-        visualizer.log_semantic_queue_event,
-    )
+    return callback
+
+
+@dataclass(frozen=True)
+class _VisualizationCallbacks:
+    """启动装配用的具名记录函数；只保存回调，不管理资源或导航状态。"""
+
+    on_cycle: Optional[Callable] = None
+    on_motion_frame: Optional[Callable] = None
+    on_vlm_interaction: Optional[Callable] = None
+    on_motion_plan: Optional[Callable] = None
+    on_semantic_event: Optional[Callable] = None
 
 
 __all__ = [

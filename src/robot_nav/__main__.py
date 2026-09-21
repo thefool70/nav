@@ -16,6 +16,24 @@ from .cli import parse_arguments
 from .launch import run_entries
 
 
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """解析运行环境并启动所选入口。"""
+    parser, args = parse_arguments(argv)
+    if args.adapter == "calibrate-hermes":
+        return run_calibration_entries(args)
+
+    # 预检和随机评分都不调用 VLM，因此无需模型凭据。
+    api_key = ""
+    if not args.preflight_only and not args.debug_random_score:
+        api_key = _resolve_vlm_api_key()
+        if not api_key:
+            parser.error(
+                "缺少视觉模型凭据：设置 ROBOT_NAV_VLM_API_KEY，"
+                "或先用 opencode auth login 登录 OpenCode Go"
+            )
+    return run_entries(args, api_key)
+
+
 def _resolve_vlm_api_key() -> str:
     """优先读取项目环境变量，否则复用 OpenCode Go 本地凭据。"""
     environment_key = os.environ.get("ROBOT_NAV_VLM_API_KEY", "").strip()
@@ -41,23 +59,6 @@ def _resolve_vlm_api_key() -> str:
         return ""
     api_key = credential.get("key")
     return api_key.strip() if isinstance(api_key, str) else ""
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    """解析运行环境并启动所选入口。"""
-    parser, args = parse_arguments(argv)
-    if args.adapter == "calibrate-hermes":
-        return run_calibration_entries(args)
-
-    api_key = ""
-    if not args.preflight_only and not args.debug_random_score:
-        api_key = _resolve_vlm_api_key()
-        if not api_key:
-            parser.error(
-                "缺少视觉模型凭据：设置 ROBOT_NAV_VLM_API_KEY，"
-                "或先用 opencode auth login 登录 OpenCode Go"
-            )
-    return run_entries(args, api_key)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ class NavigationRunLogger:
         max_cycles: int,
         configuration: Mapping[str, Any],
     ) -> None:
+        """记录本次入口、目标及已合并的配置，作为后续周期日志的运行上下文。"""
         self._write(
             "run_start",
             adapter=adapter_name,
@@ -155,6 +156,7 @@ class NavigationRunLogger:
                 stream.close()
 
     def _write(self, event: str, **payload: Any) -> None:
+        """串行写入并刷新一条 JSONL；只有文件 I/O 故障会停用日志，序列化错误继续传播。"""
         with self._write_lock:
             stream = self._stream
             if stream is None:
@@ -185,6 +187,7 @@ def _result_summary(
     result: NavigationResult,
     pose: Pose2D,
 ) -> Mapping[str, Any]:
+    """汇总决策、动作和状态；命令使用决策帧位姿转换，便于与实际执行对照。"""
     return {
         "status": result.status.value,
         "phase": result.state.phase.value,
@@ -206,6 +209,7 @@ def _command_summary(
     command: Optional[RelativePoseCommand],
     pose: Pose2D,
 ) -> Optional[Mapping[str, Any]]:
+    """同时记录机器人系相对命令和对应世界目标点，距离为米、角度为弧度。"""
     if command is None:
         return None
     cosine = math.cos(pose.yaw_rad)
@@ -224,6 +228,7 @@ def _command_summary(
 
 
 def _map_summary(frame: NavigationFrame) -> Mapping[str, Any]:
+    """统计地图已知程度及机器人所在格的状态，不把整张地图写入每条日志。"""
     obstacle_map = frame.obstacle_map
     rows = obstacle_map.occupancy
     height = len(rows)
@@ -276,6 +281,7 @@ def _map_summary(frame: NavigationFrame) -> Mapping[str, Any]:
 
 
 def _camera_summary(frame: NavigationFrame) -> Mapping[str, Any]:
+    """记录图像尺寸、标定及相机在两张地图中的位置，供投影与覆盖排错。"""
     intrinsics = frame.camera_intrinsics
     extrinsics = frame.camera_extrinsics_in_robot
     return {
@@ -327,6 +333,7 @@ def _image_size(image: Any) -> Optional[Tuple[int, int]]:
 def _observation_summary(
     observation: Optional[TargetObservation],
 ) -> Optional[Mapping[str, Any]]:
+    """记录检测结论与框，并用掩码摘要替代完整像素矩阵。"""
     if observation is None:
         return None
     return {
@@ -360,6 +367,7 @@ def _mask_summary(mask: Any) -> Optional[Mapping[str, Any]]:
 
 
 def _state_summary(state: SearchState) -> Mapping[str, Any]:
+    """汇总跨周期搜索状态，保留分支、暂存区域和线索的关联信息供复盘。"""
     direction_counts = {
         "pending": 0,
         "committed": 0,
@@ -465,6 +473,7 @@ def _observation_view_summary(view: ObservationView) -> Mapping[str, Any]:
 def _node_summary(
     node: Optional[ObservationNode],
 ) -> Optional[Mapping[str, Any]]:
+    """展开一个历史节点的方向与执行结果；没有节点时返回 None。"""
     if node is None:
         return None
     return {
@@ -518,6 +527,7 @@ def _pose_summary(pose: Pose2D) -> Mapping[str, float]:
 
 
 def _jsonable(value: Any) -> Any:
+    """递归转为 JSON 可写值；枚举、路径和集合展开，其他对象保留文字表示。"""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Enum):

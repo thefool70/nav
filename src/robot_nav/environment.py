@@ -39,6 +39,7 @@ def create_chassis(args, *, on_motion_frame=None, on_sample_frame=None,
             HabitatConfig(scene_path=args.scene, seed=args.seed,
                           gpu_device_id=args.gpu_device_id,
                           max_unknown_path_m=args.max_unknown_path_m),
+            # 仿真逐步执行时提供帧，同一次回调完成预采样与显示。
             on_motion_frame=on_sample_frame,
             on_motion_plan=on_motion_plan,
         )
@@ -65,6 +66,7 @@ def create_chassis(args, *, on_motion_frame=None, on_sample_frame=None,
     )
     return HermesAdapter(
         config, on_motion_frame=on_motion_frame,
+        # 真机预采样由独立采集线程提供，不占用 Action 状态轮询。
         on_continuous_frame=on_sample_frame,
         camera_factory=camera_factory(args),
         on_action_progress=on_action_progress, on_motion_plan=on_motion_plan,
@@ -89,6 +91,7 @@ def run_preflight(args) -> int:
 
 
 def _print_hermes_preflight(chassis) -> None:
+    """只读设备状态和一帧数据，输出底盘健康、地图尺寸与相机连接摘要。"""
     info = chassis.get_robot_info()
     slam_state = chassis.get_slam_state()
     health = chassis.get_robot_health()
