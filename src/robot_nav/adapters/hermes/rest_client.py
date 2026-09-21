@@ -253,6 +253,30 @@ class HermesRestClient:
                 on_poll(status, stage)
             time.sleep(min(float(poll_interval_s), deadline - now))
 
+    def get_current_action(self) -> Mapping[str, Any]:
+        """无当前任务时固件返回 404；通信失败不能当作空闲。"""
+        try:
+            return _require_mapping(self._request_json(
+                "GET", "/api/core/motion/v1/actions/:current"), "当前任务")
+        except RuntimeError as exc:
+            if isinstance(exc.__cause__, HTTPError) and exc.__cause__.code == 404:
+                return {}
+            raise
+
+    def get_power_status(self) -> Mapping[str, Any]:
+        """读取电量、对桩和充电状态。"""
+        return _require_mapping(self._request_json(
+            "GET", "/api/core/system/v1/power/status"), "电源状态")
+
+    def go_home(self) -> Mapping[str, Any]:
+        """按官方回桩示例提交 dock 请求；返回仅表示受理，不表示开始充电。"""
+        return _require_mapping(self._request_json(
+            "POST", "/api/core/motion/v1/actions", {
+                "action_name": "slamtec.agent.actions.GoHomeAction",
+                "gohome_options": {"flags": "dock", "back_to_landing": True,
+                                   "charging_retry_count": 3},
+            }), "回桩任务")
+
     def abort_current_action(self) -> None:
         """终止当前 Action；用于超时、中断和采集失败后的安全收尾。"""
         self._request_bytes(

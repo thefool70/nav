@@ -23,3 +23,6 @@ robot-nav = "robot_nav.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+robot_nav = ["chassis_gui.html"]

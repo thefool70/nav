@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hermes · 底盘面板</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101820;color:#edf4f8}*{box-sizing:border-box}body{max-width:960px;margin:32px auto;padding:0 20px}header{display:flex;justify-content:space-between;align-items:center}h1{font-size:27px;margin-bottom:6px}h2{font-size:18px;margin-top:0}.muted{color:#9aacbd;font-size:14px;line-height:1.7}.badge{padding:8px 14px;border-radius:20px;background:#263949}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:22px 0}.card{background:#192632;border:1px solid #314353;border-radius:16px;padding:22px}.values{display:grid;grid-template-columns:1fr 1fr;gap:18px}.value{font-size:23px;margin-top:5px}label{display:block;margin:14px 0}input[type=number]{width:100px;background:#101820;color:white;border:1px solid #536679;border-radius:7px;padding:9px;font-size:16px}button{font:inherit;border:0;border-radius:10px;padding:14px;cursor:pointer;color:white;background:#35516a;touch-action:manipulation}button:disabled{opacity:.35;cursor:not-allowed}button:hover:enabled{filter:brightness(1.2)}.pad{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}.dock{width:100%;background:#176b65}.stop{background:#ba343e;width:100%;font-weight:700;font-size:22px;margin:16px 0}.error{color:#ffb1b7}#notice{white-space:pre-wrap;line-height:1.6}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;color:#b5c8d8}#log{max-height:180px;overflow:auto}.check{padding:12px;background:#263949;border-radius:8px}@media(max-width:640px){.grid{grid-template-columns:1fr}body{margin:16px auto}}
+</style>
+<header><div><h1>Hermes 底盘面板</h1><div class="muted" id="endpoint">正在读取连接信息…</div></div><span class="badge" id="connection">连接中</span></header>
+<p class="muted">操作前停止导航程序。每次点击执行一个有限距离或角度的任务；路径由底盘规划，不是按住持续遥控。</p>
+<div class="grid"><section class="card"><h2>底盘状态</h2><div class="values">
+<div><span class="muted">电量</span><div class="value" id="battery">—</div></div>
+<div><span class="muted">充电 / 对桩</span><div class="value" id="charging">—</div></div>
+<div><span class="muted">位置 · 米</span><div class="value" id="pose">—</div></div>
+<div><span class="muted">朝向 · 度</span><div class="value" id="yaw">—</div></div>
+</div><p id="slam" class="muted">等待定位状态</p><p id="action">等待任务状态</p><p class="muted" id="updated">尚未更新</p><details><summary>原始状态</summary><pre id="raw"></pre></details></section>
+<section class="card"><h2>操作</h2><label class="check"><input type="checkbox" id="enabled"> 允许运动（确认周围空间及急停可用）</label>
+<label>移动距离 <input type="number" id="distance" value="0.2" min="0.01" max="0.5" step="0.05"> 米</label>
+<label>转向角度 <input type="number" id="angle" value="15" min="1" max="90" step="5"> 度</label>
+<div class="pad"><button data-motion onclick="move('forward',1)">↑ 前方目标</button><button data-motion onclick="move('forward',-1)">↓ 后方目标</button><button data-motion onclick="move('turn',1)">↶ 左转</button><button data-motion onclick="move('turn',-1)">↷ 右转</button></div>
+<button class="dock" data-motion onclick="move('dock',0)">⌂ 回桩充电</button>
+<button class="stop" onclick="stopMotion()">停止 / 取消当前任务</button><div class="muted">停止通过网络取消底盘任务，不代替物理急停。关闭页面不会停止已提交任务。</div></section></div>
+<section class="card"><h2>操作反馈</h2><div id="notice" role="status">启动面板不会自动移动底盘。</div><pre id="log"></pre></section>
+<script>
+const token='__TOKEN__';let online=false,busy=false,active=true,refreshing=false;
+const el=id=>document.getElementById(id);
+function buttons(){document.querySelectorAll('[data-motion]').forEach(b=>b.disabled=!online||busy||active||!el('enabled').checked)}
+el('enabled').onchange=buttons;buttons();
+async function api(path,body){const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Control-Token':token,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(data.error||r.statusText);return data}
+function note(text,error=false){el('notice').textContent=text;el('notice').className=error?'error':'';el('log').textContent=(new Date().toLocaleTimeString()+' '+text+'\n'+el('log').textContent).slice(0,12000)}
+async function refresh(){if(refreshing)return;refreshing=true;try{const s=await api('/status');online=true;el('connection').textContent='已连接';el('connection').className='badge';el('endpoint').textContent=s.base_url;el('battery').textContent=(s.power.batteryPercentage??'—')+' %';el('charging').textContent=(s.power.isCharging===true?'充电中':s.power.isCharging===false?'未充电':'未知')+' / '+(s.power.dockingStatus==='on_dock'?'已对桩':s.power.dockingStatus==='not_on_dock'?'未对桩':'未知');el('pose').textContent=s.pose.x_m.toFixed(2)+', '+s.pose.y_m.toFixed(2);el('yaw').textContent=(s.pose.yaw_rad*180/Math.PI).toFixed(1);el('slam').textContent=(s.slam.mapping_enabled?'建图':s.slam.localization_enabled?'定位':'仅里程计')+' · 定位质量 '+s.slam.localization_quality+' · 健康 '+(s.health.has_error||s.health.has_fatal?'异常':s.health.has_warning?'警告':'正常');active=Object.keys(s.action).length>0&&s.action.state?.status!==4;el('action').textContent=Object.keys(s.action).length?'任务 '+s.action.action_id+' · '+s.action.action_name+' · 状态 '+s.action.state?.status+' · 结果 '+(s.action.state?.result??'—'):'当前无任务';el('raw').textContent=JSON.stringify(s,null,2);el('updated').textContent='最后更新 '+new Date().toLocaleTimeString()}catch(e){online=false;el('enabled').checked=false;el('connection').textContent='连接失败';el('connection').className='badge error';el('updated').textContent='状态已失效：'+e.message}finally{refreshing=false;buttons()}}
+async function move(kind,sign){if(busy||!online||active||!el('enabled').checked)return;const input=el(kind==='turn'?'angle':'distance');if(kind!=='dock'&&!input.reportValidity())return;busy=true;buttons();note('正在提交…');try{const r=await api('/move',{kind,value:kind==='dock'?0:Number(input.value)*sign,enabled:el('enabled').checked});active=true;note(r.message)}catch(e){el('enabled').checked=false;note(e.message,true)}finally{busy=false;buttons();refresh()}}
+async function stopMotion(){el('enabled').checked=false;buttons();note('正在请求取消…');try{note((await api('/stop',{})).message)}catch(e){note('取消未确认：'+e.message+' 请使用物理急停。',true)}refresh()}
+document.addEventListener('keydown',e=>{if(e.code==='Escape'&&!e.repeat){e.preventDefault();stopMotion()}});
+async function poll(){await refresh();setTimeout(poll,2000)}poll();
+</script></html>
