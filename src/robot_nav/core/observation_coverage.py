@@ -241,20 +241,17 @@ def _aligned_depth_available(frame: NavigationFrame) -> bool:
     depth, rgb, intrinsics = frame.depth, frame.rgb, frame.camera_intrinsics
     if depth is None or rgb is None or intrinsics is None:
         return False
-    try:
-        height = len(depth)
-        width = len(depth[0]) if height else 0
-        return (
-            height > 0 and width > 0 and len(rgb) == height
-            and all(len(row) == width for row in depth)
-            and all(len(row) == width for row in rgb)
-            and all(math.isfinite(float(value)) for value in (
-                intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy,
-            ))
-            and intrinsics.fx > 0.0 and intrinsics.fy > 0.0
-        )
-    except (TypeError, ValueError):
-        return False
+    height = len(depth)
+    width = len(depth[0]) if height else 0
+    return (
+        height > 0 and width > 0 and len(rgb) == height
+        and all(len(row) == width for row in depth)
+        and all(len(row) == width for row in rgb)
+        and all(math.isfinite(float(value)) for value in (
+            intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy,
+        ))
+        and intrinsics.fx > 0.0 and intrinsics.fy > 0.0
+    )
 
 
 def _depth_supports_point(frame: NavigationFrame, point: WorldPoint) -> bool:
@@ -283,11 +280,7 @@ def _depth_supports_point(frame: NavigationFrame, point: WorldPoint) -> bool:
             return False
         for dy, dx in ((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)):
             value = depth[row + dy][col + dx]
-            if value is None or isinstance(value, bool):
-                return False
-            try:
-                value = float(value)
-            except (TypeError, ValueError):
+            if value is None:
                 return False
             if (
                 not math.isfinite(value) or value <= 0.0

@@ -251,9 +251,9 @@ def horizontal_camera_view(frame: NavigationFrame) -> Tuple[float, float]:
     intrinsics = frame.camera_intrinsics
     if intrinsics is None:
         raise ValueError("缺少相机内参")
-    if not _is_finite(intrinsics.fx) or float(intrinsics.fx) <= 0.0:
+    if not math.isfinite(intrinsics.fx) or float(intrinsics.fx) <= 0.0:
         raise ValueError("相机 fx 必须为正有限值")
-    if not _is_finite(intrinsics.cx):
+    if not math.isfinite(intrinsics.cx):
         raise ValueError("相机 cx 必须为有限值")
 
     width = _camera_image_width(frame)
@@ -268,7 +268,7 @@ def horizontal_camera_view(frame: NavigationFrame) -> Tuple[float, float]:
     right_extent = math.atan2(right_pixels, focal_length)
     intrinsic_center_offset = (left_extent - right_extent) / 2.0
     camera_yaw = frame.camera_extrinsics_in_robot.yaw_rad
-    if not _is_finite(camera_yaw):
+    if not math.isfinite(camera_yaw):
         raise ValueError("相机 yaw 外参必须为有限值")
     return (
         float(camera_yaw) + intrinsic_center_offset,
@@ -316,23 +316,10 @@ def _camera_image_width(frame: NavigationFrame) -> int:
     image = frame.rgb if frame.rgb is not None else frame.depth
     if image is None:
         raise ValueError("缺少 RGB 或深度图像尺寸")
-    try:
-        height = len(image)
-        width = len(image[0]) if height else 0
-    except (TypeError, IndexError):
-        raise ValueError("相机图像必须为非空二维数组") from None
+    width = len(image[0]) if image else 0
     if width < 1:
         raise ValueError("相机图像宽度必须大于零")
     return width
-
-
-def _is_finite(value: object) -> bool:
-    if isinstance(value, bool):
-        return False
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError):
-        return False
 
 
 __all__ = [

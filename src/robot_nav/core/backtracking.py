@@ -27,7 +27,7 @@ from .models import (
     SearchPhase,
     SearchState,
 )
-from .navigation_io import invalid_result, make_action, result
+from .navigation_io import make_action, result
 from .timing import TimingSpans
 
 BACKTRACK_ARRIVAL_M = 0.25
@@ -120,12 +120,9 @@ def continue_backtracking(
             f"返回动作已结束，距父节点 {distance:.3f} m，超过 {BACKTRACK_ARRIVAL_M:.2f} m 到达容差。",
             issue_kind="not_arrived", actual_pose=frame.pose,
         )
-    try:
-        state, candidates = refresh_frontier_regions(frame, state,
-            timings=timings, frontier_cache=frontier_cache,
-        )
-    except ValueError as exc:
-        return invalid_result(state, f"回到父节点后无法刷新 Frontier：{exc}")
+    state, candidates = refresh_frontier_regions(frame, state,
+        timings=timings, frontier_cache=frontier_cache,
+    )
     return begin_backtracking(frame, state, candidates, timings=timings, frontier_cache=frontier_cache)
 
 

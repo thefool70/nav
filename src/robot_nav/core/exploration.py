@@ -32,7 +32,7 @@ from .models import (
     SearchPhase,
     SearchState,
 )
-from .navigation_io import invalid_result, make_action, result
+from .navigation_io import make_action, result
 from .scan import shortest_turn_to_heading
 from .timing import TimingSpans, measure_stage
 
@@ -47,12 +47,9 @@ def select_exploration_target(
 ) -> NavigationResult:
     """优先选择新 Frontier；新候选耗尽时沿当前分支逐个返回父节点。"""
     explored_state = mark_latest_committed_explored(state)
-    try:
-        explored_state, candidates = refresh_frontier_regions(frame, explored_state,
-            timings=timings, frontier_cache=frontier_cache,
-        )
-    except ValueError as exc:
-        return invalid_result(state, f"障碍图无法用于 Frontier：{exc}")
+    explored_state, candidates = refresh_frontier_regions(frame, explored_state,
+        timings=timings, frontier_cache=frontier_cache,
+    )
     if not candidates:
         from .backtracking import begin_backtracking
 

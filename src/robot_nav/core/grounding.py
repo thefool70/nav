@@ -46,22 +46,16 @@ def ground_target_bbox(
     if not _valid_extrinsics(camera_extrinsics_in_robot):
         return TargetEstimate(False, "camera_extrinsics_invalid")
     if (
-        not _is_finite(min_depth_m)
-        or isinstance(max_depth_m, bool)
-        or not isinstance(max_depth_m, (int, float))
+        not math.isfinite(min_depth_m)
         or math.isnan(float(max_depth_m))
         or float(min_depth_m) < 0.0
         or float(max_depth_m) <= float(min_depth_m)
     ):
         return TargetEstimate(False, "target_depth_range_invalid")
-    if (
-        isinstance(min_valid_points, bool)
-        or not isinstance(min_valid_points, int)
-        or min_valid_points < 1
-    ):
+    if min_valid_points < 1:
         return TargetEstimate(False, "target_min_points_invalid")
     if no_valid_depth_fallback_m is not None and (
-        not _is_finite(no_valid_depth_fallback_m)
+        not math.isfinite(no_valid_depth_fallback_m)
         or not (
             float(min_depth_m)
             <= float(no_valid_depth_fallback_m)
@@ -187,7 +181,7 @@ def _depth_points_in_robot(
     for row in rows:
         for col in columns:
             raw_depth = depth[row][col]
-            if raw_depth is None or not _is_finite(raw_depth):
+            if raw_depth is None or not math.isfinite(raw_depth):
                 continue
             forward_camera = float(raw_depth)
             if forward_camera <= 0.0 or not min_depth_m <= forward_camera <= max_depth_m:
@@ -226,7 +220,7 @@ def _depth_points_in_mask(
             col_sum += col_index
 
             raw_depth = depth[row_index][col_index]
-            if raw_depth is None or not _is_finite(raw_depth):
+            if raw_depth is None or not math.isfinite(raw_depth):
                 continue
             forward_camera = float(raw_depth)
             if forward_camera <= 0.0 or not min_depth_m <= forward_camera <= max_depth_m:
@@ -254,10 +248,7 @@ def _normalize_bbox(
     bbox_norm: Sequence[float],
 ) -> Optional[Tuple[float, float, float, float]]:
     """校验归一化 xyxy 目标框。"""
-    try:
-        values = tuple(float(value) for value in bbox_norm)
-    except (TypeError, ValueError):
-        return None
+    values = tuple(bbox_norm)
     if len(values) != 4 or not all(math.isfinite(value) for value in values):
         return None
     x1, y1, x2, y2 = values
@@ -268,10 +259,7 @@ def _normalize_bbox(
 
 def _normalize_depth(depth_m: DepthImage):
     """把任意二维序列冻结为矩形行序列；非法输入返回 None。"""
-    try:
-        rows = tuple(tuple(row) for row in depth_m)
-    except TypeError:
-        return None
+    rows = tuple(tuple(row) for row in depth_m)
     if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
         return None
     return rows
@@ -279,10 +267,7 @@ def _normalize_depth(depth_m: DepthImage):
 
 def _mask_matches_image(mask: MaskImage, height: int, width: int) -> bool:
     """仅校验掩码为与深度图同尺寸的二维矩形。"""
-    try:
-        return len(mask) == height and all(len(row) == width for row in mask)
-    except TypeError:
-        return False
+    return len(mask) == height and all(len(row) == width for row in mask)
 
 
 def _bbox_pixels(
@@ -386,21 +371,21 @@ def _keep_near_points(
 
 
 def _valid_intrinsics(intrinsics: CameraIntrinsics) -> bool:
-    return isinstance(intrinsics, CameraIntrinsics) and all(
-        _is_finite(value)
+    return all(
+        math.isfinite(value)
         for value in (intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy)
     ) and float(intrinsics.fx) > 0.0 and float(intrinsics.fy) > 0.0
 
 
 def _valid_pose(pose: Pose2D) -> bool:
-    return isinstance(pose, Pose2D) and all(
-        _is_finite(value) for value in (pose.x_m, pose.y_m, pose.yaw_rad)
+    return all(
+        math.isfinite(value) for value in (pose.x_m, pose.y_m, pose.yaw_rad)
     )
 
 
 def _valid_extrinsics(extrinsics: CameraExtrinsics) -> bool:
-    return isinstance(extrinsics, CameraExtrinsics) and all(
-        _is_finite(value)
+    return all(
+        math.isfinite(value)
         for value in (
             extrinsics.forward_m,
             extrinsics.left_m,
@@ -410,15 +395,6 @@ def _valid_extrinsics(extrinsics: CameraExtrinsics) -> bool:
             extrinsics.roll_rad,
         )
     )
-
-
-def _is_finite(value: object) -> bool:
-    if isinstance(value, bool):
-        return False
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError):
-        return False
 
 
 __all__ = ["ground_target_bbox"]

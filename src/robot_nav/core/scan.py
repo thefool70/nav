@@ -42,17 +42,11 @@ def build_unobserved_scan_headings(
     )
 
 
-def _require_finite_angle(value, name):
-    """返回 float(value)，拒绝 bool、不可转换与非有限角度，统一抛 ValueError。"""
-    if isinstance(value, bool):
+def _require_finite_angle(value: float, name: str) -> float:
+    """扫描规划要求有限弧度角，不做字符串或其他类型的兼容转换。"""
+    if not math.isfinite(value):
         raise ValueError(f"{name} must be a finite angle")
-    try:
-        converted = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{name} must be a finite angle") from None
-    if not math.isfinite(converted):
-        raise ValueError(f"{name} must be a finite angle")
-    return converted
+    return value
 
 
 def build_uniform_scan_headings(
@@ -61,10 +55,10 @@ def build_uniform_scan_headings(
     """返回从 start_heading_rad 起绕一周均匀分布的 view_count 个扫描朝向（弧度），
     默认四向（相对起点 0°、90°、180°、270°）。
 
-    返回朝向全部用 wrap_angle 归一化到 [-π, π)。view_count 必须为正整数
-    （不含 bool），start_heading_rad 必须为有限角度。
+    返回朝向全部用 wrap_angle 归一化到 [-π, π)。view_count 必须为正整数，
+    start_heading_rad 必须为有限角度。
     """
-    if isinstance(view_count, bool) or not isinstance(view_count, int) or view_count < 1:
+    if view_count < 1:
         raise ValueError("view_count must be a positive integer")
     start_heading = _require_finite_angle(start_heading_rad, "start_heading_rad")
     step_rad = 2.0 * math.pi / view_count

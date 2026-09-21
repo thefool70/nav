@@ -151,8 +151,6 @@ def extract_frontiers(
         original_frontier_count = len(frontier_cells)
         # 未膨胀图与探索图同格网时才分类，避免膨胀切断未知区域后误判为小孔洞。
         if visibility_map is not None and hole_area_limit > 0.0:
-            if not isinstance(visibility_map, ObstacleMap):
-                raise ValueError("visibility_map must be an ObstacleMap")
             if (
                 visibility_map.frame_id == obstacle_map.frame_id
                 and visibility_map.origin == obstacle_map.origin
@@ -355,35 +353,12 @@ def _frontier_span_m(component: Set[Cell], resolution_m: float) -> float:
 
 def _normalize_grid(obstacle_map: ObstacleMap) -> GridValues:
     """校验并冻结矩形占用栅格。"""
-    if not isinstance(obstacle_map, ObstacleMap):
-        raise ValueError("obstacle_map must be an ObstacleMap")
-    try:
-        rows = tuple(tuple(row) for row in obstacle_map.occupancy)
-    except TypeError:
-        raise ValueError("occupancy must be a rectangular grid") from None
+    rows = tuple(tuple(row) for row in obstacle_map.occupancy)
     if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
         raise ValueError("occupancy must be a non-empty rectangular grid")
-
-    normalized = []
-    for row in rows:
-        normalized_row = []
-        for value in row:
-            if value is None:
-                normalized_row.append(None)
-                continue
-            if isinstance(value, bool):
-                raise ValueError("occupancy values must be finite numbers or None")
-            try:
-                converted = float(value)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "occupancy values must be finite numbers or None"
-                ) from None
-            if not math.isfinite(converted):
-                raise ValueError("occupancy values must be finite numbers or None")
-            normalized_row.append(converted)
-        normalized.append(tuple(normalized_row))
-    return tuple(normalized)
+    if any(value is not None and not math.isfinite(value) for row in rows for value in row):
+        raise ValueError("occupancy values must be finite numbers or None")
+    return rows
 
 
 def _free_cells(grid: GridValues) -> Set[Cell]:
@@ -525,20 +500,10 @@ def _normalize_points(
     values: Sequence[Tuple[float, float]],
 ) -> Tuple[Tuple[float, float], ...]:
     """校验用于候选抑制的世界坐标。"""
-    points = []
-    try:
-        iterator = iter(values)
-    except TypeError:
-        raise ValueError("excluded_world_xy must contain finite points") from None
-    for value in iterator:
-        try:
-            x_m, y_m = float(value[0]), float(value[1])
-        except (TypeError, ValueError, IndexError):
-            raise ValueError("excluded_world_xy must contain finite points") from None
-        if not math.isfinite(x_m) or not math.isfinite(y_m):
-            raise ValueError("excluded_world_xy must contain finite points")
-        points.append((x_m, y_m))
-    return tuple(points)
+    points = tuple(values)
+    if any(not math.isfinite(x) or not math.isfinite(y) for x, y in points):
+        raise ValueError("excluded_world_xy must contain finite points")
+    return points
 
 
 def _is_excluded(
@@ -571,37 +536,24 @@ def _normalize_semantic_scores(
     """校验 Frontier ID 到 0-1 语义分数的映射。"""
     if values is None:
         return {}
-    if not isinstance(values, Mapping):
-        raise ValueError("semantic_scores must be a mapping or None")
     result = {}
     for candidate_id, raw_score in values.items():
-        if not isinstance(candidate_id, str) or not candidate_id:
-            raise ValueError("semantic_scores keys must be non-empty strings")
-        if not _is_finite(raw_score) or not 0.0 <= float(raw_score) <= 1.0:
+        if not math.isfinite(raw_score) or not 0.0 <= float(raw_score) <= 1.0:
             raise ValueError("semantic_scores values must be between 0 and 1")
         result[candidate_id] = float(raw_score)
     return result
 
 
 def _positive_finite(value: float, name: str) -> float:
-    if not _is_finite(value) or float(value) <= 0.0:
+    if not math.isfinite(value) or float(value) <= 0.0:
         raise ValueError(f"{name} must be positive and finite")
     return float(value)
 
 
 def _non_negative_finite(value: float, name: str) -> float:
-    if not _is_finite(value) or float(value) < 0.0:
+    if not math.isfinite(value) or float(value) < 0.0:
         raise ValueError(f"{name} must be non-negative and finite")
     return float(value)
-
-
-def _is_finite(value: object) -> bool:
-    if isinstance(value, bool):
-        return False
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError):
-        return False
 
 
 __all__ = [

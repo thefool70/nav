@@ -51,7 +51,7 @@ def navigate(
     ``frame`` 来自底盘 Adapter，感知结果由运行层从异步视觉队列取得后传入。
     函数本身不读设备、不调用模型，也不发送命令。
     """
-    reason = validation_error(frame, goal, state, object_localization)
+    reason = validation_error(frame, goal, object_localization)
     if reason is not None:
         return invalid_result(state, reason)
 
@@ -80,12 +80,9 @@ def navigate(
         from .frontier_regions import refresh_frontier_regions
         from .scan_behavior import continue_scanning, reset_scan_after_move
 
-        try:
-            refreshed, candidates = refresh_frontier_regions(
-                frame, working_state, timings=timings, frontier_cache=frontier_cache,
-            )
-        except ValueError as exc:
-            return invalid_result(working_state, str(exc))
+        refreshed, candidates = refresh_frontier_regions(
+            frame, working_state, timings=timings, frontier_cache=frontier_cache,
+        )
         if candidates:
             return continue_scanning(frame, goal, reset_scan_after_move(refreshed),
                 timings=timings, frontier_cache=frontier_cache,
