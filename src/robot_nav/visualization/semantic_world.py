@@ -57,6 +57,7 @@ class SemanticWorldNodes:
             self._render(node)
 
     def record_queue_event(self, event):
+        """根据队列事件更新任务节点的显示状态与定位进度，不修改搜索状态。"""
         name = event["event"]
         job_id = event.get("job_id")
         if name == "queued":
@@ -97,6 +98,7 @@ class SemanticWorldNodes:
                 self._render(node)
 
     def record_interaction(self, interaction):
+        """把模型请求及 F 标记关联到固定视角节点，响应到达时更新显示分数。"""
         context = interaction.context
         job_id = context.get("job_id")
         if interaction.task == "object_localization":
@@ -133,6 +135,7 @@ class SemanticWorldNodes:
             self._set_job_state(job_id, "running")
 
     def record_cycle(self, result):
+        """标记哪些线索和评分已被导航使用，方便区分模型已返回与算法已接收。"""
         for item in result.debug.details.get("semantic_received_jobs", ()):
             for path in self._jobs.get(item["job_id"], ()):
                 self._nodes[path]["navigation"] = "received"
@@ -164,7 +167,50 @@ class SemanticWorldNodes:
                 self._set_node_state(self._active_local_path, "failed", result.debug.details.get("reason", ""))
             self._active_local_path = None
 
+    def refresh_panels(self, font):
+        """每个回调结束后统一更新任务标记和卡片，不在单个视角更新中反复重画。"""
+        if not self._dirty_groups:
+            return
+        groups = {}
+        for node in self._nodes.values():
+            if node["kind"] == "view" and node["map_id"] == self._map_id:
+                groups.setdefault(self._group_path(node), []).append(node)
+        for path in self._dirty_groups:
+            if path not in groups:
+                continue
+            nodes = groups[path]
+            card = self._rr.Image(render_observation_card(self._group_label(nodes), nodes, NODE_COLORS, font))
+            self._cards[path] = card
+            # 任务点预览整组，V 点预览单图评分卡；无标注原图位于 V/rgb。
+            self._log(path, [card.buffer, card.format])
+            for node in nodes:
+                view_card = self._rr.Image(render_observation_card(
+                    f"{node['label']} / {len(nodes)} views in this capture", [node], NODE_COLORS, font,
+                ))
+                self._view_cards[node["path"]] = view_card
+                self._log(node["path"], [view_card.buffer, view_card.format])
+        self._render_job_markers(groups)
+        focused = None
+        if self._focus in self._nodes:
+            node = self._nodes[self._focus]
+            if node["map_id"] == self._map_id:
+                focused = node
+        elif self._focus in groups:
+            # 固定面板只放大一张图，避免八视角拼图缩小后又看不清。
+            # 优先第一条目标线索，否则展示语义分最高的视角，未返回时用第一张。
+            focused = min(groups[self._focus], key=lambda node: (
+                0 if node.get("clue_order") else 1,
+                node.get("clue_order", 0),
+                -max((score["value"] or 0 for score in node["scores"].values()), default=0),
+                node["view_id"],
+            ))
+        if focused is not None:
+            self._log("observations/focus", self._view_cards[focused["path"]])
+        self._log("observations/index", self._rr.TextDocument(self._index_text(groups), media_type="text/markdown"))
+        self._dirty_groups.clear()
+
     def _register_job(self, event):
+        """读取快照元数据，为每个拍摄视角建立节点并关联 job/view 与线索 ID。"""
         folder = Path(event["snapshot"])
         metadata = json.loads((folder / "snapshot.json").read_text())
         job_id = event["job_id"]
@@ -197,6 +243,7 @@ class SemanticWorldNodes:
         self._render(node)
 
     def _complete_job(self, job_id, result):
+        """将检测和评分结果写入显示节点；检测失败与未检出目标使用不同状态。"""
         for path in self._jobs.get(job_id, ()):
             node = self._nodes[path]
             scores = result.get("frontier_scores", {})
@@ -222,6 +269,7 @@ class SemanticWorldNodes:
             self._render(self._nodes[path])
 
     def _render(self, node):
+        """绘制节点及诊断属性；原图只上传一次，任务卡片另行批量刷新。"""
         self._dirty_groups.add(self._group_path(node))
         if node["map_id"] != self._map_id:
             return
@@ -266,48 +314,6 @@ class SemanticWorldNodes:
 
     def _group_path(self, node):
         return self._job_path(node["job_id"])
-
-    def refresh_panels(self, font):
-        """每个回调结束后统一更新任务标记和卡片，不在单个视角更新中反复重画。"""
-        if not self._dirty_groups:
-            return
-        groups = {}
-        for node in self._nodes.values():
-            if node["kind"] == "view" and node["map_id"] == self._map_id:
-                groups.setdefault(self._group_path(node), []).append(node)
-        for path in self._dirty_groups:
-            if path not in groups:
-                continue
-            nodes = groups[path]
-            card = self._rr.Image(render_observation_card(self._group_label(nodes), nodes, NODE_COLORS, font))
-            self._cards[path] = card
-            # 任务点预览整组，V 点预览单图评分卡；无标注原图位于 V/rgb。
-            self._log(path, [card.buffer, card.format])
-            for node in nodes:
-                view_card = self._rr.Image(render_observation_card(
-                    f"{node['label']} / {len(nodes)} views in this capture", [node], NODE_COLORS, font,
-                ))
-                self._view_cards[node["path"]] = view_card
-                self._log(node["path"], [view_card.buffer, view_card.format])
-        self._render_job_markers(groups)
-        focused = None
-        if self._focus in self._nodes:
-            node = self._nodes[self._focus]
-            if node["map_id"] == self._map_id:
-                focused = node
-        elif self._focus in groups:
-            # 固定面板只放大一张图，避免八视角拼图缩小后又看不清。
-            # 优先第一条目标线索，否则展示语义分最高的视角，未返回时用第一张。
-            focused = min(groups[self._focus], key=lambda node: (
-                0 if node.get("clue_order") else 1,
-                node.get("clue_order", 0),
-                -max((score["value"] or 0 for score in node["scores"].values()), default=0),
-                node["view_id"],
-            ))
-        if focused is not None:
-            self._log("observations/focus", self._view_cards[focused["path"]])
-        self._log("observations/index", self._rr.TextDocument(self._index_text(groups), media_type="text/markdown"))
-        self._dirty_groups.clear()
 
     @staticmethod
     def _group_label(nodes):

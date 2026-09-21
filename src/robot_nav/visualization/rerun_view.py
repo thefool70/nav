@@ -1,12 +1,14 @@
-"""把导航决策帧和 Adapter 运动帧记录到 Rerun。"""
+"""把导航决策帧和 Adapter 运动帧记录到 Rerun。
+
+先读 RerunVisualizer 的公共 log_* 回调，再读内部记录步骤。
+面板生成见 panels.py，坐标与轮廓计算见 view_geometry.py。
+"""
 
 from __future__ import annotations
 
-from ..core.actions import action_command
-
 import math
-import json
 import os
+import json
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +18,7 @@ from uuid import uuid4
 import numpy as np
 
 from ..adapters.perception import VlmInteraction
-from ..core.geometry import world_to_nearest_grid_cell
+from ..core.actions import action_command
 from ..core.models import (
     DepthImage,
     Grid,
@@ -29,8 +31,18 @@ from ..core.models import (
     SearchDirectionState,
     TargetObservation,
 )
-from .vlm_trace import VlmTraceHistory, context_text, job_path, request_path
+from .vlm_trace import VlmTraceHistory, job_path, request_path
 from .semantic_world import SemanticWorldNodes
+from .panels import (
+    BBOX_RGB, ascii_only, frontier_table_text, load_panel_font, motion_status_text,
+    print_font_notice_once, render_status_image, render_vlm_interaction_card,
+    status_lines, target_mask_to_numpy, vlm_card_text,
+)
+from .view_geometry import (
+    command_world_vector, dashed_line_segments, point_along_heading, robot_triangle_world,
+    world_to_map_pixel, world_to_view_point, world_to_view_vector,
+    world_yaw_to_map_vector, world_yaw_to_view_vector,
+)
 
 
 UNKNOWN_RGB = (90, 90, 90)
@@ -41,7 +53,6 @@ TRAJECTORY_RGB = (0, 120, 255)
 COMMAND_RGB = (255, 140, 0)
 MOTION_TARGET_RGB = (255, 70, 70)
 MOTION_PATH_RGB = (190, 90, 255)
-BBOX_RGB = (0, 255, 80)
 SAM2_MASK_RGB = (255, 60, 180)
 SAM2_MASK_ALPHA = 0.38
 MAP_FRONTIER_RGB = (0, 220, 100)
@@ -65,41 +76,10 @@ DIRECTION_COLORS = {
 
 COMMAND_HEADING_LENGTH_M = 0.6
 SCAN_HEADING_LENGTH_M = 1.2
-HISTORY_DASH_LENGTH_M = 0.12
-HISTORY_DASH_GAP_M = 0.08
-ROBOT_FRONT_M = 0.30
-ROBOT_REAR_M = 0.20
-ROBOT_HALF_WIDTH_M = 0.22
 ROBOT_LINE_RADIUS_M = 0.035
 OCCUPANCY_THRESHOLD = 0.5
 
-STATUS_IMAGE_WIDTH = 560
-STATUS_FONT_SIZE = 16
-STATUS_LINE_SPACING_PX = 6
-STATUS_PADDING_PX = 12
-STATUS_BG_RGB = (24, 24, 24)
-STATUS_TEXT_RGB = (235, 235, 235)
 
-VLM_CARD_MIN_WIDTH = 960
-VLM_CARD_MAX_WIDTH = 1400
-VLM_CARD_PADDING_PX = 24
-VLM_CARD_GAP_PX = 14
-VLM_CARD_BORDER_RGB = (75, 90, 105)
-VLM_CARD_TITLE_RGB = (100, 210, 255)
-VLM_CARD_SECTION_RGB = (255, 190, 90)
-VLM_CARD_IMAGE_BORDER_RGB = (120, 135, 150)
-
-STATUS_FONT_CANDIDATES = (
-    "/mnt/c/Windows/Fonts/msyh.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-    "/usr/share/fonts/truetype/arphic/uming.ttc",
-    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-)
-
-_FONT_NOTICE_PRINTED = False
 RERUN_SERVER_MEMORY_LIMIT = "25%"
 
 
@@ -132,9 +112,9 @@ class RerunVisualizer:
         self._vlm_trace = VlmTraceHistory()
         self._world_nodes = SemanticWorldNodes(rr, self._log)
         self._object_progress = None
-        self._panel_font = _load_panel_font()
+        self._panel_font = load_panel_font()
         if self._panel_font is None:
-            _print_font_notice_once()
+            print_font_notice_once()
         rr.init("robot-nav")
         live_recording = rr.get_data_recording()
         if live_recording is None:
@@ -184,6 +164,65 @@ class RerunVisualizer:
             flush=True,
         )
 
+    def log_cycle(
+        self,
+        frame: NavigationFrame,
+        observation: Optional[TargetObservation],
+        result: NavigationResult,
+    ) -> None:
+        """记录算法决策帧及其观测、命令和状态。"""
+        with self._log_lock:
+            self._log_cycle(frame, observation, result)
+
+    def log_motion_frame(self, frame: NavigationFrame) -> None:
+        """记录 Adapter 执行动作后的传感器帧，不推进算法状态。"""
+        with self._log_lock:
+            self._log_motion_frame(frame)
+
+    def log_motion_plan(
+        self,
+        target_world_xy: Optional[Tuple[float, float]],
+        remaining_path_world_xy: Tuple[Tuple[float, float], ...],
+    ) -> None:
+        """显示 Adapter 实际采用的目标与规划路径。"""
+        with self._log_lock:
+            if self._sample_index == 0:
+                self._begin_sample()
+            else:
+                self._set_frame_time(self._sample_index)
+            self._log_motion_plan(
+                target_world_xy,
+                remaining_path_world_xy,
+            )
+
+    def log_vlm_interaction(
+        self,
+        interaction: VlmInteraction,
+    ) -> None:
+        """完整卡片按真实到达时刻记录，简表和归档通过请求编号关联。"""
+        with self._log_lock:
+            self._log_vlm_interaction(interaction)
+
+    def log_semantic_queue_event(self, event: Mapping[str, Any]) -> None:
+        """接收 FIFO 生命周期事件；任务编号与模型请求编号分别显示。"""
+        with self._log_lock:
+            self._begin_sample()
+            self._vlm_trace.record_queue_event(event, self._sample_index)
+            self._world_nodes.record_queue_event(event)
+            if event["event"].startswith("object_"):
+                previous = self._object_progress if event["event"] == "object_localized" else None
+                self._object_progress = {**(previous or {}), **event}
+                if event["event"] == "object_localized":
+                    self._object_progress["stage"] = "finished"
+                self._log_object_progress()
+            job_id = event.get("job_id")
+            job_ids = () if event["event"].startswith("object_") else (
+                (job_id,) if job_id is not None else event.get("job_ids", ())
+            )
+            for key in job_ids:
+                self._log_vlm_job(key)
+            self._log_vlm_overview()
+
     def _log(
         self,
         entity_path: str,
@@ -199,16 +238,6 @@ class RerunVisualizer:
         """每个回调线程都为两个记录流设置相同的 frame 时间。"""
         for recording in self._recordings:
             self._rr.set_time_sequence("frame", sample_index, recording=recording)
-
-    def log_cycle(
-        self,
-        frame: NavigationFrame,
-        observation: Optional[TargetObservation],
-        result: NavigationResult,
-    ) -> None:
-        """记录算法决策帧及其观测、命令和状态。"""
-        with self._log_lock:
-            self._log_cycle(frame, observation, result)
 
     def _log_cycle(
         self,
@@ -243,10 +272,6 @@ class RerunVisualizer:
         self._log_status(frame, observation, result)
         self._log_vlm_overview()
 
-    def log_motion_frame(self, frame: NavigationFrame) -> None:
-        """记录 Adapter 执行动作后的传感器帧，不推进算法状态。"""
-        with self._log_lock:
-            self._log_motion_frame(frame)
 
     def _log_motion_frame(self, frame: NavigationFrame) -> None:
         self._begin_sample()
@@ -258,22 +283,6 @@ class RerunVisualizer:
         self._log_robot_pose(frame)
         if self._last_result is not None:
             self._log_motion_status(frame, self._last_result)
-
-    def log_motion_plan(
-        self,
-        target_world_xy: Optional[Tuple[float, float]],
-        remaining_path_world_xy: Tuple[Tuple[float, float], ...],
-    ) -> None:
-        """显示 Adapter 实际采用的目标与规划路径。"""
-        with self._log_lock:
-            if self._sample_index == 0:
-                self._begin_sample()
-            else:
-                self._set_frame_time(self._sample_index)
-            self._log_motion_plan(
-                target_world_xy,
-                remaining_path_world_xy,
-            )
 
     def _log_motion_plan(
         self,
@@ -288,7 +297,7 @@ class RerunVisualizer:
             )
             return
 
-        target_view = _world_to_view_point(target_world_xy)
+        target_view = world_to_view_point(target_world_xy)
         self._log(
             "world/motion_plan/target",
             self._rr.Points2D(
@@ -302,7 +311,7 @@ class RerunVisualizer:
                 "world/motion_plan/path",
                 self._rr.LineStrips2D(
                     [[
-                        _world_to_view_point(point)
+                        world_to_view_point(point)
                         for point in remaining_path_world_xy
                     ]],
                     colors=[MOTION_PATH_RGB],
@@ -315,7 +324,7 @@ class RerunVisualizer:
         frame = self._last_frame
         if frame is None:
             return
-        target_pixel = _world_to_map_pixel(target_world_xy, frame)
+        target_pixel = world_to_map_pixel(target_world_xy, frame)
         if target_pixel is None:
             self._clear("map/occupancy/motion_plan/target")
         else:
@@ -332,7 +341,7 @@ class RerunVisualizer:
         path_pixels = tuple(
             pixel
             for point in remaining_path_world_xy
-            for pixel in [_world_to_map_pixel(point, frame)]
+            for pixel in [world_to_map_pixel(point, frame)]
             if pixel is not None
         )
         if (
@@ -351,16 +360,6 @@ class RerunVisualizer:
         else:
             self._clear("map/occupancy/motion_plan/path")
 
-
-
-    def log_vlm_interaction(
-        self,
-        interaction: VlmInteraction,
-    ) -> None:
-        """完整卡片按真实到达时刻记录，简表和归档通过请求编号关联。"""
-        with self._log_lock:
-            self._log_vlm_interaction(interaction)
-
     def _log_vlm_interaction(
         self,
         interaction: VlmInteraction,
@@ -370,7 +369,7 @@ class RerunVisualizer:
         self._world_nodes.record_interaction(interaction)
         self._log_vlm_card(interaction, "model/interaction", request_path(interaction.interaction_id))
         self._log(request_path(interaction.interaction_id) + "/text", self._rr.TextDocument(
-            _vlm_card_text(interaction), media_type="text/plain",
+            vlm_card_text(interaction), media_type="text/plain",
         ))
         self._log_vlm_overview()
         if interaction.phase == "response":
@@ -381,32 +380,12 @@ class RerunVisualizer:
         """用本机 CJK 字体渲染单一卡片，避免 Rerun 中文字体问题。"""
         if self._panel_font is None:
             entity = self._rr.TextDocument(
-                _ascii_only(_vlm_card_text(interaction)), media_type="text/plain",
+                ascii_only(vlm_card_text(interaction)), media_type="text/plain",
             )
         else:
-            entity = self._rr.Image(_render_vlm_interaction_card(self._panel_font, interaction))
+            entity = self._rr.Image(render_vlm_interaction_card(self._panel_font, interaction))
         for path in paths:
             self._log(path, entity)
-
-    def log_semantic_queue_event(self, event: Mapping[str, Any]) -> None:
-        """接收 FIFO 生命周期事件；任务编号与模型请求编号分别显示。"""
-        with self._log_lock:
-            self._begin_sample()
-            self._vlm_trace.record_queue_event(event, self._sample_index)
-            self._world_nodes.record_queue_event(event)
-            if event["event"].startswith("object_"):
-                previous = self._object_progress if event["event"] == "object_localized" else None
-                self._object_progress = {**(previous or {}), **event}
-                if event["event"] == "object_localized":
-                    self._object_progress["stage"] = "finished"
-                self._log_object_progress()
-            job_id = event.get("job_id")
-            job_ids = () if event["event"].startswith("object_") else (
-                (job_id,) if job_id is not None else event.get("job_ids", ())
-            )
-            for key in job_ids:
-                self._log_vlm_job(key)
-            self._log_vlm_overview()
 
     def _log_vlm_job(self, job_id: int) -> None:
         self._log(job_path(job_id), self._rr.TextDocument(
@@ -451,7 +430,7 @@ class RerunVisualizer:
         if self._panel_font is None:
             self._log("navigation/status", self._rr.TextDocument(text))
         else:
-            self._log("navigation/status", self._rr.Image(_render_status_image(self._panel_font, lines)))
+            self._log("navigation/status", self._rr.Image(render_status_image(self._panel_font, lines)))
 
     def _begin_sample(self) -> None:
         """决策、运动与模型事件共享递增时间轴，迟到结果不能写回旧帧。"""
@@ -527,7 +506,7 @@ class RerunVisualizer:
             return
 
         image = _rgb_to_numpy(frame.rgb)
-        mask = _target_mask_to_numpy(observation.target_mask)
+        mask = target_mask_to_numpy(observation.target_mask)
         if mask is None:
             status_lines.append("mask: invalid array")
         elif mask.shape != image.shape[:2]:
@@ -645,11 +624,11 @@ class RerunVisualizer:
     def _log_robot_pose(self, frame: NavigationFrame) -> None:
         """用朝向三角形在 world 和 map 中记录机器人实时位姿。"""
         world_position = (frame.pose.x_m, frame.pose.y_m)
-        triangle_world = _robot_triangle_world(frame.pose)
+        triangle_world = robot_triangle_world(frame.pose)
         self._log(
             "world/robot",
             self._rr.LineStrips2D(
-                [[_world_to_view_point(point) for point in triangle_world]],
+                [[world_to_view_point(point) for point in triangle_world]],
                 colors=[ROBOT_RGB],
                 radii=ROBOT_LINE_RADIUS_M,
             ),
@@ -661,7 +640,7 @@ class RerunVisualizer:
             self._log(
                 "world/trajectory",
                 self._rr.LineStrips2D(
-                    [[_world_to_view_point(point) for point in self._trajectory_xy]],
+                    [[world_to_view_point(point) for point in self._trajectory_xy]],
                     colors=[TRAJECTORY_RGB],
                     radii=0.025,
                 ),
@@ -672,8 +651,8 @@ class RerunVisualizer:
         """把机器人朝向三角形换算到翻转后的地图图像坐标。"""
         triangle = tuple(
             pixel
-            for point in _robot_triangle_world(frame.pose)
-            for pixel in [_world_to_map_pixel(point, frame)]
+            for point in robot_triangle_world(frame.pose)
+            for pixel in [world_to_map_pixel(point, frame)]
             if pixel is not None
         )
         if len(triangle) != 4:
@@ -695,7 +674,7 @@ class RerunVisualizer:
         trajectory = tuple(
             pixel
             for point in self._trajectory_xy
-            for pixel in [_world_to_map_pixel(point, frame)]
+            for pixel in [world_to_map_pixel(point, frame)]
             if pixel is not None
         )
         if len(trajectory) < 2:
@@ -722,14 +701,14 @@ class RerunVisualizer:
             return
 
         origin = (frame.pose.x_m, frame.pose.y_m)
-        world_vector = _command_world_vector(command, frame.pose)
+        world_vector = command_world_vector(command, frame.pose)
         target = (origin[0] + world_vector[0], origin[1] + world_vector[1])
-        view_origin = _world_to_view_point(origin)
+        view_origin = world_to_view_point(origin)
         self._log(
             "world/command/translation",
             self._rr.Arrows2D(
                 origins=[view_origin],
-                vectors=[_world_to_view_vector(world_vector)],
+                vectors=[world_to_view_vector(world_vector)],
                 colors=[COMMAND_RGB],
                 radii=0.04,
             ),
@@ -739,7 +718,7 @@ class RerunVisualizer:
             self._rr.Arrows2D(
                 origins=[view_origin],
                 vectors=[
-                    _world_yaw_to_view_vector(
+                    world_yaw_to_view_vector(
                         frame.pose.yaw_rad + command.yaw_rad,
                         COMMAND_HEADING_LENGTH_M,
                     )
@@ -749,8 +728,8 @@ class RerunVisualizer:
             ),
         )
 
-        origin_pixel = _world_to_map_pixel(origin, frame)
-        target_pixel = _world_to_map_pixel(target, frame)
+        origin_pixel = world_to_map_pixel(origin, frame)
+        target_pixel = world_to_map_pixel(target, frame)
         if origin_pixel is None or target_pixel is None:
             self._log(
                 "map/occupancy/command", self._rr.Clear(recursive=True)
@@ -775,7 +754,7 @@ class RerunVisualizer:
             self._rr.Arrows2D(
                 origins=[target_pixel],
                 vectors=[
-                    _world_yaw_to_map_vector(
+                    world_yaw_to_map_vector(
                         frame.pose.yaw_rad + command.yaw_rad,
                         frame,
                         COMMAND_HEADING_LENGTH_M,
@@ -797,12 +776,12 @@ class RerunVisualizer:
             return
 
         origin = (frame.pose.x_m, frame.pose.y_m)
-        view_origin = _world_to_view_point(origin)
+        view_origin = world_to_view_point(origin)
         strips = [
             [
                 view_origin,
-                _world_to_view_point(
-                    _point_along_heading(
+                world_to_view_point(
+                    point_along_heading(
                         origin, heading, SCAN_HEADING_LENGTH_M
                     )
                 ),
@@ -824,7 +803,7 @@ class RerunVisualizer:
             self._rr.Arrows2D(
                 origins=[view_origin],
                 vectors=[
-                    _world_yaw_to_view_vector(
+                    world_yaw_to_view_vector(
                         current_heading, SCAN_HEADING_LENGTH_M
                     )
                 ],
@@ -838,7 +817,7 @@ class RerunVisualizer:
         self._log(
             "navigation/frontiers",
             self._rr.TextDocument(
-                _frontier_table_text(self._current_frontiers, self._selected_frontier_id, result),
+                frontier_table_text(self._current_frontiers, self._selected_frontier_id, result),
                 media_type="text/markdown",
             ),
         )
@@ -853,7 +832,7 @@ class RerunVisualizer:
             candidate_id = str(candidate["candidate_id"])
             labels.append(candidate_id)
             positions.append(
-                _world_to_view_point(
+                world_to_view_point(
                     (
                         float(candidate["world_x_m"]),
                         float(candidate["world_y_m"]),
@@ -884,18 +863,18 @@ class RerunVisualizer:
         link_segments = []
         link_colors = []
         for node in result.state.observation_history:
-            node_view_position = _world_to_view_point(node.position_world_xy)
+            node_view_position = world_to_view_point(node.position_world_xy)
             node_positions.append(node_view_position)
             for direction in node.directions:
                 if direction.command_world_xy is None:
                     continue
                 color = DIRECTION_COLORS[direction.state]
-                candidate_view_position = _world_to_view_point(
+                candidate_view_position = world_to_view_point(
                     direction.command_world_xy
                 )
                 candidate_positions.append(candidate_view_position)
                 candidate_colors.append(color)
-                segments = _dashed_line_segments(
+                segments = dashed_line_segments(
                     node_view_position,
                     candidate_view_position,
                 )
@@ -947,7 +926,7 @@ class RerunVisualizer:
         if self._object_progress is not None:
             self._log_object_progress()
             return
-        text = _motion_status_text(frame, result)
+        text = motion_status_text(frame, result)
         self._log(
             "navigation/motion",
             self._rr.TextDocument(text),
@@ -966,19 +945,19 @@ class RerunVisualizer:
         result: NavigationResult,
     ) -> None:
         """记录状态面板；有 CJK 字体时渲染为图像，否则回退为 ASCII 文本。"""
-        lines = _status_lines(self._target_text, frame, observation, result)
+        lines = status_lines(self._target_text, frame, observation, result)
         # 始终保留可查询文本，离线分析 RRD 不必从中文状态图片做 OCR。
         self._log("navigation/status_text", self._rr.TextDocument("\n".join(lines)))
         if self._panel_font is None:
             self._log(
                 "navigation/status",
                 self._rr.TextDocument(
-                    "\n".join(f"- {_ascii_only(line)}" for line in lines),
+                    "\n".join(f"- {ascii_only(line)}" for line in lines),
                     media_type="text/markdown",
                 ),
             )
             return
-        image = _render_status_image(self._panel_font, lines)
+        image = render_status_image(self._panel_font, lines)
         self._log("navigation/status", self._rr.Image(image))
 
     def _clear(self, path: str) -> None:
@@ -1063,7 +1042,7 @@ def _rgb_to_numpy(rgb: RgbImage) -> np.ndarray:
 
 def _overlay_target_mask(image: np.ndarray, mask: MaskImage) -> np.ndarray:
     """用半透明洋红色显示 SAM2 掩码；非法尺寸时保留原始 RGB。"""
-    mask_array = _target_mask_to_numpy(mask)
+    mask_array = target_mask_to_numpy(mask)
     if mask_array is None or mask_array.shape != image.shape[:2]:
         return image
     if not np.any(mask_array):
@@ -1077,17 +1056,6 @@ def _overlay_target_mask(image: np.ndarray, mask: MaskImage) -> np.ndarray:
         + mask_color * SAM2_MASK_ALPHA
     ).astype(np.uint8)
     return overlay
-
-
-def _target_mask_to_numpy(mask: MaskImage) -> Optional[np.ndarray]:
-    """把矩形二维掩码转换为 bool 数组；非法输入返回 None。"""
-    try:
-        mask_array = np.asarray(mask, dtype=bool)
-    except (TypeError, ValueError):
-        return None
-    if mask_array.ndim != 2 or mask_array.size == 0:
-        return None
-    return mask_array
 
 
 def _draw_bbox_outline(
@@ -1160,785 +1128,6 @@ def _bbox_norm_to_pixel_box(
         (x_min * width, y_min * height),
         ((x_max - x_min) * width, (y_max - y_min) * height),
     )
-
-
-def _vlm_request_metadata(interaction: VlmInteraction) -> str:
-    """构造不含凭据、但覆盖全部模型请求参数的可读文本。"""
-    reasoning = interaction.reasoning_effort or "none"
-    return "\n".join(
-        (
-            f"interaction_id: {interaction.interaction_id}",
-            f"task: {interaction.task}",
-            f"endpoint: {interaction.endpoint_url}",
-            f"model: {interaction.model}",
-            f"api_format: {interaction.api_format}",
-            f"reasoning_effort: {reasoning}",
-            f"max_output_tokens: {interaction.max_output_tokens}",
-            f"request_elapsed_s: {interaction.elapsed_s if interaction.elapsed_s is not None else 'in flight'}",
-            (
-                "image: "
-                f"{interaction.image.width_px}x"
-                f"{interaction.image.height_px} RGB"
-            ),
-        )
-    )
-
-
-def _vlm_card_sections(
-    interaction: VlmInteraction,
-) -> Tuple[Tuple[str, str], ...]:
-    """按请求顺序组织卡片文本，不丢弃模型原始回应。"""
-    sections = [
-        ("来源与编号对应", context_text(interaction.context)),
-        ("请求参数", _vlm_request_metadata(interaction)),
-        ("完整输入提示词", interaction.prompt or "<empty>"),
-    ]
-    if interaction.phase == "request":
-        sections.append(("模型输出", "等待模型返回……"))
-        return tuple(sections)
-
-    sections.extend(
-        (
-            ("Assistant 输出", interaction.assistant_text or "<empty>"),
-            (
-                "完整 HTTP JSON",
-                interaction.response_json or "<no response>",
-            ),
-            ("解析结果", interaction.parsed_result or "<not parsed>"),
-            ("错误", interaction.error or "<none>"),
-        )
-    )
-    return tuple(sections)
-
-
-def _vlm_card_status(interaction: VlmInteraction) -> str:
-    if interaction.phase == "request":
-        return "等待模型返回"
-    if interaction.error:
-        return "已返回（含请求或解析错误，查看有效结果）"
-    return "已完成"
-
-
-def _vlm_card_text(interaction: VlmInteraction) -> str:
-    """构造单卡片的文本回退内容。"""
-    parts = [
-        (
-            f"VLM R{interaction.interaction_id} | "
-            f"{interaction.task} | {_vlm_card_status(interaction)}"
-        )
-    ]
-    for title, body in _vlm_card_sections(interaction):
-        parts.append(f"[{title}]\n{body}")
-        if title == "完整输入提示词":
-            parts.append(
-                "[实际输入 RGB]\n"
-                f"{interaction.image.width_px}x"
-                f"{interaction.image.height_px} RGB"
-            )
-    return "\n\n".join(parts)
-
-
-def _render_vlm_interaction_card(
-    font: object,
-    interaction: VlmInteraction,
-) -> np.ndarray:
-    """把完整 VLM 交互和输入图渲染为一张 CJK 卡片。"""
-    from PIL import Image, ImageDraw
-
-    input_image = _vlm_input_pil_image(font, interaction)
-    max_inner_width = VLM_CARD_MAX_WIDTH - 2 * VLM_CARD_PADDING_PX
-    if input_image.width > max_inner_width:
-        scale = max_inner_width / input_image.width
-        input_image = input_image.resize(
-            (
-                max_inner_width,
-                max(1, round(input_image.height * scale)),
-            ),
-            Image.Resampling.LANCZOS,
-        )
-
-    card_width = max(
-        VLM_CARD_MIN_WIDTH,
-        min(
-            VLM_CARD_MAX_WIDTH,
-            input_image.width + 2 * VLM_CARD_PADDING_PX,
-        ),
-    )
-    max_text_width = card_width - 2 * VLM_CARD_PADDING_PX
-    wrapped_sections = [
-        (
-            title,
-            _wrap_multiline_text(font, body, max_text_width),
-        )
-        for title, body in _vlm_card_sections(interaction)
-    ]
-    line_height = STATUS_FONT_SIZE + STATUS_LINE_SPACING_PX
-    card_height = 2 * VLM_CARD_PADDING_PX + line_height
-    for title, lines in wrapped_sections:
-        card_height += VLM_CARD_GAP_PX + line_height
-        card_height += len(lines) * line_height
-        if title == "完整输入提示词":
-            card_height += VLM_CARD_GAP_PX + line_height + input_image.height
-
-    card = Image.new("RGB", (card_width, card_height), STATUS_BG_RGB)
-    draw = ImageDraw.Draw(card)
-    draw.rectangle(
-        (0, 0, card_width - 1, card_height - 1),
-        outline=VLM_CARD_BORDER_RGB,
-        width=2,
-    )
-    y = VLM_CARD_PADDING_PX
-    draw.text(
-        (VLM_CARD_PADDING_PX, y),
-        (
-            f"VLM R{interaction.interaction_id} | "
-            f"{interaction.task} | {_vlm_card_status(interaction)}"
-        ),
-        font=font,
-        fill=VLM_CARD_TITLE_RGB,
-    )
-    y += line_height
-
-    for title, lines in wrapped_sections:
-        y += VLM_CARD_GAP_PX
-        draw.line(
-            (
-                VLM_CARD_PADDING_PX,
-                y + line_height - 2,
-                card_width - VLM_CARD_PADDING_PX,
-                y + line_height - 2,
-            ),
-            fill=VLM_CARD_BORDER_RGB,
-            width=1,
-        )
-        draw.text(
-            (VLM_CARD_PADDING_PX, y),
-            title,
-            font=font,
-            fill=VLM_CARD_SECTION_RGB,
-        )
-        y += line_height
-        for line in lines:
-            draw.text(
-                (VLM_CARD_PADDING_PX, y),
-                line,
-                font=font,
-                fill=STATUS_TEXT_RGB,
-            )
-            y += line_height
-
-        if title != "完整输入提示词":
-            continue
-        y += VLM_CARD_GAP_PX
-        draw.text(
-            (VLM_CARD_PADDING_PX, y),
-            (
-                "实际输入 RGB "
-                f"({interaction.image.width_px}x"
-                f"{interaction.image.height_px})"
-            ),
-            font=font,
-            fill=VLM_CARD_SECTION_RGB,
-        )
-        y += line_height
-        image_x = (card_width - input_image.width) // 2
-        card.paste(input_image, (image_x, y))
-        draw.rectangle(
-            (
-                image_x,
-                y,
-                image_x + input_image.width - 1,
-                y + input_image.height - 1,
-            ),
-            outline=VLM_CARD_IMAGE_BORDER_RGB,
-            width=2,
-        )
-        y += input_image.height
-    return np.asarray(card)
-
-
-def _vlm_input_pil_image(font: object, interaction: VlmInteraction):
-    """还原模型实际输入 RGB，并可选叠加解析成功的目标框。"""
-    from PIL import Image, ImageDraw
-
-    packed = interaction.image
-    rgb = np.frombuffer(packed.rgb_bytes, dtype=np.uint8).reshape(
-        packed.height_px,
-        packed.width_px,
-        3,
-    )
-    image = Image.fromarray(rgb.copy(), mode="RGB")
-    if interaction.bbox_norm is None:
-        return image
-
-    x_min, y_min, x_max, y_max = interaction.bbox_norm
-    left = max(0, min(image.width - 1, round(x_min * image.width)))
-    top = max(0, min(image.height - 1, round(y_min * image.height)))
-    right = max(0, min(image.width - 1, round(x_max * image.width)))
-    bottom = max(0, min(image.height - 1, round(y_max * image.height)))
-    draw = ImageDraw.Draw(image)
-    line_width = max(2, round(min(image.width, image.height) / 120))
-    draw.rectangle(
-        (left, top, right, bottom),
-        outline=BBOX_RGB,
-        width=line_width,
-    )
-    label = (
-        "YOLO-World 候选"
-        if interaction.task == "target_confirmation"
-        else "VLM 目标定位"
-    )
-    label_box = draw.textbbox((0, 0), label, font=font)
-    label_width = label_box[2] - label_box[0] + 8
-    label_height = label_box[3] - label_box[1] + 6
-    label_left = min(left, max(0, image.width - label_width))
-    label_top = max(0, top - label_height)
-    draw.rectangle(
-        (
-            label_left,
-            label_top,
-            label_left + label_width,
-            label_top + label_height,
-        ),
-        fill=(15, 45, 30),
-    )
-    draw.text(
-        (label_left + 4, label_top + 2),
-        label,
-        font=font,
-        fill=BBOX_RGB,
-    )
-    return image
-
-
-def _wrap_multiline_text(
-    font: object,
-    text: str,
-    max_pixels: float,
-) -> List[str]:
-    """保留原始换行，再按卡片宽度折行。"""
-    wrapped: List[str] = []
-    for source_line in text.expandtabs(4).split("\n"):
-        line_parts = _wrap_text(font, source_line, max_pixels)
-        wrapped.extend(line_parts if line_parts else [""])
-    return wrapped
-
-
-def _robot_triangle_world(
-    pose: Pose2D,
-) -> Tuple[Tuple[float, float], ...]:
-    """返回指向机器人前方的闭合三角形世界坐标。"""
-    cosine = math.cos(pose.yaw_rad)
-    sine = math.sin(pose.yaw_rad)
-    local_points = (
-        (ROBOT_FRONT_M, 0.0),
-        (-ROBOT_REAR_M, ROBOT_HALF_WIDTH_M),
-        (-ROBOT_REAR_M, -ROBOT_HALF_WIDTH_M),
-        (ROBOT_FRONT_M, 0.0),
-    )
-    return tuple(
-        (
-            pose.x_m + forward_m * cosine - left_m * sine,
-            pose.y_m + forward_m * sine + left_m * cosine,
-        )
-        for forward_m, left_m in local_points
-    )
-
-
-def _motion_status_text(
-    frame: NavigationFrame,
-    result: NavigationResult,
-) -> str:
-    """构造侧栏实时摘要；位姿随运动帧更新，阶段来自最近一次决策。"""
-    lines = [
-        f"decision: {result.debug.stage} | next: {result.state.phase.value}",
-        (
-            f"pose x={frame.pose.x_m:.2f} y={frame.pose.y_m:.2f} "
-            f"yaw={math.degrees(frame.pose.yaw_rad):.1f}deg"
-        ),
-    ]
-    headings = result.state.scan_headings_world_rad
-    if result.state.asynchronous_perception:
-        lines.append(
-            f"semantic pending={result.state.pending_semantic_jobs} "
-            f"failed={result.state.failed_semantic_jobs} "
-            f"queued views={len(result.state.pending_observation_views)}"
-        )
-    if result.state.active_target_clue is not None:
-        lines.append(f"target clue: {result.state.active_target_clue.clue_id}")
-    approach = result.state.object_approach
-    if approach.target is not None:
-        lines.append(
-            f"object source={approach.target.source} target={approach.target.target_world_xy} "
-            f"moves={len(approach.tried_positions)} depth points={approach.target.sample_count}"
-        )
-    planning = result.debug.details
-    if "standoff_map" in planning:
-        lines.append(
-            f"standoff map={planning['standoff_map']} "
-            f"clearance={planning['standoff_clearance_m']:.2f}m "
-            f"candidates={planning['standoff_candidate_count']}"
-        )
-        if "standoff_distance_m" in planning:
-            lines.append(f"planned distance to target={planning['standoff_distance_m']:.2f}m")
-    if headings and "scan_mode" in result.debug.details:
-        scan_index = min(result.state.next_scan_index, len(headings) - 1)
-        lines.append(
-            f"scan {scan_index + 1}/{len(headings)} "
-            f"yaw={math.degrees(headings[scan_index]):.1f}deg"
-        )
-        lines.append(_scan_basis_text(result.debug.details["scan_mode"]))
-    if action_command(result.action, frame.pose) is not None:
-        command = action_command(result.action, frame.pose)
-        lines.append(
-            f"command move={math.hypot(command.forward_m, command.left_m):.2f}m "
-            f"turn={math.degrees(command.yaw_rad):.1f}deg"
-        )
-    selected_id = result.debug.details.get("candidate_id")
-    parent_id = result.debug.details.get("parent_node_id") or result.state.backtrack_node_id
-    if parent_id is not None:
-        lines.append(f"parent: {parent_id}")
-    if "branch_depth" in result.debug.details:
-        lines.append(
-            f"return depth: {result.debug.details['branch_depth']} | "
-            f"pending at parent: {result.debug.details['pending_direction_count']}"
-        )
-    if selected_id is not None:
-        lines.append(
-            f"frontier: {selected_id} ({result.debug.details.get('frontier_selection_source')})"
-        )
-    return "\n".join(lines)
-
-
-def _scan_basis_text(mode: str) -> str:
-    """说明本次观察由 Frontier、首次环扫还是当前位置场景确认触发。"""
-    basis = {
-        "initial": "initial 360 deg sweep",
-        "frontier": "unchecked local Frontier directions",
-        "current_view": "target check at current pose (no extra turn)",
-    }
-    return f"scan basis: {basis.get(mode, mode)}"
-
-
-def _frontier_table_text(
-    candidates: Tuple[Mapping[str, Any], ...],
-    selected_id: Optional[str],
-    result: NavigationResult,
-) -> str:
-    """表格行与 Points2D 实例顺序一致；编号链接到对应点，暂存状态取当前状态。"""
-    blocked_ids = ", ".join(
-        region.region_id for region in result.state.blocked_frontier_regions
-    )
-    blocked_text = (
-        f"Blocked regions (no retry during this run): {blocked_ids}."
-        if blocked_ids else "Blocked regions: none."
-    )
-    if not candidates:
-        return f"No current frontier candidates.\n\n{blocked_text}"
-    orders = {region.region_id: region.deferred_order for region in result.state.frontier_regions}
-    lines = [
-        "Click an ID to select its World point. Yellow = selected; green = candidate.",
-        "",
-        "| Frontier | State | Saved order | Path (m) | Score |",
-        "| --- | --- | --- | ---: | ---: |",
-    ]
-    for index, candidate in enumerate(candidates):
-        candidate_id = str(candidate["candidate_id"])
-        order = orders.get(candidate_id, candidate.get("deferred_order"))
-        state = "selected" if candidate_id == selected_id else "deferred" if order is not None else "new"
-        order_text = "-" if order is None else f"{order[0]}:{order[1]}"
-        label = f"[{candidate_id}](recording://world/current_frontiers[#{index}])"
-        lines.append(
-            f"| {label} | {state} | {order_text} | "
-            f"{float(candidate['path_distance_m']):.2f} | {float(candidate['score']):.2f} |"
-        )
-    lines.extend([
-        "",
-        blocked_text,
-        "",
-        "New directions rank by score. When they run out, return through the branch "
-        "one node at a time until a reached node has a remaining direction to explore.",
-        "Positions and distances are from the latest frontier update.",
-    ])
-    return "\n".join(lines)
-
-
-def _world_to_view_point(
-    world_xy: Tuple[float, float],
-) -> Tuple[float, float]:
-    """翻转世界 Y 轴，使 Rerun 的二维画布按数学坐标显示 Y 向上。"""
-    return (world_xy[0], -world_xy[1])
-
-
-def _world_to_view_vector(
-    world_vector: Tuple[float, float],
-) -> Tuple[float, float]:
-    """把世界系向量转换到 Y 向上的 Rerun 二维显示坐标。"""
-    return (world_vector[0], -world_vector[1])
-
-
-def _world_yaw_to_view_vector(
-    yaw_rad: float,
-    length_m: float,
-) -> Tuple[float, float]:
-    return _world_to_view_vector(
-        (math.cos(yaw_rad) * length_m, math.sin(yaw_rad) * length_m)
-    )
-
-
-def _command_world_vector(
-    command: RelativePoseCommand,
-    pose: Pose2D,
-) -> Tuple[float, float]:
-    """把机器人系前/左平移转换为世界系向量。"""
-    cosine = math.cos(pose.yaw_rad)
-    sine = math.sin(pose.yaw_rad)
-    return (
-        command.forward_m * cosine - command.left_m * sine,
-        command.forward_m * sine + command.left_m * cosine,
-    )
-
-
-def _world_to_map_pixel(
-    world_xy: Tuple[float, float],
-    frame: NavigationFrame,
-) -> Optional[Tuple[float, float]]:
-    """把世界点转换到 ``np.flipud`` 后的占据图像素坐标。"""
-    obstacle_map = frame.obstacle_map
-    row, col = world_to_nearest_grid_cell(world_xy, obstacle_map)
-    height = len(obstacle_map.occupancy)
-    width = len(obstacle_map.occupancy[0]) if height else 0
-    if not 0 <= row < height or not 0 <= col < width:
-        return None
-    return (float(col), float(height - 1 - row))
-
-
-def _world_yaw_to_map_vector(
-    yaw_rad: float,
-    frame: NavigationFrame,
-    length_m: float,
-) -> Tuple[float, float]:
-    """把世界朝向转换为翻转后地图图像中的像素向量。"""
-    obstacle_map = frame.obstacle_map
-    relative_yaw = yaw_rad - obstacle_map.origin.yaw_rad
-    length_cells = length_m / obstacle_map.resolution_m
-    return (
-        math.cos(relative_yaw) * length_cells,
-        -math.sin(relative_yaw) * length_cells,
-    )
-
-
-def _point_along_heading(
-    origin: Tuple[float, float],
-    heading_rad: float,
-    distance_m: float,
-) -> Tuple[float, float]:
-    return (
-        origin[0] + math.cos(heading_rad) * distance_m,
-        origin[1] + math.sin(heading_rad) * distance_m,
-    )
-
-
-def _dashed_line_segments(
-    start: Tuple[float, float],
-    end: Tuple[float, float],
-) -> Tuple[Tuple[Tuple[float, float], Tuple[float, float]], ...]:
-    """把一条线拆成短线段，模拟 Rerun 0.22 尚不支持的虚线。"""
-    delta_x = end[0] - start[0]
-    delta_y = end[1] - start[1]
-    length = math.hypot(delta_x, delta_y)
-    if length <= 1e-9:
-        return ()
-    direction_x = delta_x / length
-    direction_y = delta_y / length
-    segments = []
-    distance = 0.0
-    while distance < length:
-        segment_end = min(distance + HISTORY_DASH_LENGTH_M, length)
-        segments.append(
-            (
-                (
-                    start[0] + direction_x * distance,
-                    start[1] + direction_y * distance,
-                ),
-                (
-                    start[0] + direction_x * segment_end,
-                    start[1] + direction_y * segment_end,
-                ),
-            )
-        )
-        distance += HISTORY_DASH_LENGTH_M + HISTORY_DASH_GAP_M
-    return tuple(segments)
-
-
-def _load_panel_font() -> Optional[object]:
-    """加载面板 CJK 字体；Pillow 缺失或所有候选加载失败时返回 None。"""
-    try:
-        from PIL import ImageFont
-    except ImportError:
-        return None
-    for path in STATUS_FONT_CANDIDATES:
-        if not os.path.exists(path):
-            continue
-        try:
-            return ImageFont.truetype(path, size=STATUS_FONT_SIZE)
-        except OSError:
-            continue
-    return None
-
-
-def _print_font_notice_once() -> None:
-    """Pillow/CJK 字体缺失时最多打印一次提示，避免每个周期刷屏。"""
-    global _FONT_NOTICE_PRINTED
-    if _FONT_NOTICE_PRINTED:
-        return
-    _FONT_NOTICE_PRINTED = True
-    print("提示：Pillow 或 CJK 字体不可用，面板回退为 ASCII 文本")
-
-
-def _wrap_text(font: object, text: str, max_pixels: float) -> List[str]:
-    """按像素宽度把文本折成多行，不打断单个字符。"""
-    lines: List[str] = []
-    current = ""
-    for char in text:
-        if font.getlength(current + char) <= max_pixels:
-            current += char
-        else:
-            lines.append(current)
-            current = char
-    if current:
-        lines.append(current)
-    return lines
-
-
-def _render_status_image(font: object, lines: List[str]) -> np.ndarray:
-    """把状态行渲染为深色背景 RGB 图像，供 rr.Image 记录。"""
-    from PIL import Image, ImageDraw
-
-    max_pixels = STATUS_IMAGE_WIDTH - 2 * STATUS_PADDING_PX
-    wrapped: List[str] = []
-    for line in lines:
-        wrapped.extend(_wrap_text(font, line, max_pixels))
-
-    line_height = STATUS_FONT_SIZE + STATUS_LINE_SPACING_PX
-    height = 2 * STATUS_PADDING_PX + len(wrapped) * line_height
-    image = Image.new("RGB", (STATUS_IMAGE_WIDTH, height), STATUS_BG_RGB)
-    draw = ImageDraw.Draw(image)
-    y = STATUS_PADDING_PX
-    for line in wrapped:
-        draw.text((STATUS_PADDING_PX, y), line, font=font, fill=STATUS_TEXT_RGB)
-        y += line_height
-    return np.asarray(image)
-
-
-def _ascii_only(text: str) -> str:
-    """把非 ASCII 字符替换为 '?'，供无字体时生成纯 ASCII 回退文本。"""
-    return "".join(char if ord(char) < 128 else "?" for char in text)
-
-
-def _status_lines(
-    target_text: str,
-    frame: NavigationFrame,
-    observation: Optional[TargetObservation],
-    result: NavigationResult,
-) -> List[str]:
-    """构造按决策顺序组织的状态面板，避免直接打印难读的 details 字典。"""
-    lines = [
-        f"target: {target_text}",
-        (
-            f"decision: status={result.status.value}, "
-            f"phase={result.state.phase.value}, stage={result.debug.stage}"
-        ),
-        f"message: {result.debug.message}",
-        (
-            "pose: "
-            f"x={frame.pose.x_m:.2f} m, y={frame.pose.y_m:.2f} m, "
-            f"yaw={math.degrees(frame.pose.yaw_rad):.1f} deg"
-        ),
-    ]
-    if action_command(result.action, frame.pose) is not None:
-        command = action_command(result.action, frame.pose)
-        world_vector = _command_world_vector(command, frame.pose)
-        target_world = (
-            frame.pose.x_m + world_vector[0],
-            frame.pose.y_m + world_vector[1],
-        )
-        lines.append(
-            "command: "
-            f"move={math.hypot(command.forward_m, command.left_m):.2f} m, "
-            f"forward={command.forward_m:.2f} m, left={command.left_m:.2f} m, "
-            f"turn={math.degrees(command.yaw_rad):.1f} deg, "
-            f"target=({target_world[0]:.2f}, {target_world[1]:.2f})"
-        )
-
-    details = result.debug.details
-    if result.state.asynchronous_perception:
-        lines.append(
-            "semantic queue: "
-            f"pending={result.state.pending_semantic_jobs}, "
-            f"finished={details.get('semantic_finished', 0)}, "
-            f"failed={result.state.failed_semantic_jobs}, "
-            f"active={details.get('semantic_active_job')}, "
-            f"pending views={len(result.state.pending_observation_views)}"
-        )
-    if "scan_heading_count" in details:
-        target_heading_deg = math.degrees(
-            float(details.get("target_heading_world_rad", 0.0))
-        )
-        lines.append(
-            "scan plan: "
-            f"mode={details.get('scan_mode')}, "
-            f"view={int(details.get('scan_index', 0)) + 1}/"
-            f"{details.get('scan_heading_count')}, "
-            f"target yaw={target_heading_deg:.1f} deg"
-        )
-        lines.append(_scan_basis_text(details.get("scan_mode", "unknown")))
-    if "frontier_scan_candidate_count" in details:
-        lines.append(
-            "frontier map: "
-            f"clusters={details['frontier_scan_candidate_count']}, "
-            f"candidate_cells={details['frontier_scan_cell_count']}"
-        )
-    if "local_observation_point_count" in details:
-        lines.append(
-            "frontier coverage: "
-            f"local_frontier_points={details.get('local_observation_point_count', 0)}, "
-            f"need_check={details.get('observation_point_count', 0)}, "
-            f"reused={details.get('reused_observation_point_count', 0)}, "
-            f"scan_skipped={details.get('scan_skipped', False)}"
-        )
-
-    candidates = details.get("frontier_candidates", ())
-    if "frontier_selection_source" in details:
-        lines.append(
-            f"frontier choice: source={details['frontier_selection_source']}, "
-            f"new={details['new_frontier_count']}, "
-            f"deferred={details['deferred_frontier_count']}"
-        )
-    selected_id = details.get("candidate_id")
-    if selected_id is not None:
-        selected = next(
-            (
-                candidate
-                for candidate in candidates
-                if candidate["candidate_id"] == selected_id
-            ),
-            None,
-        )
-        if selected is not None:
-            semantic_score = selected["semantic_score"]
-            semantic_text = (
-                "none"
-                if semantic_score is None
-                else f"{float(semantic_score):.2f}"
-            )
-            lines.append(
-                "selected frontier: "
-                f"{selected_id}, rank=1/{details.get('candidate_count')}, "
-                f"path={float(selected['path_distance_m']):.2f} m, "
-                f"span={float(selected['frontier_span_m']):.2f} m, "
-                f"vlm={semantic_text}, "
-                f"semantic bonus={float(selected['semantic_bonus']):.2f}, "
-                f"deferred order={selected.get('deferred_order')}, "
-                f"score={float(selected['score']):.2f}"
-            )
-
-    context = [
-        f"{key}={details[key]}"
-        for key in ("node_id", "parent_node_id", "direction_id", "reason")
-        if details.get(key) is not None
-    ]
-    if context:
-        lines.append("context: " + ", ".join(context))
-
-    if observation is not None:
-        lines.append(f"visibility: {observation.visibility.value}")
-        if observation.source:
-            confidence = (
-                "none"
-                if observation.confidence is None
-                else f"{observation.confidence:.3f}"
-            )
-            lines.append(
-                f"detector: source={observation.source}, confidence={confidence}"
-            )
-        if observation.target_mask is not None:
-            mask = _target_mask_to_numpy(observation.target_mask)
-            if mask is None:
-                lines.append("sam2 mask: invalid")
-            elif (
-                frame.rgb is not None
-                and len(frame.rgb) > 0
-                and len(frame.rgb[0]) > 0
-                and mask.shape != (len(frame.rgb), len(frame.rgb[0]))
-            ):
-                lines.append(
-                    "sam2 mask: size mismatch, "
-                    f"mask={mask.shape[1]}x{mask.shape[0]}, "
-                    f"rgb={len(frame.rgb[0])}x{len(frame.rgb)}"
-                )
-            else:
-                lines.append(
-                    "sam2 mask: magenta overlay, "
-                    f"size={mask.shape[1]}x{mask.shape[0]}, "
-                    f"foreground={int(np.count_nonzero(mask))} px"
-                )
-        if observation.reason:
-            lines.append(f"observation: {observation.reason}")
-
-    direction_counts = {state.value: 0 for state in SearchDirectionState}
-    for node in result.state.observation_history:
-        for direction in node.directions:
-            direction_counts[direction.state.value] += 1
-    lines.append(
-        "history: "
-        f"nodes={len(result.state.observation_history)}, "
-        f"pending={direction_counts['pending']}, "
-        f"committed={direction_counts['committed']}, "
-        f"explored={direction_counts['explored']}, "
-        f"invalidated={direction_counts['invalidated']}, "
-        f"stalled={direction_counts['stalled']}"
-    )
-    lines.append(
-        f"regions={len(result.state.frontier_regions)}, "
-        f"blocked={len(result.state.blocked_frontier_regions)}, "
-        f"deferred={sum(region.deferred_order is not None for region in result.state.frontier_regions)}, "
-        f"active={result.state.active_frontier_id}, "
-        f"checked_views={len(result.state.observed_views)}, "
-        f"planned_frontier_points={len(result.state.scan_observation_points)}"
-    )
-    if result.state.observed_views:
-        view = result.state.observed_views[-1]
-        lines.append(
-            f"last checked view: visible_points={len(view.visible_world_xy)}, "
-            f"depth_coverage={view.depth_coverage_available}"
-        )
-    latest_issue = next(
-        (
-            (node.node_id, direction)
-            for node in reversed(result.state.observation_history)
-            for direction in node.directions
-            if direction.execution_reason
-        ),
-        None,
-    )
-    if latest_issue is not None:
-        node_id, direction = latest_issue
-        lines.append(
-            f"last exploration issue: {node_id}, {direction.state.value}, "
-            f"{direction.execution_reason}"
-        )
-    if "destination_world_xy" in details:
-        lines.append(f"exploration destination={details['destination_world_xy']}")
-    lines.extend(
-        (
-            "map legend: robot=blue, frontier=green, selected=yellow, "
-            "command=orange, adapter target=red, adapter path=purple",
-            "history links: pending=yellow, committed=blue, explored=gray, "
-            "invalidated=red, stalled=orange",
-        )
-    )
-    return lines
 
 
 __all__ = ["RerunVisualizer"]

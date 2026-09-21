@@ -8,20 +8,6 @@ import math
 import numpy as np
 
 
-def score_lines(node):
-    """使用图片中的 F 编号，明确区分语义分和拍摄时的综合分。"""
-    lines = []
-    for score in node["scores"].values():
-        value = "pending" if node["state"] in ("queued", "running") else "missing"
-        if score["value"] is not None:
-            value = f"{score['value']:.2f}"
-        line = f"{score['label']}: VLM {value}"
-        if score.get("frontier_score") is not None:
-            line += f" / total {score['frontier_score']:.2f}"
-        lines.append(line)
-    return lines or ["No projected Frontier"]
-
-
 def render_observation_card(title, nodes, colors, font):
     """一到两列排列原图；原始 RGB 另存于 V/rgb，缺少 Pillow 时只显示首张原图。"""
     try:
@@ -77,3 +63,17 @@ def render_observation_card(title, nodes, colors, font):
             draw.text((x + pad, line_y), line, font=font, fill=(225, 231, 240))
             line_y += line_height
     return np.asarray(card)
+
+
+def score_lines(node):
+    """使用图片中的 F 编号，明确区分语义分和拍摄时的综合分。"""
+    lines = []
+    for score in node["scores"].values():
+        value = "pending" if node["state"] in ("queued", "running") else "missing"
+        if score["value"] is not None:
+            value = f"{score['value']:.2f}"
+        line = f"{score['label']}: VLM {value}"
+        if score.get("frontier_score") is not None:
+            line += f" / total {score['frontier_score']:.2f}"
+        lines.append(line)
+    return lines or ["No projected Frontier"]
