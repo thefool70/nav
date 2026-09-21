@@ -443,6 +443,11 @@ GUI 入口与操作编排在 `chassis_gui.py`，页面在 `chassis_gui.html`，�
 [官方 REST 回桩示例](https://wiki.slamtec.com/pages/viewpage.action?pageId=122618038)，
 状态接口参照 [官方 REST 文档](https://docs.slamtec.com/)。本面板尚未进行运行与真机验收。
 
+公共导航装配位于 `launch.py`，环境创建、预检和真机专属启动前移位于
+`environment.py`。未知路径上限已移至 `config.json` 的
+`navigation.max_unknown_path_m`，与 Habitat 共用；旧自定义配置中的同名字段
+需从 `hermes` 组移动到 `navigation` 组，命令行 `--max-unknown-path-m` 不变。
+
 ## 常用参数
 
 | 参数 | 作用 |

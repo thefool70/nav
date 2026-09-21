@@ -2,7 +2,7 @@
 
 ## 启动顺序
 
-`robot_nav habitat` 会先在 `src/robot_nav/launch.py::_build_visualization`
+`robot_nav habitat` 先创建 JSONL 运行日志，再在 `src/robot_nav/launch.py::_build_visualization`
 构造 Rerun，再创建 `SemanticPerception` 和 `HabitatChassisAdapter`。因此，仅看到启动脚本打印的
 “Habitat 渲染后端”时，还不能判断 Habitat 或 GPU 卡住。
 
@@ -21,19 +21,21 @@
   （`_build_perception`），两种模式共用同一套感知与搜索核心。探索队列不接受
   同步观察器；物体接近通过 `--object-*` 接入独立模型进程；运动帧预采样由
   `set_motion_prefetch_enabled` 在动作期间开关。
-- `hermes` 由 `launch.py::_run_hermes` 装配 `HermesAdapter`（`adapters/hermes/`）。
+- 两种入口共用 `launch.py::_run_navigation`；`hermes` 由 `environment.py::create_chassis` 创建 `HermesAdapter`（`adapters/hermes/`）。
   地图缓存、REST、Action 监控与路径检查全部在开发机执行；本地直连与经随车笔记本
   转发共用同一实现；底盘改 `--base-url`，远程相机另设 `--camera-source remote` 与 `--camera-endpoint`。
 - 检测链先检查 `launch.py::_build_perception` 与 `_build_analyzer`，不能仅凭
   共用 `core/navigator.py` 判断算法一致。两种入口不再接入持续检测与模型运动中断；
-  Hermes 仍保留首次扫描前的 1 m 启动动作，见 `launch.py`。
+  Hermes 仍保留首次扫描前的启动动作，见 `environment.py`；距离由
+  `hermes.startup_forward_m` 指定，默认 1 m。
 - 地图输入天然不等价：Hermes 按理论水平 FOV 筛选并膨胀厂商地图，Habitat 按局部
   视场和视线公开 navmesh 可见区域。排查 Frontier 数量差异时先比较两边实际
   `NavigationFrame.obstacle_map`。
 - object/scene 两种状态与入口共用；场景模式本身不需要 YOLO+SAM2，不能把模式差异
   误判为环境差异。
-- 已知区路径检查（`send_relative_pose_in_known_space`）仅 Hermes 实现；
-  Habitat 走普通发送接口，因此未知路径取消与区域屏蔽不会在 Habitat 触发。
+- 已知区路径检查（`send_relative_pose_in_known_space`）两种 Adapter 均实现；
+  Habitat 在离散动作前检查 navmesh 剩余路径，超限也会触发区域屏蔽。
+  上限来自 `navigation.max_unknown_path_m`；不支持该接口的 Adapter 会报错停止。
 
 ## 快速隔离 Rerun
 
@@ -416,7 +418,7 @@
   `_cancel_active_action`，用 `require_success=False` 确认终态，再读位姿复查。
   取消或终态确认失败仍报错；复查超出容差作为可恢复运动失败。该容差不同于
   `position_tolerance_m`（0.03m），后者仅决定是否下发微小平移命令。
-- `launch.py::run_navigation` 在目标完成、`FAILED`、非 `OK` 且非等待感知状态，
+- `app.py::run_navigation` 在目标完成、`FAILED`、非 `OK` 且非等待感知状态，
   或达到 `max_cycles` 时退出；`MISSING_DATA` 当前也立即退出。周期上限不能当作
   Frontier 耗尽；`OK + WAITING_FOR_SEMANTICS` 每次最多等待结果 1 秒，不消耗决策
   额度。普通模型失败记为失败批次、评分降级。
@@ -427,7 +429,7 @@
 - `core/navigator.py::recover_from_motion_failure` / `continue_after_motion_stall`
   对 `scan.turn` 使用 `_recover_scan_turn`，清除扫描计划后按真实朝向重新规划，
   不登记失败方向的覆盖。首次扫描尚未完成时仍按首次环扫规则重建。
-- `launch.py::_move_hermes_forward_on_start` 在 `run_navigation` 之前直接调用
+- `environment.py::_move_hermes_forward_on_start` 在 `run_navigation` 之前直接调用
   底盘；前移 1 m 的可恢复失败/停滞在确认动作结束后继续启动，其他异常仍停止。
 - `adapters/hermes/adapter.py::_execute_action` 将 Action 创建、起始位姿读取和监控
   放在同一异常范围；`_cancel_active_action` 与 `close` 负责取消遗留动作。已获得

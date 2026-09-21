@@ -50,14 +50,14 @@
 实际位置重新检查并选点。
 设备离线、健康异常、数据读取失败等系统错误必须使用普通异常，仍然终止运行。
 
-提供实际规划路径的 Adapter 可实现 `KnownSpaceChassisInterface` 扩展。
+正式导航的 Adapter 必须实现 `KnownSpaceChassisInterface` 扩展。
 `app.py` 按 `ActionConstraint.REQUIRE_KNOWN_PATH` 对 Frontier 探索、返回父节点、恢复暂存方向、返回目标线索位置与队列物体停靠调用其
 `send_relative_pose_in_known_space(command, obstacle_map, *, reference_pose)`，
 显式传入命令、决策地图与 `frame.pose`。Adapter 必须用该参考位姿还原世界目标，
 不能用发送时重新读取的位姿解释同一条相对命令；
 物体停靠优先传入 `frame.navigation_map`，其余上述动作传入 `frame.obstacle_map`；
 启动前移、标定与扫描转向使用普通发送接口。
-当前 Hermes Adapter 支持该扩展；Habitat 使用原接口，由 navmesh 约束可达路径。
+Hermes 与 Habitat 均支持该扩展；不支持时运行层报错停止，不降级为普通运动。
 `NavigationAction.destination` 是完整世界系位姿，执行时须保留指定的最终 yaw，
 不能把它替换为当前位置到目标点的方位角。
 经随车笔记本转发时，动作监控与路径检查仍在开发机执行，转发端只传输相机数据与
@@ -65,11 +65,12 @@
 单调时钟直接混用；相机与底盘位姿的顺序读取仍有网络延迟，并非硬件同步。
 
 受约束的路径必须与传入地图同坐标系，逐段检查当前位置和剩余路径点之间的连线。
-地图内 `None` 格和地图外部都算未知。Hermes 累加本次剩余路径在未知区内的实际
+地图内 `None` 格和地图外部都算未知。两种 Adapter 共用 `measure_unknown_path_length`，累加本次剩余路径在未知区内的实际
 长度，默认超过 1.5 m 才取消；等于或小于上限时继续。多段未知区累加，不按最长
 连续段判断，也不跨轮询或跨动作累计已经走过的距离。可用 `--max-unknown-path-m`
-调整该上限。超限时 Adapter 取消当前动作并
-确认其结束，再抛 `MotionPathUnknownError`（`RecoverableMotionError` 的子类），
+调整公共配置 `navigation.max_unknown_path_m`。Hermes 超限时取消当前动作并
+确认其结束；Habitat 在开始执行及每个离散动作前检查当前位姿到目标的 navmesh
+剩余路径，超限时不再下发下一步。两者均抛 `MotionPathUnknownError`（`RecoverableMotionError` 的子类），
 附带包含当前位置的被拒绝路径 `path_world_xy` 及未知长度、上限和总路径长度。
 `app.py` 将路径显式传给核心，
 用于记录取消原因；Frontier 探索对应区域在本次运行中持续屏蔽，不自动恢复。

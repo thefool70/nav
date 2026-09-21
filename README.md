@@ -13,7 +13,7 @@
 建议按下面的顺序阅读：
 
 1. `src/robot_nav/__main__.py`：启动分派；参数定义见 `cli.py`。
-2. `src/robot_nav/launch.py`：如何按 Adapter 装配组件。
+2. `src/robot_nav/launch.py`：两种环境共用的组件装配；环境创建与准备见 `environment.py`。
 3. `src/robot_nav/app.py`：完整运行循环，以及单周期的输入、感知、决策和运动。
 4. `src/robot_nav/core/navigator.py`：行为分派与公共输入检查，四类行为的入口。
 5. `src/robot_nav/core/models.py`：算法输入、输出和跨周期状态。
@@ -85,9 +85,12 @@ ChassisInterface ──► NavigationFrame
 只恢复已有队列的分析，不为此新增运动。
 有效探索方向耗尽后先等待队列，模型失败不冒充“已经检查”。
 
-Hermes 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
+Hermes 与 Habitat 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
 未知区的累计长度超过 1.5 m 才取消动作，在本次运行中持续屏蔽整个连通 Frontier 区域并转向其他候选，
 避免在同一片边界内换点反复取消。
+
+两种环境只在 `environment.py` 中创建各自 Adapter；感知、日志、回调和导航循环
+统一在 `launch.py` 装配。只读预检独立运行，启动前移仅用于真机。
 
 ## 运行环境
 
@@ -136,13 +139,17 @@ python -m robot_nav hermes --config config.json --target "chair" --enable-motion
 表示自动查找已有 robot-nav 模型环境。`hermes.startup_forward_m` 默认 1 米，设为 0
 可跳过真机启动前移。外参文件仍独立，`camera.camera_calibration` 只保存其路径。
 标定输出位置为 `calibration.output`。密钥继续通过环境变量或已有凭据读取。
+`navigation.max_unknown_path_m` 是两种环境共用的未知路径长度上限（默认 1.5 米），
+从原来的 `hermes.max_unknown_path_m` 移到此处；自定义配置文件也需同步移动该字段。
 `--enable-motion`、`--preflight-only`、`--base-only` 只接受命令行设置，不能写入配置。
 
 配置布尔值可临时覆盖：`--rerun` / `--no-rerun`、`--debug-random-score` /
 `--no-debug-random-score`、`--debug-frontier` / `--no-debug-frontier`。
 未知字段、重复字段、缺少字段或非法值会在装配组件前报错，避免配置拼错后悄悄使用默认值。
 
-读取与校验在 `config.py`，`cli.py` 合并覆盖，`launch.py` 将结果传给各组件 Config。
+`config.py` 校验文件字段与类型，`cli.py` 合并命令行覆盖并集中检查参数组合；
+`__main__.py` 按需读取凭据和分派入口，`launch.py` 使用已校验参数装配公共组件。
+真机运动授权和设备准备条件由 `environment.py` 检查。
 各 Config 保留独立调用时的缺省值；算法内部常量、SSH 脚本环境变量与独立底盘 GUI
 参数不由这个运行配置文件接管。
 
@@ -186,7 +193,7 @@ python -m robot_nav calibrate-hermes --enable-motion
   World 将占用图、机器人和任务标记放在一起，同次扫描只画一个点，邻近任务合并显示。
   右侧直接展示当前推理的 RGB 与评分；`Observations` 中点击 J 查看整组、V 查看
   单图评分卡，原图通过 raw 链接查看。完整点位保留在 `World history`。
-- Hermes JSONL 日志：记录每周期决策、候选评分和 Action 反馈，供事后复盘。
+- 导航 JSONL 日志（Hermes / Habitat）：记录每周期决策、候选评分和 Action 反馈，供事后复盘。
 - 视觉快照：`data/run_logs/semantic-*/job-*` 保存图片、位姿、候选和分析结果；
   普通任务按 FIFO 处理。目录在退出后保留，当前不自动恢复上次队列。
   同帧深度先临时压缩保存，分析后只保留命中画面的正式深度文件；检测失败或
@@ -197,7 +204,8 @@ python -m robot_nav calibrate-hermes --enable-motion
 | 路径 | 职责 |
 | --- | --- |
 | `src/robot_nav/__main__.py`、`cli.py` | 启动分派、参数定义与组合校验 |
-| `src/robot_nav/launch.py` | 组件装配、日志与可视化接线 |
+| `src/robot_nav/launch.py` | 两种环境共用的组件装配、日志与可视化接线 |
+| `src/robot_nav/environment.py` | Adapter 创建、真机预检与启动前移 |
 | `src/robot_nav/calibration_launch.py` | 真机外参标定独立入口 |
 | `src/robot_nav/app.py` | 完整导航循环、单周期编排与显式动作执行 |
 | `src/robot_nav/core/navigator.py` | 行为分派与公共输入检查 |

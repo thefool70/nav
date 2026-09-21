@@ -219,3 +219,16 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB）；WebSocket 服务端�
 
 如果输出停在渲染后端之前，先确认已经激活 `robot-nav-habitat`；如果强制 GPU
 时 EGL 自检失败，检查 `/dev/dxg`、WSLg、Arch Mesa 和 Windows NVIDIA 驱动。
+
+## 公共导航与路径约束
+
+Habitat 与 Hermes 共用 `launch.py` 的感知、日志、回调和导航循环装配；
+`environment.py` 只负责创建各自 Adapter，真机启动前移不用于仿真。
+仿真导航也自动保存 `data/run_logs/habitat-*.jsonl`，可用 `--run-log` 指定路径。
+
+受约束动作在开始执行和每个离散动作前，按选点时的地图检查当前位置到目标的
+navmesh 剩余路径。未知长度超过 `navigation.max_unknown_path_m`（默认 1.5 米）
+就停止下发动作，并通过与 Hermes 相同的失败结果交给核心恢复；
+`--max-unknown-path-m` 可临时覆盖。不使用运动中新扩展的可见地图放宽本次约束。
+检查的是 navmesh 规划折线；GreedyGeodesicFollower 的离散轨迹可能存在偏差，
+不代表两种环境的实际运动轨迹完全相同。
