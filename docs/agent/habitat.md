@@ -2,8 +2,8 @@
 
 ## 启动顺序
 
-`robot_nav habitat` 会先在 `src/robot_nav/__main__.py::_build_visualization`
-构造 Rerun，再创建观察器和 `HabitatChassisAdapter`。因此，仅看到启动脚本打印的
+`robot_nav habitat` 会先在 `src/robot_nav/launch.py::_build_visualization`
+构造 Rerun，再创建 `SemanticPerception` 和 `HabitatChassisAdapter`。因此，仅看到启动脚本打印的
 “Habitat 渲染后端”时，还不能判断 Habitat 或 GPU 卡住。
 
 从 Habitat 切换到 Hermes 时，先切换到 `robot-nav` 环境：
@@ -11,80 +11,29 @@
 - `robot-nav-habitat` 使用 Python 3.9，`robot-nav` 使用 Python 3.11。
   当前 `hardware/realsense/.rsusb/python/pyrealsense2.cpython-311-*.so` 是
   Python 3.11 扩展；3.9 无法导入，即使 USB 已接入也会报模块不存在。
-- `hardware/slamtec_l515/run.sh` 只注入 RSUSB 库路径，不切换 Python 环境。
+- `hardware/realsense/run.sh` 只注入 RSUSB 库路径，不切换 Python 环境。
   遇到此错误先核对 traceback 的解释器路径和扩展文件名，再选择匹配的环境；
   不要直接在 Habitat 环境安装另一套 RealSense 库。
 
 ## 仿真与真机差异的回归定位
 
-- Habitat、S100、Hermes 直连与 orangepi 四个 CLI 入口都调用 `__main__.py::_build_queued_observer`，两种模式共用
-  `QueuedSemanticObserver`。探索队列不接受 `local_observer`；物体接近通过
-  `object_config` 接入独立模型进程，参数统一为 `--object-*`。队列保留运动帧
-  预采样，但不再提供运动中断方法，也不满足 `ContinuousTargetObserver` 协议。
-  直接传入同步观察器的 API 仍保留原目标观测与接近接口。
-- `orangepi` 复用 `_run_slamtec_l515`，由 `adapters/orangepi/adapter.py` 注入
-  `RemoteD435iCamera`，地图缓存、REST 与 Action 监控全部在开发机执行。
-  香橙派 `orangepi/server.py` 提供 `POST /prepare` 唤醒、`GET /frame` RGB-D 和
-  `POST /imu` 短时原始 IMU 接口；底盘通信由 SSH TCP
-  原样转发，无车载动作控制或失联取消服务。隧道和部署见 `docs/orangepi.md`。
-  两端单调时钟不共用，解码后的采集时间为开发机接收时间；不要用该时间声称
-  相机与底盘位姿硬件同步。D435i 外参与原 L515 分开保存。
-  当前设备的手工 SDK 在香橙派 `miniconda3/envs/h2g`，`pip show pyrealsense2`
-  会报未找到分发包，不能据此认定 SDK 缺失；实际绑定为 Python 3.10 / ARM64 / 2.56.5。
-  用户相机服务使用 640×480、15 FPS，USB 速率 480 Mbps；30 FPS 组合启动解析失败。
-  相机在第一次请求时开启，默认空闲 900s 由 `CameraHTTPServer.service_actions` 关闭；
-  唤醒、取帧与关闭共用 capture_lock。客户端每次先 prepare，冷启动等待不计入 3s
-  图像往返上限；服务 running 不代表 USB 数据流开启。两端代码须同步部署。
-  `calibrate-orangepi` → `orangepi/calibration.py` 注入远程采集源；本机入口为
-  `calibrate-slamtec-d435i`。两者共用 `slamtec_l515/d435i_calibration.py` 求解器；
-  `realsense/d435i_motion.py` 从实际 profile 分别选 accel/gyro 频率，按帧号去重。
-  D435i SDK motion_data 已在深度光学系，只乘 depth→color 旋转，不再叠加 IMU→depth。
-  两类原始样本各至少 100 个且覆盖 1.5s，静止与质量判定在开发机。
-  IMU 模式切换后使用 try_wait_for_frames 在总期限内等待，单次缺帧不立即失败；
-  终端记录两路实际采样率，最终超时分别报告样本数和时间跨度。RGB-D 数据流关闭
-  是切换 IMU 的正常步骤，不能据此认定相机断开。
-  服务首次打开相机后固定 serial_number，IMU 与重开的 RGB-D 使用同一设备。
-  采集档案在 `data/orangepi_d435i/calibration-*`，正式外参只在求解通过后原子替换；
-  标定不走普通导航的启动前移，运行前应停止其他导航客户端。
-  `realsense/calibration/visual_motion.py::require_visual_features` 与 PnP 对应点共用
-  `_usable_depth`，只接受 0.25–4m。报对应点不足时先区分 RGB 特征数、图像匹配数、
-  深度筛选后对应点数；不能因地面拟合通过就认定可进行视觉运动估计。
-  此机 `journalctl --user` 无日志时，使用
-  `journalctl -b _SYSTEMD_USER_UNIT=robot-nav-camera.service`。
-  WSL 若无法到达 10.113.48.49，核对 `robot-nav-orangepi-route.service` 的单主机路由；
-  服务配置、SSH 密钥位置与管理命令见 `docs/orangepi.md`，不要把私钥或密码写入文档。
-  隧道报 `bind 127.0.0.1:11448 Address already in use` 而 Linux `ss` 无监听时，
-  检查 Windows `Get-NetTCPConnection` 的监听者；已遇到 Code.exe 自动转发抢占。
-  `.vscode/settings.json` 对 11448/18765 设置 onAutoForward=ignore，禁止恢复历史转发。
-  D435i 直连 WSL 时设备 ID 为 8086:0b3a；若 usbipd 已 Attached 但 SDK 报
-  No device connected，先核对 /dev/bus/usb 对应节点的写权限。仅有 L515 的
-  0b64 规则不覆盖 D435i；共用 99-robot-nav-realsense.rules 现包含两种设备。
-  SDK 2.56.5 配套固件 5.17.0.10。若两路 IMU 均为 0，检查 Windows
-  `usbipd state` 的 IsForced；普通 Attached 不保证关闭、重开后的 IMU 可用。
-  `hardware/realsense/prepare_d435i.ps1` 强制绑定后恢复；Windows 名称可为 435i。
-  恢复检查应覆盖两轮 RGB-D/IMU 切换，不能只验证一次冷启动读取。
-- S100 的沿途帧来自 `adapters/s100_l515/adapter.py::_publish_stopped_frame`：
-  每个最多 0.20 m 的平移小段停止后取帧；Habitat 在每个离散动作后取帧，Hermes
-  另有连续采集线程。共用预采样器不表示三个 Adapter 的采集时机相同。
-- S100 `adapters/s100_l515/planner.py::plan_known_free_path` 禁止未知格，
-  无路时抛 `RuntimeError`，Adapter 在规划调用处转换为 `RecoverableMotionError`；
-  平移重规划次数耗尽也使用可恢复异常，进入 `app.py::_execute_command` 的恢复。
-  帧采集、传感器健康等普通异常仍停止运行。
-- 检测链先检查 `__main__.py::_build_queued_observer`，不能仅凭
-  共用 `core/navigator.py` 判断算法一致。`a99543a`（2026-08-26）首次只在 Hermes
-  入口包装 SAM2；其父版本两边均调用 `_build_observer`。`c16e919` 仅提供 SAM2
-  实现，入口实际启用点是 `a99543a`。
-- `89129dd`（2026-08-26）只给 Hermes 接入 YOLO+SAM2 持续检测、运动中断与
-  启动前移 1 m；Habitat 的运动循环没有对应目标中断入口。
-- 地图输入从 Hermes 接入的 `33d8cd5`（2026-08-25）起就不等价：当时直接转换
-  厂商地图，Habitat 已按局部视场和视线公开地图。`e42900e` 加入 Hermes 的
-  L515 地图筛选与膨胀，`c7a27ed`（2026-09-04）又移除深度截断，改为理论 FOV。
-  排查 Frontier 数量差异时先比较两边实际 `NavigationFrame.obstacle_map`。
-- `9ab3402` / `c7a27ed`（2026-09-04）增加共用的 object/scene 状态与入口；
-  场景模式本身不需要 YOLO+SAM2，不能把模式差异误判为环境差异。
-- `87a1f24`（2026-09-05）在 `app.py::_execute_command` 引入已知区路径扩展，
-  仅 Hermes 实现；未知路径取消与区域屏蔽没有在 Habitat 中同等触发。
-  历史日期为 Git 提交日期；可用 `git show <commit> -- <path>` 核对实际接入位置。
+- `habitat` 与 `hermes` 两个 CLI 入口都在 `launch.py` 创建 `SemanticPerception`
+  （`_build_perception`），两种模式共用同一套感知与搜索核心。探索队列不接受
+  同步观察器；物体接近通过 `--object-*` 接入独立模型进程；运动帧预采样由
+  `set_motion_prefetch_enabled` 在动作期间开关。
+- `hermes` 由 `launch.py::_run_hermes` 装配 `HermesAdapter`（`adapters/hermes/`）。
+  地图缓存、REST、Action 监控与路径检查全部在开发机执行；本地直连与经随车笔记本
+  转发共用同一实现；底盘改 `--base-url`，远程相机另设 `--camera-source remote` 与 `--camera-endpoint`。
+- 检测链先检查 `launch.py::_build_perception` 与 `_build_analyzer`，不能仅凭
+  共用 `core/navigator.py` 判断算法一致。两种入口不再接入持续检测与模型运动中断；
+  Hermes 仍保留首次扫描前的 1 m 启动动作，见 `launch.py`。
+- 地图输入天然不等价：Hermes 按理论水平 FOV 筛选并膨胀厂商地图，Habitat 按局部
+  视场和视线公开 navmesh 可见区域。排查 Frontier 数量差异时先比较两边实际
+  `NavigationFrame.obstacle_map`。
+- object/scene 两种状态与入口共用；场景模式本身不需要 YOLO+SAM2，不能把模式差异
+  误判为环境差异。
+- 已知区路径检查（`send_relative_pose_in_known_space`）仅 Hermes 实现；
+  Habitat 走普通发送接口，因此未知路径取消与区域屏蔽不会在 Habitat 触发。
 
 ## 快速隔离 Rerun
 
@@ -125,17 +74,17 @@
 
 ## Frontier 与观察记录排错
 
-- Hermes `slamtec_l515/observed_map.py::L515ObservedMap` 分别缓存世界格网上的
+- Hermes `adapters/hermes/observed_map.py::HermesObservedMap` 分别缓存世界格网上的
   `_raw_occupancy` 与 `_inflated_occupancy`。只从当前理论水平 FOV（最远 5m）
   读取底盘占用值，膨胀结果也只写回该区域；不能恢复成累计 seen 掩码后每帧重读
   所有已见格，否则视场外地图会变化。FOV 不读取深度、不检查遮挡。
   启动点 0.50m 区域只初始化一次，扩图不补读该圆内的视场外新格。原点平移时
   按首次格网锚点投回当前数组；frame_id、分辨率或 yaw 变化才清空并重新初始化。
   该规则控制算法使用的 FOV 缓存，不改变 Hermes 内部 SLAM 与避障地图。
-  `slamtec_l515/adapter.py::_read_frame_locked` 还将同次读取的完整未膨胀图保留为
+  `adapters/hermes/adapter.py::_read_frame_locked` 还将同次读取的完整未膨胀图保留为
   `navigation_map`，供物体障碍定位和停靠；`navigation_clearance_m=0.36` 只在
-  停靠规划时排除障碍邻域。完整图不得回写到 `L515ObservedMap` 的视场外缓存。
-  `L515ObservedMap.update` 返回 `(obstacle_map, visibility_map)`；后者在膨胀前冻结，
+  停靠规划时排除障碍邻域。完整图不得回写到 `HermesObservedMap` 的视场外缓存。
+  `HermesObservedMap.update` 返回 `(obstacle_map, visibility_map)`；后者在膨胀前冻结，
   与探索图使用相同 FOV 缓存。`observation_coverage.py` 的方向筛选、固定网格覆盖及
   首层未知边界均使用视觉图，Frontier 格子仍从探索图转换为世界点。
   JSONL 的 camera 字段记录 `visibility_map_source`、`origin_in_obstacle_map` 和
@@ -186,15 +135,15 @@
   不记录选中 `candidate_id`。`Motion details` 和终端显示本次返回节点、`branch_depth` 与
   `pending_direction_count`，数量为发出命令时的快照，到达后须刷新。
   JSONL 状态保存 `backtrack_node_id` 和完整 `branch_node_ids`，可核对返回顺序。
-  `app.py::_execute_command` 等待同步动作结束后才允许下一周期决策；
+  `app.py::_execute_action` 等待同步动作结束后才允许下一周期决策；
   排查途中改目标时先核对 Adapter 完成反馈。
 - Hermes 的 `KnownSpaceChassisInterface` 扩展在 `explore.select`、
   `backtrack.return`、`backtrack.resume`、`target.revisit`、`object.fallback_return`
-  和 `object.approach` 使用。`app.py::_execute_command` 对物体停靠优先传入
+  和 `object.approach` 使用。`app.py::_execute_action` 对物体停靠优先传入
   `frame.navigation_map`，其余动作传入 `frame.obstacle_map`，同时显式传入
   `reference_pose=frame.pose`。不能用 FOV 图检查完整导航图选出的物体停靠路径。
-  启动、标定、转向和同步 API 的旧目标接近仍走普通接口；
-  Habitat/S100 当前未实现该扩展。
+  启动前移、标定与扫描转向仍走普通接口；
+  Habitat 当前未实现该扩展。
 - Hermes `_send_relative_pose` 用 `reference_pose` 还原世界目标与目标 yaw，
   `start_pose` 仅计算剩余距离和反馈。排查“Action 完成但未到达父节点”时对照
   `cycle_decision.command.target_world_xy`、`Hermes command target` 和实际终点。
@@ -209,7 +158,7 @@
   Hermes `_check_known_space_path` 将当前位置
   加在剩余路径前，使用选点地图快照；不能改用原始 Hermes 地图、最新运动帧地图，
   或仅检查离散路径点，否则会漏掉未知绕行。
-- `SlamtecL515Config.max_unknown_path_m` 与 CLI `--max-unknown-path-m` 默认均为
+- `HermesConfig.max_unknown_path_m` 与 CLI `--max-unknown-path-m` 默认均为
   1.5 m，非负有限数。只在未知长度 > 上限时取消（比较保留 1e-9 m 浮点容差）；
   多段未知区累加，不取最长连续段，不累加不同轮询或已走过的路。0 禁止正长度
   未知段；地图快照仍固定到选点时刻，不能改成运动中扩展的可见地图。
@@ -268,10 +217,10 @@
   `depth_coverage_available=False` 时不得扩大原地复用范围来消除重复扫描。
 - JSONL 的 `scan_views` 与 `last_checked_view` 记录真实光心位置、时间戳和
   覆盖点数。异步的 `PENDING` 证据不代表已检查；要结合全局 `observed_views`
-  和 `pending_observation_view_count` 判断。同步场景仍须等 `assess_scene` 成功。
+  和 `pending_observation_view_count` 判断，只有成功分析的覆盖才进入已观察集合。
 - `--seed` 只传给 Habitat；随机观察器使用独立、未设种子的 `random.Random()`。
   随机评分运行可检查状态流，不能据单轮轨迹归因 VLM 效果或衡量算法改进。
-- 排查“没有优先向前”时检查 `navigator.py::_select_exploration_target`：当前排序
+- 排查“没有优先向前”时检查 `core/exploration.py::select_exploration_target`：当前排序
   先分新候选与暂存候选，只有新候选进入 `FrontierScoreRequest`；没有新候选时
   才逐个回到父节点，遇到该节点的有效暂存方向按原顺序恢复，不再使用区域切换扣分。
   扫描结束时的车头 yaw 不参与分层。`frontier_selection_source` 为 `new` 或
@@ -298,43 +247,40 @@
   不输出凭据值，也不要把连接失败当作“未检测到目标”。
 - `VlmInteraction.context` 与 `SemanticAnalyzer.analyze_views(trace_context=...)`
   只增加记录来源，不参与提示词或 HTTP payload；不能为了显示关联关系串用
-  `_scan_images` 或共享可变的当前任务 ID。场景返回不另发视觉请求；本地或
-  同步物体定位请求记录其前置可见性请求 `parent_request_id`。
-- `QueuedSemanticObserver._score_origins` 随评分缓存保留 J/R 来源；
+  `_scan_images` 或共享可变的当前任务 ID。场景返回不另发视觉请求；物体定位请求通过 job/view 编号关联历史画面。
+- `SemanticPerception._score_origins` 随评分缓存保留 J/R 来源；
   `semantic_received_jobs` 是该周期接收结果，`semantic_score_sources` 是传给
   排序的有效缓存输入。两者不是同一件事，返回有效分数不等于已用于导航。
-- `adapters/queued_semantics.py::QueuedSemanticObserver` 是 CLI 的默认观察器。
+- `perception/semantic_queue.py::SemanticPerception` 是 CLI 的默认感知实现。
   扫描线程冻结画面；运动回调只提交最新原始帧，由独立采样线程处理；单个分析
   线程按 FIFO 调用 `OpenAICompatibleTargetObserver.analyze_views`，不使用
-  `_scan_images`。设备只由 Adapter 读取，核心状态只由主循环更新。
+  `_scan_images`。设备只由 Adapter 读取，核心状态只由核心函数更新。
 - `data/run_logs/semantic-*/job-*` 保存 `view-N.rgb.gz`、`snapshot.json` 和
   `result.json`。快照中的 `snapshot:批次:序号` 与 `source_region_id` 分别是
   请求内候选 ID 和原区域 ID；分数缓存必须同时匹配地图 frame、原区域 ID、
   世界目标坐标，不能只按新分配的预览 ID 套用。预览不提交核心区域编号。
-- `_CapturedView.depth_gzip` 在 `_capture` 时复制并压缩同帧对齐深度；不保留
-  原始帧引用。`_write_snapshot` 先写 `view-N.depth.pending.f64.gz`，VLM 返回后
-  `_retain_clue_depth` 仅把命中 V 编号重命名为 `view-N.depth.f64.gz`，删除其余
+- `CapturedView.depth_gzip` 在 `_capture` 时复制并压缩同帧对齐深度；不保留
+  原始帧引用。`snapshot_store.write_snapshot` 先写 `view-N.depth.pending.f64.gz`，VLM 返回后
+  `snapshot_store.retain_clue_depth` 仅把命中 V 编号重命名为 `view-N.depth.f64.gz`，删除其余
   临时深度。检测列表为 `[]` 时全删临时深度，为 `None` 时保留待判定数据。
   队列退出或分析未完成时不清理这些临时文件，也不自动恢复任务。
 - 深度由 `adapters/snapshot_depth.py` 编解码；gzip 内为 `<8sII` 头
   （`RNDEPTH1`、宽、高）及按行排列的小端 float64 米制数据，None 编为零，
-  非正或非有限值解码为 None。`_read_clue_frame` 仍能读取旧 `.depth.json.gz`。
+  非正或非有限值解码为 None。`snapshot_store.read_clue_frame` 仍能读取旧 `.depth.json.gz`。
   `snapshot.json` 的 `depth.encoding=gzip-float64-le-v1` 标明新格式；尺寸须与 RGB 相同。
   每张图的 `depth.captured` 只表示采集时是否有深度，不表示模型命中或测距可靠。
   实际保留情况见 `result.json.depth_retention.retained_view_ids`，命中但无文件见
   `missing_view_ids`；`pending_detection` 表示检测失败，`selection_failed` 的
   `errors` 与 `depth_retention_failed` 事件记录文件处理失败。文件失败不改写目标
   判断，深度也不发送给 VLM。旧快照不会补出历史深度。
-- 扫描中出现连续单图批次时，先检查 `snapshot.json.source`。`_capture_scan`
+- 扫描中出现连续单图批次时，先检查 `snapshot.json.source`。`capture_scan_view`
   正常只在 `context.index + 1 >= context.count` 时提交整轮，不按新 Frontier
-  提前拆批。被打断或重建计划时，`sync_state` / 下一轮开始处仍提交未送出的
+  提前拆批。被打断或重建计划时，`app.py::_sync_perception` / 下一轮开始处仍提交未送出的
   部分画面；后续局部扫描本身可能只有一图，不能只凭图数判断是否重复请求。
-- `app.py::_execute_command` 单独调用 `set_motion_prefetch_enabled`：仅允许
-  explore.select / backtrack.return / backtrack.resume，且命令
-  必须有非零平移；在 finally 关闭。`set_motion_interrupt_enabled` 仅用于
-  同步持续检测器，队列不实现该开关；不要让 scan.turn 额外产生单图 motion。
-  target.revisit 不启用预采样。动作期间已接收的帧保留其原始状态快照，允许
-  采样线程稍后完成处理。
+- `app.py::_execute_action` 用 `set_motion_prefetch_enabled` 开关运动采样，
+  `_prefetch_allowed` 按 `ActionKind` 与 `ActionPurpose` 选择探索及回退移动；
+  scan.turn、目标接近和目标返回不采样，finally 中关闭开关。
+  动作期间已接收的帧保留冻结的采集上下文，允许采样线程稍后完成处理。
 - `frontier_overlay.py::build_semantic_analysis_sheet` 保留所有输入图像，包含
   没有 Frontier 的视角；V/F 编号在图外，F 用单像素引线连到图内 3×3 锚点。
   评分失效不能删除未检测任务。RGB 最大宽度 320；V 蓝底白字用连续笔画抗锯齿，
@@ -346,7 +292,7 @@
   逆变换（撤销 yaw/pitch/roll）。中心有效、3×3 至少三点有效，中位值及中心
   光轴深度误差 ≤0.15 m，近处遮挡会过滤。不要用欧氏距离比较深度。
 - `BufferedScanImage.frontier_projections` 与完整相机外参写入 `snapshot.json`；
-  `_read_snapshot` 还原为元组。锚点按同一世界坐标匹配，不依赖队列重命名的
+  `snapshot_store.read_snapshot` 还原为元组。锚点按同一世界坐标匹配，不依赖队列重命名的
   candidate ID。拼图选择已通过深度检查的视角；没有可靠锚点或页脚容量不足
   就省略该候选评分，不能恢复旧的画面边缘兜底。
 - `has_frontier_direction_in_view` 只决定运动帧采样触发；可见方位没有可靠地面
@@ -358,7 +304,7 @@
   语义分；不能归因于界面将请求拆开。前两批 source=motion 说明采样前有可见
   Frontier 方位，评分入口随后被地面投影/深度检查过滤。现有快照不记录淘汰
   原因，尚不能区分投影出界、无效深度、地面不符或外参问题；不要直接断言阈值过严。
-- `build_frontier_score_sheet` 保留旧同步 API 的数字方向标注；默认 FIFO 联合
+- `build_frontier_score_sheet` 保留数字方向标注的旧拼图形式；默认 FIFO 联合
   分析走 `build_semantic_analysis_sheet` 的地面锚点。排查时先确认实际请求 task。
 - Habitat `_build_navigation_frame` 显式填写 `CameraExtrinsics(height_m=sensor_height_m)`；
   不得再使用默认零高度，否则地面锚点无法生成。采集分辨率没有提升。
@@ -371,11 +317,11 @@
   越界、布尔值、重复编号、非列表均判为检测失败，仍保留有效分数。
   列表只包含检测匹配的画面；场景和队列物体模式到位后均不进行二次视觉确认。
   Rerun 的 `Clue order` 是模型返回顺序，非新的世界候选编号。
-- `prepare_cycle` 接收结果：检测有效才登记覆盖，评分失败仍可保留目标线索。
+- `SemanticPerception.begin_cycle` 接收结果：检测有效才登记覆盖，评分失败仍可保留目标线索。
   `_pending_coverage` 在结果被主循环接收前一直保留；失败后移除，不冒充已检查。
   `pending_semantic_jobs` 还含采样、待接收结果、部分扫描和排队线索，不是 HTTP 数。
 - `TargetClue.pose` 是拍摄时机器人位姿，`job_id/view_id` 关联同帧 RGB-D。
-  场景由 `_continue_target_clue(frame, state)` 返回并恢复朝向；位置误差 ≤0.25m、
+  场景由 `core/scene_target.py::continue_scene_target` 返回并恢复朝向；位置误差 ≤0.25m、
   朝向误差 ≤5° 时返回 COMPLETE / target.revisit_complete。
   物体由 `core/object_approach.py` 处理 LOCALIZING_OBJECT → APPROACHING_OBJECT
   → COMPLETE。`_complete_approach` 以停靠命令成功执行为依据，记录
@@ -386,26 +332,26 @@
   其他历史线索。`continue_object_history` 在 WAITING_FOR_SEMANTICS 原地排空
   已采集队列；全部不能定位才经 REVISITING_TARGET 保底返回，最终 STOPPED。
   STOPPED 以 CLI 退出码 3 结束，不再重采或调用确认。
-  `app.py::_apply_object_localization` 每周期最多消费一次定位结果，队列
-  `localize_object` 始终调用 `_read_clue_frame`，没有到达后当前帧定位分支。
+  `app.py::_supply_perception` 每周期最多消费一次定位结果，队列
+  `localize_object` 始终调用 `snapshot_store.read_clue_frame`，没有到达后当前帧定位分支。
   历史帧的位姿与标定用于定位，停靠始终使用当前帧的位姿和地图。
-  `_read_clue_frame` 保留当前帧地图；历史深度文件缺失时返回 `depth=None`，
+  `snapshot_store.read_clue_frame` 保留当前帧地图；历史深度文件缺失时返回 `depth=None`，
   已有深度尺寸或单位错误仍使该快照失败。障碍射线由历史相机位姿发出，查询当前
   同坐标系地图；`frame.json` 的 `timestamp_s` 是拍摄时间，`map_timestamp_s`
   是当前导航帧采集时间，不能把地图理解成拍摄时保存的地图。
-  `prepare_cycle` 按列表原顺序入队，物体按 job/view 保留每张不同快照；
-  场景仍按位姿去重且不重新排序，批次按 FIFO。`_discard_target_clue` 返回无命令状态，
+  `SemanticPerception.begin_cycle` 按列表原顺序入队，物体按 job/view 保留每张不同快照；
+  场景仍按位姿去重且不重新排序，批次按 FIFO。`core/scene_target.py::discard_target_clue` 返回无命令状态，
   场景返回失败以 target.revisit_failed、物体线索失败以 object.clue_failed
   让下一周期优先取下一条，COMPLETE 与 STOPPED 不再取线索。
   `navigate` 的 active_target_clue 分支优先于普通视觉处理；`app.py` 跳过线索
   处理期间的普通目标观测，物体定位只响应 NEEDS_OBJECT_LOCALIZATION。
-- `adapters/object_localizer.py` 的两个检测线程独立运行，首个有效框进入 SAM2；
+- `perception/object_localizer.py` 的两个检测线程独立运行，首个有效框进入 SAM2；
   不要求 YOLO/VLM 同时成功，也不做框重叠否决。SAM2 失败或掩码无法测距时用框。
   `object_model_process.py` 为 YOLO、SAM2 分别维护常驻进程和单请求锁；旧 YOLO
   尚未返回时不积压新帧，VLM 路径仍可继续。每次本地请求有超时，退出时关闭进程。
   同一 `rgb_file` 的多个框复用 SAM2 图像编码；输入路径每次定位独立，不覆盖旧图。
   子进程移除 LD_PRELOAD/LD_LIBRARY_PATH/PYTHONHOME，默认通过
-  `__main__.py::_default_object_python` 使用已有 robot-nav 解释器。
+  `cli.py::_default_object_python` 使用已有 robot-nav 解释器。
 - `object-localization/observation-*/frame.json` 记录尺寸、标定与关联编号；
   `input.rgb.gz`、`input.depth.json.gz` 保留同帧输入，缺深度时不写深度文件并以
   `depth_available=false` 标记。`input.obstacle_map.json.gz` 保存当次定位查询地图；
@@ -428,23 +374,22 @@
   仍保留 rejected。核心依据是否有有效坐标决定接近，不把这些值改成模型确认。
 - `core/object_standoff.py::plan_object_standoff` 一次计算四邻接可达区，枚举目标
   周围 0.60–2.0m 全圆域自由格；优先最接近机器人侧 0.75m 理想位置，再按路径距离
-  排序。Hermes 用完整图加 0.36m 净空，Habitat/S100 沿用已有图，不再额外膨胀。
+  排序。Hermes 用完整图加 0.36m 净空，Habitat 沿用已有图，不再额外膨胀。
   `standoff_map`、`standoff_clearance_m`、`standoff_search_radius_m` 与
   `standoff_candidate_count` 记录选点依据；unknown/occupied/unreachable/excluded
   格数均带 `standoff_` 前缀与 `_cells` 后缀，unreachable 包括净空膨胀排除。
   排查“无停靠点”先看这些字段。
-- `QueuedSemanticObserver.sync_state` 在提交残余扫描前更新 `_background_paused`：
-  有待查线索、active_target_clue、目标返回/接近/定位阶段、同步 API 确认阶段或导航终态时暂停。
-  `_worker_loop` 与 `_capture_loop` 等待暂停解除；`submit_motion_frame` 不接收
-  新预采样帧。`prepare_cycle` 根据传入状态与待查线索决定是否接收完成结果，
-  暂停期间保留 `_completed` 与 `_pending_coverage`，不抢占当前线索。
+- `app.py::_sync_perception` 发布冻结的 `CaptureContext` 并同步暂停标志。
+  有待查线索、active_target_clue、目标返回/接近/定位阶段或导航终态时暂停。
+  `_worker_loop` 与 `_capture_loop` 等待暂停解除，`observe_motion_frame` 不接收新帧。
+  `SemanticPerception.begin_cycle` 在暂停期间保留 `_completed` 与 `_pending_coverage`；
+  接收后由 `core/perception_flow.py::receive_perception` 更新搜索状态。
   两条已有线索之间保持暂停；物体线索用完时原地恢复已采集队列，继续接收线索。
   `fallback_clue` 本身不使队列暂停，否则会在等待历史结果时自锁。
   已开始的请求/采样可以完成并保存结果；暂停不是取消已发送的 HTTP 请求。
   `semantic_background_paused` 进入周期诊断，Rerun 简表显示普通队列暂停提示。
-- `QueuedSemanticObserver.assess_scene` 仅满足通用观察器协议，正常异步导航不调用；
-  场景判断由联合检测完成。同步观察器仍可用 `assess_scene(goal)` 判断扫描拼图；
-  同步物体观测保留接近与最终确认，默认 CLI 不进入这条路径。
+- 场景判断由联合分析完成；模型协议仅包含 `analyze_views` 与 `locate_object`，
+  没有同步观察器、到达后模型确认或检测触发的运动中断分支。
 - 分数只在下一次决策读取，不修改执行中的目标；默认 CLI 不使用本地 YOLO 中断。
   `_wait_for_semantics_or_finish` 必须等待任务与线索耗尽；失败检测计数单独报告。
   `close` 停止继续出队，已落盘数据保留，当前没有恢复队列或磁盘限额机制。
@@ -454,27 +399,27 @@
 - OpenCode Go 的 `HTTP 400 / MissingSessionID` 表示请求已到服务端，但缺少
   `x-opencode-session`；不能归因为 DNS 失败或直接认定凭据错误。要求见
   [官方接入说明](https://opencode.ai/docs/go/#where-can-i-use-it)。
-  `__main__.py::_build_observer` 为每次导航生成 UUID，填入
+  `launch.py::_build_analyzer` 为每次导航生成 UUID，填入
   `OpenAICompatibleConfig.opencode_session_id`，`_post_json` 在各类请求中复用。
   不要每次 HTTP 请求重新生成；User-Agent 保持 robot-nav 的真实标识。
   查看 `job-*/result.json` 的 detection_error/scoring_error 或终端请求错误；
   仅有导航周期继续输出不代表模型成功，普通模型失败会继续几何探索。
 - Hermes 静止检测默认 1 秒，直连及无线 CLI 的 `--action-stall-timeout-s` 与
-  `SlamtecL515Config.action_stall_timeout_s` 必须同步。`_monitor_action` 每次
+  `HermesConfig.action_stall_timeout_s` 必须同步。`_monitor_action` 每次
   Action 轮询读取位姿并检查，默认间隔 0.2s；2s 仅控制日志输出，不能用于节流到位判断。
   实际间隔另受帧采集与 REST 延迟影响，不能理解为精确第 1 秒取消。
   MoveToAction 的有效进展仍是平移至少 2 cm，原地转向不重置其平移停滞计时。
-- `slamtec_l515/adapter.py::_check_stable_arrival` 对 working Action 检查目标
+- `adapters/hermes/adapter.py::_check_stable_arrival` 对 working Action 检查目标
   位置误差 ≤`action_arrival_position_m`（0.30m）或转向误差 ≤`yaw_tolerance_rad`（5°）。
   在容差内连续 `action_arrival_hold_s`（0.001s，实际至少等到后续轮询）相对采样锚点移动 <2cm、转动 <1° 才
   抛出内部到达信号；MoveTo 还要求先有有效平移。`_execute_action` 捕获后调用
   `_cancel_active_action`，用 `require_success=False` 确认终态，再读位姿复查。
   取消或终态确认失败仍报错；复查超出容差作为可恢复运动失败。该容差不同于
   `position_tolerance_m`（0.03m），后者仅决定是否下发微小平移命令。
-- `__main__.py::_run_navigation` 在目标完成、`FAILED`、非 `OK` 且非等待感知状态，
+- `launch.py::run_navigation` 在目标完成、`FAILED`、非 `OK` 且非等待感知状态，
   或达到 `max_cycles` 时退出；`MISSING_DATA` 当前也立即退出。周期上限不能当作
   Frontier 耗尽；`OK + WAITING_FOR_SEMANTICS` 每次最多等待结果 1 秒，不消耗决策
-  额度。普通模型失败记为失败批次、评分降级；同步 API 的最终确认失败沿用 `uncertain` 重试。
+  额度。普通模型失败记为失败批次、评分降级。
 - 物体线索处理由状态机持续推进，NEEDS_OBJECT_LOCALIZATION 属于等待感知状态。
   `core/object_approach.py::recover_object_motion` 对 object.approach 清空目的地，
   下一周期用最新地图换停靠点；object.fallback_return/object.fallback_turn 失败则 STOPPED。
@@ -482,9 +427,9 @@
 - `core/navigator.py::recover_from_motion_failure` / `continue_after_motion_stall`
   对 `scan.turn` 使用 `_recover_scan_turn`，清除扫描计划后按真实朝向重新规划，
   不登记失败方向的覆盖。首次扫描尚未完成时仍按首次环扫规则重建。
-- `__main__.py::_move_slamtec_forward_on_start` 在 `_run_navigation` 之前直接调用
+- `launch.py::_move_hermes_forward_on_start` 在 `run_navigation` 之前直接调用
   底盘；前移 1 m 的可恢复失败/停滞在确认动作结束后继续启动，其他异常仍停止。
-- `slamtec_l515/adapter.py::_execute_action` 将 Action 创建、起始位姿读取和监控
+- `adapters/hermes/adapter.py::_execute_action` 将 Action 创建、起始位姿读取和监控
   放在同一异常范围；`_cancel_active_action` 与 `close` 负责取消遗留动作。已获得
   ID 时还要确认终态；创建请求失败而没有 ID 时只能尝试取消，原异常仍终止运行。
 - CLI 的 `_optional_callback` 停用失败的 Rerun 周期/运动回调；Hermes 进度回调

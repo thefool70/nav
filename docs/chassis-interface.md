@@ -4,7 +4,8 @@
 下面的内部标准，核心算法只面对内部标准。
 
 `NavigationFrame.acquisition_timings` 可携带该帧组装阶段的诊断时间快照，默认为空；
-仅用于日志，不影响导航决策，也不作为传感器采样时间。Hermes 本地和无线入口提供该字段。
+仅用于日志，不影响导航决策，也不作为传感器采样时间。Hermes 直连与经随车笔记本
+转发的入口都提供该字段。
 
 ## 内部标准（已定）
 
@@ -50,15 +51,17 @@
 设备离线、健康异常、数据读取失败等系统错误必须使用普通异常，仍然终止运行。
 
 提供实际规划路径的 Adapter 可实现 `KnownSpaceChassisInterface` 扩展。
-`app.py` 对 Frontier 探索、返回父节点、恢复暂存方向、返回目标线索位置与队列物体停靠调用其
+`app.py` 按 `ActionConstraint.REQUIRE_KNOWN_PATH` 对 Frontier 探索、返回父节点、恢复暂存方向、返回目标线索位置与队列物体停靠调用其
 `send_relative_pose_in_known_space(command, obstacle_map, *, reference_pose)`，
 显式传入命令、决策地图与 `frame.pose`。Adapter 必须用该参考位姿还原世界目标，
 不能用发送时重新读取的位姿解释同一条相对命令；
 物体停靠优先传入 `frame.navigation_map`，其余上述动作传入 `frame.obstacle_map`；
-启动前移、标定、扫描转向与同步 API 的旧目标接近使用普通发送接口。
-当前 Hermes 直连与香橙派无线 Adapter 支持该扩展，Habitat 和 S100 仍使用原接口。
-无线 Adapter 在开发机执行相同的动作监控与路径检查；香橙派只转发 RGB-D 和
-Hermes TCP 通信。无线相机的时间戳在开发机接收时转为本机时间域，不把两端
+启动前移、标定与扫描转向使用普通发送接口。
+当前 Hermes Adapter 支持该扩展；Habitat 使用原接口，由 navmesh 约束可达路径。
+`NavigationAction.destination` 是完整世界系位姿，执行时须保留指定的最终 yaw，
+不能把它替换为当前位置到目标点的方位角。
+经随车笔记本转发时，动作监控与路径检查仍在开发机执行，转发端只传输相机数据与
+底盘网络通信。转发相机的时间戳在开发机接收时转为本机时间域，不把两端
 单调时钟直接混用；相机与底盘位姿的顺序读取仍有网络延迟，并非硬件同步。
 
 受约束的路径必须与传入地图同坐标系，逐段检查当前位置和剩余路径点之间的连线。
@@ -82,7 +85,7 @@ Hermes TCP 通信。无线相机的时间戳在开发机接收时转为本机时
 如果移动只是因连续静止达到门槛而主动终止、但当前位姿和传感器仍可继续使用，
 Adapter 抛出 `MotionStalledError`。Frontier 探索不会把它当作规划失败，而是以
 实际当前位置开始下一轮扫描；返回父节点停滞也从实际位置重新检查。两种异常不得混用。
-Hermes 的平移、转向执行失败、停滞和目标检测中断，均须取消并确认 Action 进入
+Hermes 的平移、转向执行失败和停滞，均须取消并确认 Action 进入
 终态后才允许恢复导航；取消或确认失败仍使用普通异常停止运行。
 
 返回父节点的命令结束后，核心还检查实际位置与父节点是否相距不超过 0.25 m；
@@ -98,15 +101,16 @@ Action，但必须确认终态并复查位姿后才返回，不能让上一动�
 
 ## 感知边界
 
-`TargetObserver` 与底盘接口相互独立。Adapter 只负责把同步的 RGB、深度、内参和
+`SemanticPerception` 与底盘接口相互独立。Adapter 只负责把同步的 RGB、深度、内参和
 外参放进 `NavigationFrame`；目标检测、场景判断和 Frontier 评分不应写进
-`ChassisInterface`。持续检测器可以在底盘运动期间读取 Adapter 提供的新帧，但
-最终结果仍通过 `TargetObservation` 进入核心状态机。
+`ChassisInterface`。运动采样线程可以接收 Adapter 提供的新帧，分析结果通过感知队列交给核心状态机。
 
-命令行的 `QueuedSemanticObserver` 将选取的扫描和运动画面冻结落盘，由单个
+命令行的 `SemanticPerception` 将选取的扫描和运动画面冻结落盘，由单个
 后台线程按 FIFO 联合检查目标与评分。采样线程使用 Adapter 已提供的帧，不自行
 读取设备；网络线程不操作底盘或修改搜索状态。`app.py` 在下一周期接收结果，
-再决定移动，底盘的同步执行契约不变。
+再决定移动，底盘的同步执行契约不变。感知模块对外只暴露
+`capture_scan_view`、`score_frontiers`、`localize_object` 等
+显式请求；场景判断包含在联合分析中。运行层传递结果，由核心更新 `SearchState`。
 
 `TargetVisibility.PENDING` 表示已采集、等待分析；它不表示目标不存在。待处理
 覆盖与已检查覆盖分别存入 `SearchState`。后台检测到目标后，以对应画面的拍摄
@@ -157,7 +161,6 @@ Action，但必须确认终态并复查位姿后才返回，不能让上一动�
 - 底盘异常、未就绪、目标不可达时的行为如何映射到 `NavigationStatus`。
 
 只要上述数据、坐标、标定和同步执行契约全部归一化，仿真切换到真底盘时只需
-替换 `ChassisInterface` 的实现；`core` 与 `TargetObserver` 不应包含厂商分支。
+替换 `ChassisInterface` 的实现；`core` 与 `SemanticPerception` 不应包含厂商分支。
 
-具体实现见 [Habitat](habitat.md)、[Hermes + D435i](slamtec-l515.md) 和
-[S100 + L515](s100-l515.md)，无线转发见 [香橙派 + D435i](orangepi.md)。
+具体实现见 [Habitat](habitat.md) 与 [Hermes + D435i](hermes.md)。

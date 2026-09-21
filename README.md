@@ -12,11 +12,12 @@
 
 建议按下面的顺序阅读：
 
-1. `src/robot_nav/app.py`：一个导航周期如何串联输入、感知、决策和运动。
-2. `src/robot_nav/core/navigator.py`：环境无关的搜索状态机。
-3. `src/robot_nav/core/models.py`：算法输入、输出和跨周期状态。
-4. `src/robot_nav/core/frontier.py`：Frontier 的生成、聚类和排序。
-5. 当前使用的 Adapter：Habitat、S100、Hermes 直连或香橙派无线转发。
+1. `src/robot_nav/__main__.py`：启动分派；参数定义见 `cli.py`。
+2. `src/robot_nav/launch.py`：如何按 Adapter 装配组件。
+3. `src/robot_nav/app.py`：完整运行循环，以及单周期的输入、感知、决策和运动。
+4. `src/robot_nav/core/navigator.py`：行为分派与公共输入检查，四类行为的入口。
+5. `src/robot_nav/core/models.py`：算法输入、输出和跨周期状态。
+6. 当前使用的 Adapter：Habitat 或 Hermes + D435i。
 
 算法细节见 [算法说明](docs/algorithm.md)，坐标和接口约定见
 [底盘接口标准](docs/chassis-interface.md)。
@@ -29,32 +30,36 @@
     ▼
 ChassisInterface ──► NavigationFrame
                            │
-VLM 视觉队列 ─────► TargetObserver
+    SemanticPerception ───►感知结果 / 语义判定 / 历史定位
                            │
                            ▼
-                run_navigation_cycle()
+                run_navigation_cycle()      （app.py：单周期编排）
                            │
                            ▼
-                      navigate()
+                      navigate()            （core/navigator.py：行为分派）
                            │
                            ▼
-                RelativePoseCommand
+                  NavigationAction          （显式动作类型 + 约束）
                            │
                            ▼
                   ChassisInterface
 ```
 
 - `core/` 只做算法计算，不读取设备、不请求模型、不发送控制命令。
-- `app.py` 负责单周期编排，并把可恢复的运动结果送回状态机。
-- `adapters/` 负责设备协议、坐标转换、地图归一化和视觉模型。
+- `app.py` 负责导航循环与单周期编排，并把可恢复的运动结果送回状态机。
+- 搜索核心按四类行为组织：`core/scan_behavior.py`（环扫与补扫）、
+  `core/exploration.py`（Frontier 探索）、`core/backtracking.py`（分支回退）、
+  目标处理（`core/scene_target.py`、`core/target_clue.py`、`core/object_approach.py`）。
+- `perception/` 组织取帧、视觉队列、语义判定与历史物体定位；不直接控制底盘，
+  也不修改搜索状态。
+- `adapters/` 负责设备协议、坐标转换、地图归一化和视觉模型请求。
 - `visualization/` 与 `run_log.py` 只记录过程，不参与决策。
-- `__main__.py` 只负责命令行、组件组装和循环运行。
 
 ## 搜索方式
 
 | 模式 | 发现目标 | VLM 的作用 | 后续行为 |
 | --- | --- | --- | --- |
-| 物体搜索 | 后台检查扫描和移动中采集的固定画面 | 联合检测与评分；接近时可提供目标框 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
+| 物体搜索 | 后台检查扫描和移动中采集的固定画面 | 联合检测与评分；接近时可用本地模型提供目标框 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
 | 场景搜索 | 后台检查扫描和移动中采集的固定画面 | 同一次请求判断场景与评分 Frontier | 返回拍摄位置并对齐朝向，搜索完成 |
 
 两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，动作结束后
@@ -88,10 +93,8 @@ Hermes 执行 Frontier 移动时，还会按选点时的算法地图检查实际
 
 | 环境 | 用途 | 文档 |
 | --- | --- | --- |
-| `robot-nav` | 核心代码、Hermes + D435i | [Hermes + D435i](docs/slamtec-l515.md) |
+| `robot-nav` | 核心代码、Hermes + D435i | [Hermes + D435i](docs/hermes.md) |
 | `robot-nav-habitat` | Habitat-Sim 仿真 | [Habitat](docs/habitat.md) |
-| `robot-nav-slam` | S100 + L515、ROS 2 SLAM | [S100 + L515](docs/s100-l515.md) |
-| 开发机 `robot-nav` + 香橙派 Python | Hermes + D435i 无线数据转发 | [香橙派无线适配](docs/orangepi.md) |
 
 核心环境的最小安装：
 
@@ -107,22 +110,75 @@ Rerun 是可选依赖：
 python -m pip install -e '.[visualization]'
 ```
 
+底盘手动操作面板：`python -m robot_nav.chassis_gui`，浏览器打开
+`http://127.0.0.1:8088`。支持状态查看、小步移动、转向、回桩和取消任务；
+连接方式与限制见 [Hermes 文档](docs/hermes.md#底盘操作面板)。
+
+## 统一运行配置
+
+项目根目录的 `config.json` 集中保存导航与标定的常用参数，按 navigation、habitat、
+hermes、camera、perception、logging、calibration 分组。默认读取当前目录下的该文件；
+切换工作目录时通过 `--config /绝对路径/config.json` 指定，配置文件必须完整。
+命令行显式参数优先于文件，配置中的相对文件路径以配置文件所在目录为基准，
+命令行相对路径仍以当前工作目录为基准。
+
+```bash
+python -m robot_nav habitat --target "chair"
+python -m robot_nav --config config.json hermes --preflight-only
+python -m robot_nav hermes --config config.json --target "chair" --enable-motion
+```
+
+随车笔记本方式将 `hermes.base_url` 改为 `http://127.0.0.1:11448`，
+`camera.camera_source` 改为 `remote`；相机 IPC 地址已在 camera 组中。
+仓库默认仍保持本地 USB 与底盘直连，不因加载配置自动改变连接方式。
+
+`navigation.target` 的 null 表示本次需要指定目标；`perception.object_python` 的 null
+表示自动查找已有 robot-nav 模型环境。`hermes.startup_forward_m` 默认 1 米，设为 0
+可跳过真机启动前移。外参文件仍独立，`camera.camera_calibration` 只保存其路径。
+标定输出位置为 `calibration.output`。密钥继续通过环境变量或已有凭据读取。
+`--enable-motion`、`--preflight-only`、`--base-only` 只接受命令行设置，不能写入配置。
+
+配置布尔值可临时覆盖：`--rerun` / `--no-rerun`、`--debug-random-score` /
+`--no-debug-random-score`、`--debug-frontier` / `--no-debug-frontier`。
+未知字段、重复字段、缺少字段或非法值会在装配组件前报错，避免配置拼错后悄悄使用默认值。
+
+读取与校验在 `config.py`，`cli.py` 合并覆盖，`launch.py` 将结果传给各组件 Config。
+各 Config 保留独立调用时的缺省值；算法内部常量、SSH 脚本环境变量与独立底盘 GUI
+参数不由这个运行配置文件接管。
+
+## 运行命令
+
+```bash
+# Habitat 仿真
+python -m robot_nav habitat --scene sim/habitat/scene.glb --target "chair"
+
+# Hermes + D435i 真机（本地 USB 相机）
+python -m robot_nav hermes --target "chair" --enable-motion
+
+# 随车笔记本转发（先启动相机服务和 SSH 隧道，见 Hermes 文档）
+python -m robot_nav hermes --camera-source remote \
+  --camera-endpoint ipc:///tmp/robot-nav-camera.sock --base-url http://127.0.0.1:11448 \
+  --target "chair" --enable-motion
+
+# 只读预检，不发送运动命令
+python -m robot_nav hermes --preflight-only
+
+# D435i 安装外参标定（独立入口，会移动真机）
+python -m robot_nav calibrate-hermes --enable-motion
+```
+
 ## 当前实现
 
 - Habitat：提供 RGB-D、二维位姿和逐步公开的占用图；相对目标由 navmesh 规划并
   离散执行。
-- Hermes + D435i（`slamtec-d435i`，由原 L515 直连版本改造）：Hermes 提供位姿、激光地图和自主规划；D435i 提供 RGB-D，
+- Hermes + D435i：Hermes 提供位姿、激光地图和自主规划；D435i 提供 RGB-D，
   探索地图只在当前理论水平 FOV 内刷新，视场外保留历史值，不考虑遮挡；
   启动区域仅初始化一次。物体障碍定位和停靠使用完整导航图，选点时保留 0.36 m 净空。
   观测方向和覆盖使用同一 FOV 缓存的未膨胀视觉图，避免把导航净空带误判为遮挡。
   该视觉图中的封闭小未知孔洞不产生探索与补查候选，地图本身仍保留未知状态。
   实际位姿到达并稳定后主动结束 Action，确认终态后继续。
-  两种模式与 Habitat、S100 共用探索队列及物体接近状态机。
-- S100 + L515：可由 `slam_toolbox` 生成位姿和占用图，也保留小范围直接模式。
-- 香橙派 + Hermes + D435i：香橙派传输 RGB-D、标定所需 IMU 及底盘网络通信；导航、地图
-  处理、动作控制及模型留在开发机。相机按请求开启，空闲 15 分钟后关闭数据流。
-  使用 `python -m robot_nav orangepi`，
-  `calibrate-orangepi` 自动求解 D435i 安装外参；部署和 SSH 隧道见 [无线适配说明](docs/orangepi.md)。
+  本地直连与经随车笔记本转发共用同一套地图处理、运动监控与导航实现；
+  转发只传输相机数据与底盘网络通信，算法、地图处理和动作控制仍在开发机。
 - Rerun：显示 RGB、深度、地图、Frontier、机器人轨迹、算法目标、底盘目标和
   规划路径，同时持续写入 `data/run_logs/rerun-*.rrd`。`--rerun-save <PATH>`
   可指定新文件路径；`--no-rerun` 同时关闭界面和录制。
@@ -140,29 +196,44 @@ python -m pip install -e '.[visualization]'
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/robot_nav/core/` | 状态机、Frontier、扫描、定位、历史和数据契约 |
+| `src/robot_nav/__main__.py`、`cli.py` | 启动分派、参数定义与组合校验 |
+| `src/robot_nav/launch.py` | 组件装配、日志与可视化接线 |
+| `src/robot_nav/calibration_launch.py` | 真机外参标定独立入口 |
+| `src/robot_nav/app.py` | 完整导航循环、单周期编排与显式动作执行 |
+| `src/robot_nav/core/navigator.py` | 行为分派与公共输入检查 |
+| `src/robot_nav/core/scan_behavior.py` | 首次环扫、补扫与扫描画面采集 |
+| `src/robot_nav/core/exploration.py` | Frontier 选点、提交、淘汰与暂存方向恢复 |
+| `src/robot_nav/core/backtracking.py` | 分支节点回退与到点后恢复方向 |
+| `src/robot_nav/core/scene_target.py` | 场景线索返回拍摄位姿并完成 |
+| `src/robot_nav/core/target_clue.py` | 目标线索分派与丢弃 |
+| `src/robot_nav/core/object_approach.py` | 历史线索处理、停靠完成与保底返回停止 |
+| `src/robot_nav/core/frontier_regions.py` | Frontier 区域刷新、候选预览与区域屏蔽 |
+| `src/robot_nav/core/perception_flow.py` | 感知增量归并、采样上下文与目标处理状态 |
+| `src/robot_nav/core/actions.py` | 执行与日志共用的目标位姿转换 |
+| `src/robot_nav/runtime_reporting.py` | 周期日志回调与终端摘要 |
+| `src/robot_nav/core/navigation_io.py` | 动作构造与状态/边界校验的公共输入检查 |
 | `src/robot_nav/core/observation_coverage.py` | 局部 Frontier 观察点、RGB-D 覆盖记录和跨位置复用 |
 | `src/robot_nav/core/frontier_projection.py` | Frontier 地面点投影与对齐深度核对，供 VLM 图片标注 |
 | `src/robot_nav/core/path_validation.py` | 测量实际规划路径在算法未知区内的累计长度 |
-| `src/robot_nav/core/object_approach.py` | 历史线索处理、停靠完成与保底返回停止 |
 | `src/robot_nav/core/object_grounding.py` | RGB-D 定位与图像方向上的障碍位置假设 |
 | `src/robot_nav/core/object_standoff.py` | 在目标周围搜索满足净空与连通条件的停靠点 |
+| `src/robot_nav/perception/semantic_queue.py` | 取帧、FIFO 联合分析、提前采样与迟到结果接收 |
+| `src/robot_nav/perception/analyzer.py` | 语义分析的模型边界协议 |
+| `src/robot_nav/perception/snapshot_store.py` | 语义快照的写入与读取 |
 | `src/robot_nav/adapters/habitat/` | Habitat Adapter |
-| `src/robot_nav/adapters/slamtec_l515/` | Hermes + D435i Adapter |
-| `src/robot_nav/adapters/s100_l515/` | S100 + L515 Adapter |
-| `src/robot_nav/adapters/orangepi/` | 无线 Adapter、远程相机客户端和香橙派 RGB-D 数据服务 |
+| `src/robot_nav/adapters/hermes/` | Hermes + D435i Adapter、REST 客户端与标定 |
 | `src/robot_nav/adapters/realsense/` | RealSense RGB-D 采集、D435i 配置与相机外参标定 |
 | `src/robot_nav/adapters/openai_compatible.py` | VLM 请求与结构化结果解析 |
-| `src/robot_nav/adapters/queued_semantics.py` | 快照落盘、FIFO 联合分析、提前采样与迟到结果接收 |
-| `src/robot_nav/adapters/object_localizer.py` | 接近阶段的 VLM、本地模型与定位编排 |
+| `src/robot_nav/perception/object_localizer.py` | 历史定位的 YOLO/VLM 组合、SAM2 分割与定位回退策略 |
 | `src/robot_nav/adapters/object_detection_worker.py` | 在指定环境中常驻运行 YOLO 或 SAM2，记录阶段与调用栈 |
+| `src/robot_nav/adapters/sam2_segmenter.py` | SAM2 边界框到像素掩码的分割 |
 | `src/robot_nav/adapters/object_model_process.py` | 模型进程的请求、进度、超时与退出 |
-| `src/robot_nav/adapters/yolo_world_sam2.py` | 可复用的 YOLO/SAM2 检测器与同步 API 观察器 |
+| `src/robot_nav/adapters/yolo_world.py` | YOLO-World 模型加载与框检测 |
 | `src/robot_nav/visualization/` | Rerun 调试界面 |
 | `src/robot_nav/visualization/semantic_world.py` | World 节点的固定 RGB、评分与状态关联 |
 | `src/robot_nav/visualization/observation_card.py` | 同次观测的 RGB、评分锚点与状态卡片 |
 | `sim/habitat/` | Habitat 环境与启动脚本 |
-| `hardware/`、`slam/` | 真机、USB 和 ROS 启动配置 |
+| `hardware/hermes/`、`hardware/realsense/` | D435i USB 转发、RSUSB 构建与 udev 规则 |
 
 ## 当前边界
 

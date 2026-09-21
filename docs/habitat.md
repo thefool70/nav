@@ -3,7 +3,6 @@
 `HabitatChassisAdapter` 把 Habitat-Sim 转换为与真底盘相同的
 `ChassisInterface`。导航算法不包含 Habitat 分支；`sim/habitat/` 只保存环境、
 渲染包装和简单的 Adapter 验证脚本。
-
 ## 安装
 
 Habitat 使用独立的 Python 3.9 环境，避免图形依赖污染核心环境：
@@ -54,6 +53,10 @@ conda `llvmpipe`。当前机器建议显式使用 `gpu`，这样 GPU 链路异�
 conda 中同名库覆盖 D3D12 所需版本。
 
 ## 运行导航
+
+默认读取项目根目录 `config.json` 中的运行参数，命令行参数优先。场景路径可在
+`habitat.scene` 中设置；配置规则见 [统一运行配置](../README.md#统一运行配置)。
+
 
 没有 VLM 凭据时，先运行随机评分调试模式：
 

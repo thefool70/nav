@@ -78,6 +78,7 @@
 - `docs/chassis-interface.md`：Adapter 必须遵守的数据、坐标和执行契约。
 - `docs/habitat.md`：Habitat 环境、GPU 启动和仿真运行。
 - `docs/agent/habitat.md`：Habitat 启动顺序与 Rerun/GPU 快速隔离。
-- `docs/slamtec-l515.md`：Hermes + D435i 直连安装、标定、运行和排错。
-- `docs/s100-l515.md`：S100 + L515 的 ROS SLAM 与直接模式。
-- `docs/orangepi.md`：香橙派转发 Hermes + D435i 的部署、数据通道与失联边界。
+- `docs/hermes.md`：Hermes + D435i 安装、标定、运行、转发与排错。
+
+`docs/slamtec-l515.md`、`docs/s100-l515.md`、`docs/orangepi.md` 已随范围收敛失效，
+仅保留指向当前文档的说明，不再作为事实来源。
