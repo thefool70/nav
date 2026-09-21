@@ -506,14 +506,9 @@ class HabitatChassisAdapter:
         target_world_xy: Optional[Tuple[float, float]],
         path_world_xy: Tuple[Tuple[float, float], ...],
     ) -> None:
-        """发布 navmesh 实际目标和路径；显示失败不影响仿真运动。"""
-        callback = self._on_motion_plan
-        if callback is None:
-            return
-        try:
-            callback(target_world_xy, path_world_xy)
-        except Exception:
-            self._on_motion_plan = None
+        """发布 navmesh 实际目标和路径；可视化故障由入口统一处理。"""
+        if self._on_motion_plan is not None:
+            self._on_motion_plan(target_world_xy, path_world_xy)
 
     def _require_open(self) -> None:
         """拒绝在 Adapter 关闭后继续读写仿真。"""
@@ -522,7 +517,7 @@ class HabitatChassisAdapter:
 
     def close(self) -> None:
         """幂等释放 Habitat 资源。"""
-        simulator = getattr(self, "_sim", None)
+        simulator = self._sim
         self._sim = None
         if simulator is not None:
             simulator.close()

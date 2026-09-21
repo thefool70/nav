@@ -26,7 +26,7 @@ class RgbdCameraConfig:
 
 @dataclass(frozen=True)
 class RgbdCapture:
-    """同一 frameset 的 RGB、米制深度与对齐后的针孔内参。"""
+    """同一 frameset：RGB 为 H×W×3 uint8 ndarray，深度为 H×W 米制浮点 ndarray。"""
 
     timestamp_s: float
     rgb: Any
@@ -118,7 +118,7 @@ class RgbdCamera:
         try:
             frames = pipeline.wait_for_frames(timeout_ms)
             aligned = self._align.process(frames)
-        except Exception as exc:
+        except RuntimeError as exc:
             raise RuntimeError(f"{self.device_label} 等待 RGB-D 帧失败：{exc}") from exc
 
         color_frame = aligned.get_color_frame()
@@ -159,8 +159,8 @@ class RgbdCamera:
         if pipeline is not None and started:
             try:
                 pipeline.stop()
-            except Exception:
-                pass
+            except RuntimeError as exc:
+                print(f"{self.device_label} 停止数据流失败：{exc}", flush=True)
 
     def __enter__(self) -> "RgbdCamera":
         return self

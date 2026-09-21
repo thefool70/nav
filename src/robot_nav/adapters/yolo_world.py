@@ -51,22 +51,10 @@ class YoloWorldDetector:
             raise RuntimeError("当前 Python 环境未安装 ultralytics") from exc
 
         on_stage("loading_yolo")
-        try:
-            self._model = YOLOWorld(str(model_path), verbose=False)
-        except Exception as exc:
-            raise RuntimeError(
-                f"YOLO-World 模型加载失败：{_exception_text(exc)}"
-            ) from exc
+        self._model = YOLOWorld(str(model_path), verbose=False)
         self._config = config
-        target_text = config.class_text.strip()
         on_stage("encoding_class_text")
-        try:
-            self._model.set_classes([target_text])
-        except Exception as exc:
-            raise RuntimeError(
-                "YOLO-World 类别初始化失败；请确认 CLIP ViT-B/32 权重可用："
-                f"{_exception_text(exc)}"
-            ) from exc
+        self._model.set_classes([config.class_text.strip()])
 
     def detect_boxes(self, rgb) -> Tuple[Tuple[TargetObservation, ...], int]:
         """按置信度返回目标框；未检出返回空列表，不运行分割。"""
@@ -126,10 +114,6 @@ def _as_rgb_array(rgb: Any) -> np.ndarray:
     if image.ndim != 3 or image.shape[2] < 3:
         raise ValueError("RGB 图像必须是 H×W×3 数组")
     return np.ascontiguousarray(image[:, :, :3], dtype=np.uint8)
-
-
-def _exception_text(exc: Exception) -> str:
-    return (str(exc).strip() or exc.__class__.__name__)[:240]
 
 
 __all__ = [

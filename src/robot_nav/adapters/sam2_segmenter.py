@@ -102,17 +102,14 @@ def _build_predictor(config: Sam2Config) -> Any:
         raise RuntimeError(
             f"SAM2 配置使用 {config.device}，但当前 PyTorch 看不到 CUDA"
         )
-    try:
-        model = build_sam2(
-            config.model_config,
-            str(checkpoint_path),
-            device=config.device,
-            mode="eval",
-            apply_postprocessing=False,
-        )
-        return SAM2ImagePredictor(model)
-    except Exception as exc:
-        raise RuntimeError(f"SAM2 模型加载失败：{_exception_text(exc)}") from exc
+    model = build_sam2(
+        config.model_config,
+        str(checkpoint_path),
+        device=config.device,
+        mode="eval",
+        apply_postprocessing=False,
+    )
+    return SAM2ImagePredictor(model)
 
 
 def _as_rgb_array(rgb: Any) -> np.ndarray:
@@ -125,16 +122,10 @@ def _as_rgb_array(rgb: Any) -> np.ndarray:
 
 
 def _validate_config(config: Sam2Config) -> None:
-    if not isinstance(config, Sam2Config):
-        raise ValueError("config 必须为 Sam2Config")
-    if not isinstance(config.model_config, str) or not config.model_config.strip():
+    if not config.model_config.strip():
         raise ValueError("model_config 必须为非空字符串")
-    if not isinstance(config.device, str) or not config.device.strip():
+    if not config.device.strip():
         raise ValueError("device 必须为非空字符串")
-
-
-def _exception_text(exc: Exception) -> str:
-    return (str(exc).strip() or exc.__class__.__name__)[:240]
 
 
 __all__ = [

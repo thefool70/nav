@@ -174,14 +174,14 @@ class ObjectLocalizer:
         last_report = time.monotonic()
         while time.monotonic() - started < self._config.timeout_s:
             try:
-                return detections.get(timeout=0.2)
+                return _detection_result(detections.get(timeout=0.2))
             except Empty:
                 now = time.monotonic()
                 if now - last_report >= 5.0:
                     progress("detectors", "waiting", now - started)
                     last_report = now
         try:
-            return detections.get_nowait()
+            return _detection_result(detections.get_nowait())
         except Empty:
             return None
 
@@ -204,8 +204,16 @@ def _detect(name, call, results):
     try:
         observation = call()
     except Exception as exc:
-        observation = TargetObservation(TargetVisibility.UNCERTAIN, source=name, reason=str(exc))
-    results.put(observation)
+        results.put(exc)
+    else:
+        results.put(observation)
+
+
+def _detection_result(value):
+    """检测线程的程序错误回到调用线程，不能转成“未找到目标”。"""
+    if isinstance(value, Exception):
+        raise value
+    return value
 
 
 def _valid_bbox(bbox):

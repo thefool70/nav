@@ -172,7 +172,7 @@ class NavigationRunLogger:
                     _jsonable(record), ensure_ascii=False, allow_nan=False, separators=(",", ":"),
                 ) + "\n")
                 stream.flush()
-            except (OSError, ValueError, TypeError) as exc:
+            except OSError as exc:
                 self._stream = None
                 try:
                     stream.close()

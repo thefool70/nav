@@ -17,6 +17,7 @@ import json
 import math
 import tempfile
 import threading
+import traceback
 from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -125,6 +126,7 @@ class SemanticPerception:
         self._condition = threading.Condition()
         self._enqueue_lock = threading.Lock()
         self._closed = False
+        self._worker_error: Optional[Exception] = None
         self._goal: Optional[TargetSearchGoal] = None
         self._jobs: Deque[Tuple[int, Path]] = deque()
         self._completed: Deque[_CompletedAnalysis] = deque()
@@ -152,8 +154,8 @@ class SemanticPerception:
         self._previous_motion_frame: Optional[NavigationFrame] = None
         self._capture_context = None
         self._obstacle_frame_id: str = ""
-        self._worker = threading.Thread(target=self._worker_loop, name="semantic-fifo", daemon=True)
-        self._capture_worker = threading.Thread(target=self._capture_loop, name="semantic-capture", daemon=True)
+        self._worker = threading.Thread(target=self._run_worker, args=(self._worker_loop,), name="semantic-fifo", daemon=True)
+        self._capture_worker = threading.Thread(target=self._run_worker, args=(self._capture_loop,), name="semantic-capture", daemon=True)
         self._worker.start()
         self._capture_worker.start()
         print(f"异步视觉队列：{self.directory}（固定快照，FIFO）", flush=True)
@@ -166,6 +168,7 @@ class SemanticPerception:
         self, frame: NavigationFrame,
     ) -> CycleIntake:
         """取回已完成分析：给出新的已检查覆盖与目标线索；不修改搜索状态。"""
+        self._raise_worker_error()
         self._received_jobs = []
         self._cycle_score_sources = []
         self._obstacle_frame_id = frame.obstacle_map.frame_id
@@ -353,8 +356,10 @@ class SemanticPerception:
 
     def wait_for_result(self, timeout_s: float = 1.0) -> None:
         with self._condition:
+            self._raise_worker_error()
             if not self._completed and not self._closed:
                 self._condition.wait(timeout_s)
+            self._raise_worker_error()
 
     def close(self) -> None:
         with self._condition:
@@ -429,9 +434,9 @@ class SemanticPerception:
         while True:
             with self._condition:
                 self._condition.wait_for(
-                    lambda: self._closed or (not self._background_paused and self._pending_frame is not None)
+                    lambda: self._closed or self._worker_error is not None or (not self._background_paused and self._pending_frame is not None)
                 )
-                if self._closed:
+                if self._closed or self._worker_error is not None:
                     return
                 frame, context = self._pending_frame
                 self._pending_frame = None
@@ -449,7 +454,7 @@ class SemanticPerception:
                         # 新拍摄位置仍要检查目标；已有评分的方向不重复请求评分。
                         self._enqueue((captured,), candidates, "motion")
                         self._last_prefetch_pose = frame.pose
-            except Exception as exc:
+            except OSError as exc:
                 self._emit({"event": "prefetch_skipped", "reason": str(exc), "timestamp_s": frame.timestamp_s})
             finally:
                 with self._condition:
@@ -518,9 +523,9 @@ class SemanticPerception:
         while True:
             with self._condition:
                 self._condition.wait_for(
-                    lambda: self._closed or (not self._background_paused and bool(self._jobs))
+                    lambda: self._closed or self._worker_error is not None or (not self._background_paused and bool(self._jobs))
                 )
-                if self._closed:
+                if self._closed or self._worker_error is not None:
                     return
                 job_id, folder = self._jobs.popleft()
                 self._active_job = job_id
@@ -528,15 +533,14 @@ class SemanticPerception:
             views, candidates, region_ids = (), (), ()
             try:
                 images, views, candidates, goal, region_ids, source = read_snapshot(folder)
+            except (OSError, ValueError) as exc:
+                job_result = SemanticAnalysis(None, detection_error=f"快照读取失败：{exc}")
+            else:
                 job_result = self._analyzer.analyze_views(images, candidates, goal, trace_context={
                     "job_id": job_id, "source": source, "snapshot": str(folder),
                     "views": view_trace(views),
                     "region_ids": {item.candidate_id: region_id for item, region_id in zip(candidates, region_ids)},
                 })
-                if not isinstance(job_result, SemanticAnalysis):
-                    raise TypeError("联合分析器必须返回 SemanticAnalysis")
-            except Exception as exc:
-                job_result = SemanticAnalysis(None, detection_error=str(exc) or type(exc).__name__)
             depth_retention = retain_clue_depth(folder, len(views), job_result.target_view_ids)
             if depth_retention.get("errors"):
                 self._emit({"event": "depth_retention_failed", "job_id": job_id,
@@ -544,7 +548,7 @@ class SemanticPerception:
             result_record = {**asdict(job_result), "depth_retention": depth_retention}
             try:
                 (folder / "result.json").write_text(json.dumps(result_record, ensure_ascii=False), encoding="utf-8")
-            except (OSError, TypeError, ValueError) as exc:
+            except OSError as exc:
                 self._emit({"event": "result_write_failed", "job_id": job_id, "reason": str(exc)})
             self._emit({"event": "completed", "job_id": job_id, **result_record})
             with self._condition:
@@ -559,13 +563,24 @@ class SemanticPerception:
                     self._completed.append(_CompletedAnalysis(job_id, job_result, views, candidates, region_ids))
                 self._condition.notify_all()
 
+    def _run_worker(self, work) -> None:
+        """跨线程传递未预期异常；主循环重新抛出原异常，不伪造模型失败。"""
+        try:
+            work()
+        except Exception as exc:
+            traceback.print_exc()
+            with self._condition:
+                if self._worker_error is None:
+                    self._worker_error = exc
+                self._condition.notify_all()
+
+    def _raise_worker_error(self) -> None:
+        if self._worker_error is not None:
+            raise self._worker_error
+
     def _emit(self, event: Mapping[str, Any]) -> None:
-        callback = self._on_event
-        if callback is not None:
-            try:
-                callback(event)
-            except Exception:
-                self._on_event = None
+        if self._on_event is not None:
+            self._on_event(event)
 
 
 def _xy_key(point):

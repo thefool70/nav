@@ -686,29 +686,14 @@ class HermesAdapter:
         target_world_xy: Optional[Tuple[float, float]],
         remaining_path_world_xy: Tuple[Tuple[float, float], ...],
     ) -> None:
-        """发布底盘实际目标和剩余路径；显示失败时自动停用该回调。"""
-        callback = self._on_motion_plan
-        if callback is None:
-            return
-        try:
-            callback(
-                target_world_xy,
-                remaining_path_world_xy,
-            )
-        except Exception as exc:
-            self._on_motion_plan = None
-            self._report_action_progress(
-                "Hermes 路径可视化已停用："
-                f"{str(exc) or type(exc).__name__}"
-            )
+        """发布底盘实际目标和剩余路径；可视化故障由入口统一处理。"""
+        if self._on_motion_plan is not None:
+            self._on_motion_plan(target_world_xy, remaining_path_world_xy)
 
     def _report_action_progress(self, message: str) -> None:
         """向入口报告底盘 Action 进度；不参与运动控制。"""
         if self._on_action_progress is not None:
-            try:
-                self._on_action_progress(message)
-            except Exception:
-                self._on_action_progress = None
+            self._on_action_progress(message)
 
     def _publish_motion_frame(self, force: bool = False) -> None:
         """运动期间按固定间隔向 Rerun 发布真实底盘帧。"""
@@ -818,38 +803,17 @@ def _to_obstacle_map(source: HermesExploreMap) -> ObstacleMap:
 
 
 def _convert_rgb(image: Any):
-    # RealSense/远程相机的 uint8 RGB 已是整数，避免逐通道重复 int() 转换。
-    if (
-        getattr(getattr(image, "dtype", None), "name", None) == "uint8"
-        and getattr(image, "ndim", None) == 3 and image.shape[2] == 3
-    ):
-        return tuple(tuple(map(tuple, row)) for row in image.tolist())
-    rows = image.tolist() if hasattr(image, "tolist") else image
-    return tuple(
-        tuple((int(pixel[0]), int(pixel[1]), int(pixel[2])) for pixel in row)
-        for row in rows
-    )
+    """相机边界已统一为 H×W×3 uint8 数组；转成核心使用的只读行序列。"""
+    return tuple(tuple(map(tuple, row)) for row in image.tolist())
 
 
 def _convert_depth(image: Any):
-    if (
-        getattr(getattr(image, "dtype", None), "kind", None) == "f"
-        and getattr(image, "ndim", None) == 2
-    ):
-        # 硬件环境已有 NumPy；只操作副本，输出仍为原来的只读 tuple/None 契约。
-        import numpy as np
+    """相机输出米制浮点数组；传感器无效深度在此转成 None。"""
+    import numpy as np
 
-        values = image.astype(object)
-        values[~(np.isfinite(image) & (image > 0.0))] = None
-        return tuple(map(tuple, values.tolist()))
-    rows = image.tolist() if hasattr(image, "tolist") else image
-    return tuple(
-        tuple(
-            float(value) if _is_finite(value) and float(value) > 0.0 else None
-            for value in row
-        )
-        for row in rows
-    )
+    values = image.astype(object)
+    values[~(np.isfinite(image) & (image > 0.0))] = None
+    return tuple(map(tuple, values.tolist()))
 
 
 def _relative_target_world(

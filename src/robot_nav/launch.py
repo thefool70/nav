@@ -201,8 +201,8 @@ def _build_visualization(args: argparse.Namespace):
     return (
         visualizer.log_cycle,
         visualizer.log_motion_frame,
-        visualizer.log_vlm_interaction,
-        visualizer.log_motion_plan,
+        _optional_callback(visualizer.log_vlm_interaction, "VLM 交互可视化"),
+        _optional_callback(visualizer.log_motion_plan, "路径可视化"),
         visualizer.log_semantic_queue_event,
     )
 

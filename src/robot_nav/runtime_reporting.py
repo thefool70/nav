@@ -92,7 +92,7 @@ def _print_frontier_debug(frame, result: NavigationResult) -> None:
 
 
 def _optional_callback(callback, description):
-    """可视化失败后停用该回调，保持感知与导航运行。"""
+    """可视化 I/O 或运行库故障时停用回调；类型、字段等程序错误继续传播。"""
     if callback is None:
         return None
     enabled = True
@@ -103,7 +103,7 @@ def _optional_callback(callback, description):
             return
         try:
             callback(*args)
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             enabled = False
             print(f"{description}已停用：{exc}", flush=True)
 

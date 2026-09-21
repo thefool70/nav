@@ -48,6 +48,10 @@ from .perception import (
 )
 
 
+class _ModelRequestError(RuntimeError):
+    """模型服务的 HTTP 或连接故障，可记录为本次请求失败。"""
+
+
 class OpenAIApiFormat(str, Enum):
     """观察器支持的多模态请求格式。"""
 
@@ -94,12 +98,9 @@ class OpenAICompatibleTargetObserver:
         *, trace_context: Optional[Mapping[str, Any]] = None,
     ) -> SemanticAnalysis:
         """只读取本次快照，一次请求同时检查全部画面并评分可见 Frontier。"""
-        try:
-            image, markers = build_semantic_analysis_sheet(images, candidates)
-            labels = tuple(marker.label for marker in markers)
-            prompt = build_semantic_analysis_prompt(goal.target_text, labels, tuple(images), goal.search_mode)
-        except Exception as exc:
-            return SemanticAnalysis(None, detection_error=_failure_reason("联合分析输入无效", exc))
+        image, markers = build_semantic_analysis_sheet(images, candidates)
+        labels = tuple(marker.label for marker in markers)
+        prompt = build_semantic_analysis_prompt(goal.target_text, labels, tuple(images), goal.search_mode)
         context = dict(trace_context or {})
         regions = context.get("region_ids", {})
         positions = {item.candidate_id: item.world_xy for item in candidates}
@@ -115,7 +116,7 @@ class OpenAICompatibleTargetObserver:
             payload, response_json = self._request_model(prompt, image)
             assistant_text = self._response_text(payload)
             parsed = parse_semantic_analysis_response(assistant_text, labels, tuple(images))
-        except Exception as exc:
+        except (_ModelRequestError, OSError, ValueError) as exc:
             self._finish_interaction(interaction, assistant_text, response_json, error=_exception_text(exc))
             return SemanticAnalysis(
                 None, detection_error=_failure_reason("联合分析失败", exc),
@@ -153,7 +154,7 @@ class OpenAICompatibleTargetObserver:
             assistant_text = self._response_text(payload)
             visibility = parse_target_visibility_response(assistant_text)
             bbox = parse_target_grounding_response(assistant_text) if visibility is TargetVisibility.VISIBLE else None
-        except Exception as exc:
+        except (_ModelRequestError, OSError, ValueError) as exc:
             self._finish_interaction(interaction, assistant_text=assistant_text, response_json=response_json, error=_exception_text(exc))
             return _uncertain(_failure_reason("物体定位请求失败", exc))
         self._finish_interaction(
@@ -256,10 +257,7 @@ class OpenAICompatibleTargetObserver:
         """可视化是旁路，记录失败不能影响模型和导航。"""
         if self._on_vlm_interaction is None:
             return
-        try:
-            self._on_vlm_interaction(interaction)
-        except Exception:
-            pass
+        self._on_vlm_interaction(interaction)
 
     def _post_json(self, payload: Mapping[str, Any]) -> Any:
         """发送 JSON 请求并解析 JSON 回应。"""
@@ -291,9 +289,9 @@ class OpenAICompatibleTargetObserver:
         except HTTPError as exc:
             response_body = exc.read().decode("utf-8", errors="replace").strip()
             detail = f"：{response_body}" if response_body else ""
-            raise RuntimeError(f"API 返回 HTTP {exc.code}{detail}") from exc
+            raise _ModelRequestError(f"API 返回 HTTP {exc.code}{detail}") from exc
         except URLError as exc:
-            raise RuntimeError(f"API 连接失败：{exc.reason}") from exc
+            raise _ModelRequestError(f"API 连接失败：{exc.reason}") from exc
         return response_payload
 
 
@@ -387,48 +385,17 @@ def _anthropic_messages_payload(
 
 
 def _validate_config(config: OpenAICompatibleConfig) -> None:
-    if not isinstance(config, OpenAICompatibleConfig):
-        raise TypeError("config 必须是 OpenAICompatibleConfig")
-    if not isinstance(config.endpoint_url, str):
-        raise ValueError("endpoint_url 必须是字符串")
+    """模型连接的必要条件；字段类型由配置入口和 Config 契约保证。"""
     parsed_url = urlsplit(config.endpoint_url.strip())
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
         raise ValueError("endpoint_url 必须是完整的 HTTP(S) API 地址")
-    if not isinstance(config.model, str) or not config.model.strip():
+    if not config.model.strip():
         raise ValueError("model 不能为空")
-    if not isinstance(config.api_key, str):
-        raise ValueError("api_key 必须是字符串")
-    if config.opencode_session_id is not None and (
-        not isinstance(config.opencode_session_id, str)
-        or not config.opencode_session_id
-        or any(not 33 <= ord(char) <= 126 for char in config.opencode_session_id)
-    ):
-        raise ValueError("opencode_session_id 必须是不含空白的 ASCII 字符串或 None")
-    if not isinstance(config.api_format, OpenAIApiFormat):
-        raise ValueError("api_format 必须是 OpenAIApiFormat")
-    if config.reasoning_effort is not None:
-        if config.api_format is not OpenAIApiFormat.RESPONSES:
-            raise ValueError("reasoning_effort 只能用于 Responses API")
-        if (
-            not isinstance(config.reasoning_effort, str)
-            or not config.reasoning_effort.strip()
-        ):
-            raise ValueError("reasoning_effort 必须是非空字符串或 None")
-    if (
-        isinstance(config.max_output_tokens, bool)
-        or not isinstance(config.max_output_tokens, int)
-        or config.max_output_tokens <= 0
-    ):
-        raise ValueError("max_output_tokens 必须是正整数")
-    try:
-        timeout_s = float(config.timeout_s)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("timeout_s 必须是正有限数") from exc
-    if (
-        isinstance(config.timeout_s, bool)
-        or not math.isfinite(timeout_s)
-        or timeout_s <= 0.0
-    ):
+    if config.reasoning_effort is not None and config.api_format is not OpenAIApiFormat.RESPONSES:
+        raise ValueError("reasoning_effort 只能用于 Responses API")
+    if config.max_output_tokens <= 0:
+        raise ValueError("max_output_tokens 必须为正整数")
+    if not math.isfinite(config.timeout_s) or config.timeout_s <= 0:
         raise ValueError("timeout_s 必须是正有限数")
 
 
