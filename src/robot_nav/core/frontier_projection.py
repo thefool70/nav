@@ -57,6 +57,7 @@ def project_frontier_ground_points(
 
 
 def _project_ground_point(frame, world_xy, width, height) -> Optional[FrontierImageProjection]:
+    """世界地面点转到相机坐标并投影；仅返回位于图内且邻域深度支持的像素锚点。"""
     if len(world_xy) != 2 or not all(_finite(value) for value in world_xy):
         return None
     intrinsics = frame.camera_intrinsics

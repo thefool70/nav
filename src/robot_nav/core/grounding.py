@@ -86,27 +86,10 @@ def ground_target_bbox(
         if mask_pixel_count == 0:
             return TargetEstimate(False, "target_mask_empty")
     else:
-        rows, columns = _bbox_pixels(bbox, height, width, inset_ratio=0.15)
-        points_base = _depth_points_in_robot(
-            depth,
-            rows,
-            columns,
-            intrinsics,
-            camera_extrinsics_in_robot,
-            float(min_depth_m),
-            float(max_depth_m),
+        points_base = _bbox_depth_points(
+            bbox, depth, intrinsics, camera_extrinsics_in_robot,
+            min_depth_m, max_depth_m, min_valid_points,
         )
-        if len(points_base) < min_valid_points:
-            rows, columns = _bbox_pixels(bbox, height, width, inset_ratio=0.0)
-            points_base = _depth_points_in_robot(
-                depth,
-                rows,
-                columns,
-                intrinsics,
-                camera_extrinsics_in_robot,
-                float(min_depth_m),
-                float(max_depth_m),
-            )
 
     used_depth_fallback = False
     if not points_base and no_valid_depth_fallback_m is not None:
@@ -129,6 +112,43 @@ def ground_target_bbox(
             sample_count=len(points_base),
         )
 
+    return _estimate_world_target(
+        points_base, robot_pose_world, filter_background, used_target_mask, used_depth_fallback,
+    )
+
+
+def _bbox_depth_points(bbox, depth, intrinsics, camera_extrinsics_in_robot,
+                       min_depth_m, max_depth_m, min_valid_points):
+    """先取目标框内缩区域，点数不足时改用完整框；输出机器人平面上的米制点。"""
+    height, width = len(depth), len(depth[0])
+    rows, columns = _bbox_pixels(bbox, height, width, inset_ratio=0.15)
+    points_base = _depth_points_in_robot(
+        depth,
+        rows,
+        columns,
+        intrinsics,
+        camera_extrinsics_in_robot,
+        float(min_depth_m),
+        float(max_depth_m),
+    )
+    if len(points_base) < min_valid_points:
+        rows, columns = _bbox_pixels(bbox, height, width, inset_ratio=0.0)
+        points_base = _depth_points_in_robot(
+            depth,
+            rows,
+            columns,
+            intrinsics,
+            camera_extrinsics_in_robot,
+            float(min_depth_m),
+            float(max_depth_m),
+        )
+
+    return points_base
+
+
+def _estimate_world_target(points_base, robot_pose_world, filter_background,
+                           used_target_mask, used_depth_fallback):
+    """从机器人系点取中位数，转换成世界位置并保留深度来源诊断。"""
     if filter_background:
         points_base = _keep_near_points(points_base)
     target_forward = float(statistics.median(point[0] for point in points_base))
@@ -309,6 +329,7 @@ def _camera_pixel_to_robot(
     extrinsics: CameraExtrinsics,
 ) -> Tuple[float, float]:
     """把一个带深度的相机像素投影到机器人平面。"""
+    # 像素向右、向下增长；内部使用前、左、上，因此横纵坐标都取负号。
     left_camera = -(
         (float(col) - float(intrinsics.cx))
         * forward_camera

@@ -28,16 +28,6 @@ DEPTH_MARGIN_M = 0.10
 SAME_POSITION_REUSE_M = 0.10
 
 
-def camera_world_position(frame: NavigationFrame) -> WorldPoint:
-    """返回相机光心的世界平面位置，包含安装平移。"""
-    extrinsics = frame.camera_extrinsics_in_robot
-    cosine, sine = math.cos(frame.pose.yaw_rad), math.sin(frame.pose.yaw_rad)
-    return (
-        frame.pose.x_m + cosine * extrinsics.forward_m - sine * extrinsics.left_m,
-        frame.pose.y_m + sine * extrinsics.forward_m + cosine * extrinsics.left_m,
-    )
-
-
 def frontier_observation_points(
     frame: NavigationFrame,
     candidates: Sequence[FrontierCandidate],
@@ -58,56 +48,6 @@ def frontier_observation_points(
         if 0.10 < math.dist(origin, point) <= OBSERVATION_RANGE_M
         and _has_map_line_of_sight(visibility_map, origin, point)
     )
-
-
-def _local_coverage_points(frame: NavigationFrame) -> Tuple[WorldPoint, ...]:
-    """采样当前图像可记录的局部覆盖；这些点本身不用于发起扫描。"""
-    origin = camera_world_position(frame)
-    visibility_map = _visibility_map(frame)
-    spacing = OBSERVATION_SPACING_M
-    points = []
-    for ix in range(
-        math.ceil((origin[0] - OBSERVATION_RANGE_M) / spacing),
-        math.floor((origin[0] + OBSERVATION_RANGE_M) / spacing) + 1,
-    ):
-        for iy in range(
-            math.ceil((origin[1] - OBSERVATION_RANGE_M) / spacing),
-            math.floor((origin[1] + OBSERVATION_RANGE_M) / spacing) + 1,
-        ):
-            point = (ix * spacing, iy * spacing)
-            distance = math.dist(origin, point)
-            if (
-                MIN_OBSERVATION_DISTANCE_M <= distance <= OBSERVATION_RANGE_M
-                and _has_map_line_of_sight(visibility_map, origin, point)
-            ):
-                points.append(point)
-    # 记录首层未知边界的覆盖，后续地图公开时可复用；不推测边界后方可见。
-    points.extend(_visible_unknown_boundary_points(visibility_map, origin))
-    return tuple(sorted(set(points)))
-
-
-def _visible_unknown_boundary_points(
-    obstacle_map: ObstacleMap, origin: WorldPoint,
-) -> Tuple[WorldPoint, ...]:
-    """返回视线能到达的首层未知格，仅用于当前图像的覆盖记录。"""
-    grid = obstacle_map.occupancy
-    row, col = world_to_nearest_grid_cell(origin, obstacle_map)
-    radius = math.ceil(OBSERVATION_RANGE_M / obstacle_map.resolution_m) + 1
-    points = []
-    for r in range(max(0, row - radius), min(len(grid), row + radius + 1)):
-        for c in range(max(0, col - radius), min(len(grid[0]), col + radius + 1)):
-            if grid[r][c] is not None or not any(
-                _free_cell(grid, neighbor)
-                for neighbor in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1))
-            ):
-                continue
-            point = grid_cell_center_to_world(r, c, obstacle_map)
-            if (
-                0.10 < math.dist(origin, point) <= OBSERVATION_RANGE_M
-                and _has_map_line_of_sight(obstacle_map, origin, point)
-            ):
-                points.append(point)
-    return tuple(points)
 
 
 def unobserved_observation_points(
@@ -174,6 +114,66 @@ def capture_observation_view(
     )
 
 
+def camera_world_position(frame: NavigationFrame) -> WorldPoint:
+    """返回相机光心的世界平面位置，包含安装平移。"""
+    extrinsics = frame.camera_extrinsics_in_robot
+    cosine, sine = math.cos(frame.pose.yaw_rad), math.sin(frame.pose.yaw_rad)
+    return (
+        frame.pose.x_m + cosine * extrinsics.forward_m - sine * extrinsics.left_m,
+        frame.pose.y_m + sine * extrinsics.forward_m + cosine * extrinsics.left_m,
+    )
+
+
+def _local_coverage_points(frame: NavigationFrame) -> Tuple[WorldPoint, ...]:
+    """采样当前图像可记录的局部覆盖；这些点本身不用于发起扫描。"""
+    origin = camera_world_position(frame)
+    visibility_map = _visibility_map(frame)
+    spacing = OBSERVATION_SPACING_M
+    points = []
+    for ix in range(
+        math.ceil((origin[0] - OBSERVATION_RANGE_M) / spacing),
+        math.floor((origin[0] + OBSERVATION_RANGE_M) / spacing) + 1,
+    ):
+        for iy in range(
+            math.ceil((origin[1] - OBSERVATION_RANGE_M) / spacing),
+            math.floor((origin[1] + OBSERVATION_RANGE_M) / spacing) + 1,
+        ):
+            point = (ix * spacing, iy * spacing)
+            distance = math.dist(origin, point)
+            if (
+                MIN_OBSERVATION_DISTANCE_M <= distance <= OBSERVATION_RANGE_M
+                and _has_map_line_of_sight(visibility_map, origin, point)
+            ):
+                points.append(point)
+    # 记录首层未知边界的覆盖，后续地图公开时可复用；不推测边界后方可见。
+    points.extend(_visible_unknown_boundary_points(visibility_map, origin))
+    return tuple(sorted(set(points)))
+
+
+def _visible_unknown_boundary_points(
+    obstacle_map: ObstacleMap, origin: WorldPoint,
+) -> Tuple[WorldPoint, ...]:
+    """返回视线能到达的首层未知格，仅用于当前图像的覆盖记录。"""
+    grid = obstacle_map.occupancy
+    row, col = world_to_nearest_grid_cell(origin, obstacle_map)
+    radius = math.ceil(OBSERVATION_RANGE_M / obstacle_map.resolution_m) + 1
+    points = []
+    for r in range(max(0, row - radius), min(len(grid), row + radius + 1)):
+        for c in range(max(0, col - radius), min(len(grid[0]), col + radius + 1)):
+            if grid[r][c] is not None or not any(
+                _free_cell(grid, neighbor)
+                for neighbor in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1))
+            ):
+                continue
+            point = grid_cell_center_to_world(r, c, obstacle_map)
+            if (
+                0.10 < math.dist(origin, point) <= OBSERVATION_RANGE_M
+                and _has_map_line_of_sight(obstacle_map, origin, point)
+            ):
+                points.append(point)
+    return tuple(points)
+
+
 def _visibility_map(frame: NavigationFrame) -> ObstacleMap:
     """视觉射线使用未膨胀遮挡图，避免把机器人净空带当作真实障碍。"""
     return frame.visibility_map if frame.visibility_map is not None else frame.obstacle_map
@@ -238,6 +238,7 @@ def _similar_viewpoint(point: WorldPoint, origin: WorldPoint, view: ObservationV
 
 
 def _aligned_depth_available(frame: NavigationFrame) -> bool:
+    """检查 RGB 与深度的尺寸及可用内参；实际深度对齐由 Adapter 保证。"""
     depth, rgb, intrinsics = frame.depth, frame.rgb, frame.camera_intrinsics
     if depth is None or rgb is None or intrinsics is None:
         return False

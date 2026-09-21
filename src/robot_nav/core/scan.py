@@ -42,13 +42,6 @@ def build_unobserved_scan_headings(
     )
 
 
-def _require_finite_angle(value: float, name: str) -> float:
-    """扫描规划要求有限弧度角，不做字符串或其他类型的兼容转换。"""
-    if not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite angle")
-    return value
-
-
 def build_uniform_scan_headings(
     start_heading_rad: float, view_count: int = 4
 ) -> Tuple[float, ...]:
@@ -116,6 +109,28 @@ def build_covering_scan_headings(
         camera_offset,
         field_of_view,
     )
+
+
+def shortest_turn_to_heading(
+    current_heading_rad: float, target_heading_rad: float
+) -> float:
+    """返回从当前朝向转到目标朝向的有符号最短角差，范围 [-π, π)（弧度）。"""
+    current_heading = _require_finite_angle(current_heading_rad, "current_heading_rad")
+    target_heading = _require_finite_angle(target_heading_rad, "target_heading_rad")
+    return wrap_angle(target_heading - current_heading)
+
+
+def heading_to_world_direction(heading_rad: float) -> Tuple[float, float]:
+    """返回朝向对应的世界系单位方向向量 (x, y)。"""
+    heading = _require_finite_angle(heading_rad, "heading_rad")
+    return (math.cos(heading), math.sin(heading))
+
+
+def _require_finite_angle(value: float, name: str) -> float:
+    """扫描规划要求有限弧度角，不做字符串或其他类型的兼容转换。"""
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite angle")
+    return value
 
 
 def _fewest_covering_robot_headings(
@@ -197,18 +212,3 @@ def _total_turn_distance(
         total_turn += abs(shortest_turn_to_heading(reference_heading, heading))
         reference_heading = heading
     return total_turn
-
-
-def shortest_turn_to_heading(
-    current_heading_rad: float, target_heading_rad: float
-) -> float:
-    """返回从当前朝向转到目标朝向的有符号最短角差，范围 [-π, π)（弧度）。"""
-    current_heading = _require_finite_angle(current_heading_rad, "current_heading_rad")
-    target_heading = _require_finite_angle(target_heading_rad, "target_heading_rad")
-    return wrap_angle(target_heading - current_heading)
-
-
-def heading_to_world_direction(heading_rad: float) -> Tuple[float, float]:
-    """返回朝向对应的世界系单位方向向量 (x, y)。"""
-    heading = _require_finite_angle(heading_rad, "heading_rad")
-    return (math.cos(heading), math.sin(heading))

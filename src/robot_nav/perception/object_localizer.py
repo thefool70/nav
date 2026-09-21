@@ -33,6 +33,7 @@ class ObjectLocalizerConfig:
 
 
 class ObjectLocalizer:
+    """协调 YOLO/VLM 检测、SAM2 分割与历史 RGB-D 定位，并保存每次定位依据。"""
     def __init__(self, analyzer: SemanticAnalyzer, config: ObjectLocalizerConfig, directory: Path, on_event=None):
         self._analyzer = analyzer
         self._config = config
@@ -92,6 +93,7 @@ class ObjectLocalizer:
                 **context, "localization_directory": str(folder),
             })
 
+        # 两路并行、按完成顺序消费；任一路完成有效定位即可返回，不等另一检测否决。
         for name, call in (("yolo", detect_yolo), ("vlm", detect_vlm)):
             threading.Thread(target=_detect, args=(name, call, detections), daemon=True,
                              name=f"object-{name}-detection").start()
@@ -123,21 +125,10 @@ class ObjectLocalizer:
                 candidate_folder.mkdir()
                 progress(observation.source, "detected", time.monotonic() - started)
                 waiting_model["name"] = "sam2"
-                segment = self._sam2.request({**payload, "bbox_norm": observation.bbox_norm}, candidate_folder, progress)
-                mask = None
-                if segment.get("mask_file"):
-                    try:
-                        with gzip.open(candidate_folder / segment["mask_file"], "rt", encoding="utf-8") as stream:
-                            mask = json.load(stream)
-                    except (OSError, ValueError, EOFError) as exc:
-                        reasons.append(f"SAM2 掩码无法读取，使用检测框：{exc}")
-                if segment.get("error"):
-                    reasons.append(segment["error"])
-                estimate = localize_segmented_object(frame, observation.bbox_norm, mask)
-                source = observation.source + ("_sam2" if mask is not None else "_bbox")
-                if not estimate.success and mask is not None:
-                    estimate = localize_segmented_object(frame, observation.bbox_norm)
-                    source = observation.source + "_bbox"
+                estimate, source, segment_reasons = self._segment_and_ground(
+                    frame, observation, payload, candidate_folder, progress,
+                )
+                reasons.extend(segment_reasons)
                 if estimate.success:
                     return self._save_result(folder, ObjectLocalization(
                         estimate.target_world_xy, TargetVisibility.VISIBLE, confirmation,
@@ -170,7 +161,33 @@ class ObjectLocalizer:
         finally:
             active.clear()
 
+    def close(self):
+        self._yolo.close()
+        self._sam2.close()
+
+    def _segment_and_ground(self, frame, observation, payload, candidate_folder, progress):
+        """用 SAM2 掩码测距，掩码缺失或测距失败时使用框；返回位置估计、来源与原因。"""
+        reasons = []
+        segment = self._sam2.request({**payload, "bbox_norm": observation.bbox_norm}, candidate_folder, progress)
+        mask = None
+        if segment.get("mask_file"):
+            try:
+                with gzip.open(candidate_folder / segment["mask_file"], "rt", encoding="utf-8") as stream:
+                    mask = json.load(stream)
+            except (OSError, ValueError, EOFError) as exc:
+                reasons.append(f"SAM2 掩码无法读取，使用检测框：{exc}")
+        if segment.get("error"):
+            reasons.append(segment["error"])
+        estimate = localize_segmented_object(frame, observation.bbox_norm, mask)
+        source = observation.source + ("_sam2" if mask is not None else "_bbox")
+        if not estimate.success and mask is not None:
+            estimate = localize_segmented_object(frame, observation.bbox_norm)
+            source = observation.source + "_bbox"
+
+        return estimate, source, reasons
+
     def _wait_detection(self, detections, started, progress):
+        """取下一路完成的检测；两路共用本次定位的等待期限，超时返回 None。"""
         last_report = time.monotonic()
         while time.monotonic() - started < self._config.timeout_s:
             try:
@@ -195,12 +212,9 @@ class ObjectLocalizer:
         if self._on_event is not None:
             self._on_event(event)
 
-    def close(self):
-        self._yolo.close()
-        self._sam2.close()
-
 
 def _detect(name, call, results):
+    """把检测结果或原始异常放入队列，交给调用线程统一接收。"""
     try:
         observation = call()
     except Exception as exc:

@@ -173,6 +173,7 @@ def read_clue_frame(directory: Path, clue: TargetClue, current: NavigationFrame)
         depth = tuple(tuple(float(value) if value is not None else None for value in row) for row in values)
     rgb = tuple(tuple(tuple(raw_rgb[(row * width + col) * 3:(row * width + col + 1) * 3]) for col in range(width)) for row in range(height))
     return replace(
+        # 图像射线必须使用拍摄时位姿；未替换的地图字段仍来自当前帧。
         current, rgb=rgb, depth=depth, pose=Pose2D(**item["coverage"]["pose"]),
         timestamp_s=item["coverage"]["timestamp_s"], camera_intrinsics=CameraIntrinsics(**item["intrinsics"]),
         camera_extrinsics_in_robot=CameraExtrinsics(**item["camera_extrinsics_in_robot"]),

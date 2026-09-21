@@ -63,6 +63,7 @@ def continue_scanning(
                 timings=timings, frontier_cache=frontier_cache,
             )
             local_points = frontier_observation_points(frame, candidates)
+            # 待分析视角也暂时避免重复采集；只有分析成功才会登记为已检查覆盖。
             points = unobserved_observation_points(
                 local_points, frame, working_state.observed_views + working_state.pending_observation_views,
             )

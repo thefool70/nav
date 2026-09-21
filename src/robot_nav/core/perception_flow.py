@@ -62,6 +62,7 @@ def receive_perception(
     clue: Optional[TargetClue] = None,
 ) -> SearchState:
     """只有分析成功的新增覆盖进入 observed_views；采集覆盖仍保持待分析。"""
+    # 接收是增量归并；相同拍摄时刻的覆盖只登记一次，pending 不冒充已检查。
     timestamps = {view.timestamp_s for view in state.observed_views}
     return replace(
         state, asynchronous_perception=True,

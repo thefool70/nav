@@ -67,6 +67,7 @@ def navigate(
             "failed",
             "语义搜索已经结束，当前状态没有可继续的方向。",
         )
+    # 目标线索优先于常规探索；处理期间继续既定线索，不被新 Frontier 插队。
     if working_state.active_target_clue is not None:
         from .target_clue import continue_target_clue
         return continue_target_clue(frame, goal, working_state, object_localization)
@@ -76,6 +77,7 @@ def navigate(
         history_result = continue_object_history(frame, working_state)
         if history_result is not None:
             return history_result
+    # 等待并非终态：新帧若出现可用方向，仍可重新进入扫描与探索。
     if working_state.phase is SearchPhase.WAITING_FOR_SEMANTICS:
         from .frontier_regions import refresh_frontier_regions
         from .scan_behavior import continue_scanning, reset_scan_after_move
@@ -147,6 +149,25 @@ def continue_after_motion_stall(
 ) -> Optional[NavigationResult]:
     """移动停滞时保留当前位置，并按失败动作类型分派恢复。"""
     return _recover_motion(result_in, reason, stalled=True)
+
+
+def capture_semantic_view(frame: NavigationFrame, observation_points: tuple = ()):
+    """记录固定帧的真实视角与覆盖，供感知模块拍摄语义快照使用。"""
+    from .scan_behavior import capture_semantic_view as _capture
+
+    return _capture(frame, observation_points)
+
+
+def preview_frontier_candidates(
+    frame: NavigationFrame, state: SearchState,
+    *,
+    timings: Optional[TimingSpans] = None,
+    frontier_cache: Optional[FrameFrontierCache] = None,
+):
+    """对固定帧预览有效候选，不提交区域编号或修改导航状态。"""
+    from .frontier_regions import preview_frontier_candidates as _preview
+
+    return _preview(frame, state, timings=timings, frontier_cache=frontier_cache)
 
 
 def _recover_motion(
@@ -221,25 +242,6 @@ def _recover_motion(
         blocked_regions=blocked_regions,
         rejected_path_world_xy=rejected_path_world_xy,
     )
-
-
-def capture_semantic_view(frame: NavigationFrame, observation_points: tuple = ()):
-    """记录固定帧的真实视角与覆盖，供感知模块拍摄语义快照使用。"""
-    from .scan_behavior import capture_semantic_view as _capture
-
-    return _capture(frame, observation_points)
-
-
-def preview_frontier_candidates(
-    frame: NavigationFrame, state: SearchState,
-    *,
-    timings: Optional[TimingSpans] = None,
-    frontier_cache: Optional[FrameFrontierCache] = None,
-):
-    """对固定帧预览有效候选，不提交区域编号或修改导航状态。"""
-    from .frontier_regions import preview_frontier_candidates as _preview
-
-    return _preview(frame, state, timings=timings, frontier_cache=frontier_cache)
 
 
 __all__ = [

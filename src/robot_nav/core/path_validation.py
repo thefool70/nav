@@ -57,6 +57,7 @@ def measure_unknown_path_length(
             if length_m > 0.0:
                 cuts = _segment_grid_crossings(previous, current, len(grid[0]), len(grid))
                 for start_t, end_t in zip(cuts, cuts[1:]):
+                    # 相邻切点之间不跨格边，中点可代表整段；长度按 t 的占比精确累计。
                     middle_t = (start_t + end_t) * 0.5
                     cell = _unknown_cell_at(
                         (previous[0] + dx * middle_t, previous[1] + dy * middle_t), grid,
@@ -95,6 +96,7 @@ def _unknown_cell_at(point: WorldPoint, grid) -> Optional[Cell]:
 
 
 def _touching_axis_cells(coordinate: float) -> Tuple[int, ...]:
+    """坐标落在格边时返回两侧格号，否则只返回所在格号。"""
     boundary = round(coordinate)
     if math.isclose(coordinate, boundary, rel_tol=0.0, abs_tol=1e-10):
         return boundary - 1, boundary

@@ -63,6 +63,7 @@ def select_exploration_target(
                 deferred_candidates.append(candidate)
                 continue
             semantic_score = (frontier_scores or {}).get(candidate.candidate_id)
+            # 缺分不扣分；0.5 为中性，VLM 只对已有几何候选加减排序分。
             semantic_bonus = (
                 0.0 if semantic_score is None
                 else SEMANTIC_SCORE_WEIGHT * (2.0 * semantic_score - 1.0)
@@ -81,6 +82,7 @@ def select_exploration_target(
             -item.deferred_order[0], item.deferred_order[1], item.candidate_id,
         ))
         candidates = ranked_new + tuple(deferred_candidates)
+    # 旧方向属于原父节点；先沿分支回去，再按保存顺序恢复。
     if not ranked_new:
         from .backtracking import begin_backtracking
 

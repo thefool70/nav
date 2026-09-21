@@ -63,6 +63,29 @@ def navigate_object_approach(
     )
 
 
+def continue_object_history(frame: NavigationFrame, state: SearchState) -> Optional[NavigationResult]:
+    """当前线索失败后先处理已采集的队列；全部历史都无法定位时才保底返回。"""
+    context = state.object_approach
+    if context.fallback_clue is None:
+        return None
+    if state.pending_semantic_jobs:
+        return object_result(
+            replace(state, phase=SearchPhase.WAITING_FOR_SEMANTICS), "object.wait_history",
+            "保持当前位置，继续处理已采集的历史画面与线索。",
+            pending_semantic_jobs=state.pending_semantic_jobs,
+        )
+    # 曾定位成功但运动未完成时继续探索；从未定位成功才走返回拍摄点的保底分支。
+    if context.history_localized:
+        return object_result(
+            replace(state, phase=SearchPhase.SCANNING, object_approach=ObjectApproachState()),
+            "object.history_finished", "历史目标未能完成接近，恢复探索。",
+        )
+    if context.fallback_clue.map_frame_id != frame.obstacle_map.frame_id:
+        return stop_at_fallback(state, "保底拍摄位姿与当前地图不同，停在当前位置。")
+    return _return_to_capture(frame, replace(state, phase=SearchPhase.SCANNING,
+                                            active_target_clue=context.fallback_clue))
+
+
 def request_localization(state: SearchState) -> NavigationResult:
     """请求用当前历史线索的 RGB-D 定位物体。"""
     return object_result(
@@ -153,6 +176,27 @@ def recover_object_motion(
     )
 
 
+def stop_at_fallback(state: SearchState, reason: str) -> NavigationResult:
+    """保底流程终止：停在当前位置。"""
+    return object_result(
+        replace(state, phase=SearchPhase.STOPPED, active_target_clue=None),
+        "object.fallback_stopped", reason,
+    )
+
+
+def object_result(state, stage, message, action=None, status=NavigationStatus.OK, **details):
+    """构造带线索上下文的物体目标结果。"""
+    clue = state.active_target_clue
+    return result(
+        status, state, stage, message, action,
+        {
+            "clue_id": clue.clue_id if clue is not None else None,
+            "approach_attempts": len(state.object_approach.tried_positions),
+            **details,
+        },
+    )
+
+
 def _return_to_capture(frame: NavigationFrame, state: SearchState) -> NavigationResult:
     """保底返回拍摄位姿：先到位，再对齐朝向，成功即停止。"""
     clue = state.active_target_clue
@@ -188,49 +232,6 @@ def _return_to_capture(frame: NavigationFrame, state: SearchState) -> Navigation
             ),
         )
     return stop_at_fallback(state, "所有历史线索均无法定位；已返回拍摄位姿，停止导航。")
-
-
-def stop_at_fallback(state: SearchState, reason: str) -> NavigationResult:
-    """保底流程终止：停在当前位置。"""
-    return object_result(
-        replace(state, phase=SearchPhase.STOPPED, active_target_clue=None),
-        "object.fallback_stopped", reason,
-    )
-
-
-def continue_object_history(frame: NavigationFrame, state: SearchState) -> Optional[NavigationResult]:
-    """当前线索失败后先处理已采集的队列；全部历史都无法定位时才保底返回。"""
-    context = state.object_approach
-    if context.fallback_clue is None:
-        return None
-    if state.pending_semantic_jobs:
-        return object_result(
-            replace(state, phase=SearchPhase.WAITING_FOR_SEMANTICS), "object.wait_history",
-            "保持当前位置，继续处理已采集的历史画面与线索。",
-            pending_semantic_jobs=state.pending_semantic_jobs,
-        )
-    if context.history_localized:
-        return object_result(
-            replace(state, phase=SearchPhase.SCANNING, object_approach=ObjectApproachState()),
-            "object.history_finished", "历史目标未能完成接近，恢复探索。",
-        )
-    if context.fallback_clue.map_frame_id != frame.obstacle_map.frame_id:
-        return stop_at_fallback(state, "保底拍摄位姿与当前地图不同，停在当前位置。")
-    return _return_to_capture(frame, replace(state, phase=SearchPhase.SCANNING,
-                                            active_target_clue=context.fallback_clue))
-
-
-def object_result(state, stage, message, action=None, status=NavigationStatus.OK, **details):
-    """构造带线索上下文的物体目标结果。"""
-    clue = state.active_target_clue
-    return result(
-        status, state, stage, message, action,
-        {
-            "clue_id": clue.clue_id if clue is not None else None,
-            "approach_attempts": len(state.object_approach.tried_positions),
-            **details,
-        },
-    )
 
 
 __all__ = [

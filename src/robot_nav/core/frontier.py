@@ -12,6 +12,7 @@ from .geometry import grid_cell_center_to_world, world_to_nearest_grid_cell
 from .models import FrontierCandidate, NavigationFrame, ObstacleMap, Pose2D
 
 
+# 格坐标始终按 (row, col)；与世界坐标 (x, y) 的转换集中在 geometry.py。
 Cell = Tuple[int, int]
 GridValues = Tuple[Tuple[Optional[float], ...], ...]
 
@@ -64,6 +65,76 @@ def extract_frame_frontiers(
     return result
 
 
+def extract_frontiers(
+    obstacle_map: ObstacleMap,
+    pose: Pose2D,
+    semantic_scores: Optional[Mapping[str, float]] = None,
+    excluded_world_xy: Sequence[Tuple[float, float]] = (),
+    min_frontier_span_m: float = 0.5,
+    min_goal_distance_m: float = 0.35,
+    *,
+    visibility_map: Optional[ObstacleMap] = None,
+    max_unknown_hole_area_m2: float = MAX_UNKNOWN_HOLE_AREA_M2,
+    timings: Optional[TimingSpans] = None,
+) -> FrontierExtraction:
+    """提取可达候选并返回过滤统计；仅用同格网未膨胀图判断小孔洞。"""
+    with measure_stage(timings, "frontier.prepare"):
+        grid = _normalize_grid(obstacle_map)
+        resolution = _positive_finite(obstacle_map.resolution_m, "resolution_m")
+        minimum_span = _non_negative_finite(
+            min_frontier_span_m, "min_frontier_span_m"
+        )
+        minimum_distance = _non_negative_finite(
+            min_goal_distance_m, "min_goal_distance_m"
+        )
+        normalized_scores = _normalize_semantic_scores(semantic_scores)
+        excluded_points = _normalize_points(excluded_world_xy)
+        hole_area_limit = _non_negative_finite(max_unknown_hole_area_m2, "max_unknown_hole_area_m2")
+
+        free_cells = _free_cells(grid)
+        if not free_cells:
+            return FrontierExtraction()
+
+    with measure_stage(timings, "frontier.reachable_distances"):
+        requested_seed = world_to_nearest_grid_cell(
+            (pose.x_m, pose.y_m), obstacle_map
+        )
+        seed = _nearest_free_cell(requested_seed, free_cells)
+        reachable_distance = _reachable_free_distances(seed, free_cells)
+        reachable_cells = set(reachable_distance)
+    with measure_stage(timings, "frontier.boundary_and_holes"):
+        frontier_cells = _find_frontier_cells(grid, reachable_cells)
+        original_frontier_count = len(frontier_cells)
+        frontier_cells, ignored_unknown, hole_sizes, filter_applied = _filter_frontier_holes(
+            obstacle_map, visibility_map, grid, reachable_cells, frontier_cells,
+            resolution, hole_area_limit,
+        )
+
+    with measure_stage(timings, "frontier.cluster"):
+        clearance_search_steps = max(
+            1,
+            int(math.ceil(FRONTIER_CLEARANCE_SEARCH_M / resolution)),
+        )
+        candidate_groups = tuple(
+            component
+            for component in _merge_frontier_fragments(frontier_cells, grid, resolution, ignored_unknown)
+            if _frontier_span_m(component, resolution) >= minimum_span
+        )
+
+    with measure_stage(timings, "frontier.representatives_and_rank"):
+        candidates = _rank_frontier_candidates(
+            obstacle_map, pose, grid, candidate_groups, reachable_distance,
+            resolution, minimum_distance, excluded_points, normalized_scores, clearance_search_steps,
+        )
+
+    return FrontierExtraction(
+        candidates=tuple(candidates), hole_filter_applied=filter_applied,
+        ignored_hole_count=len(hole_sizes),
+        ignored_hole_area_m2=sum(hole_sizes) * resolution * resolution,
+        ignored_frontier_cell_count=original_frontier_count - len(frontier_cells),
+    )
+
+
 def is_world_point_reachable(
     obstacle_map: ObstacleMap,
     pose: Pose2D,
@@ -106,139 +177,96 @@ def reachable_free_distances(
     return _reachable_free_distances(seed, free_cells)
 
 
-def extract_frontiers(
-    obstacle_map: ObstacleMap,
-    pose: Pose2D,
-    semantic_scores: Optional[Mapping[str, float]] = None,
-    excluded_world_xy: Sequence[Tuple[float, float]] = (),
-    min_frontier_span_m: float = 0.5,
-    min_goal_distance_m: float = 0.35,
-    *,
-    visibility_map: Optional[ObstacleMap] = None,
-    max_unknown_hole_area_m2: float = MAX_UNKNOWN_HOLE_AREA_M2,
-    timings: Optional[TimingSpans] = None,
-) -> FrontierExtraction:
-    """提取可达候选并返回过滤统计；仅用同格网未膨胀图判断小孔洞。"""
-    with measure_stage(timings, "frontier.prepare"):
-        grid = _normalize_grid(obstacle_map)
-        resolution = _positive_finite(obstacle_map.resolution_m, "resolution_m")
-        minimum_span = _non_negative_finite(
-            min_frontier_span_m, "min_frontier_span_m"
-        )
-        minimum_distance = _non_negative_finite(
-            min_goal_distance_m, "min_goal_distance_m"
-        )
-        normalized_scores = _normalize_semantic_scores(semantic_scores)
-        excluded_points = _normalize_points(excluded_world_xy)
-        hole_area_limit = _non_negative_finite(max_unknown_hole_area_m2, "max_unknown_hole_area_m2")
-
-        free_cells = _free_cells(grid)
-        if not free_cells:
-            return FrontierExtraction()
-
-    with measure_stage(timings, "frontier.reachable_distances"):
-        requested_seed = world_to_nearest_grid_cell(
-            (pose.x_m, pose.y_m), obstacle_map
-        )
-        seed = _nearest_free_cell(requested_seed, free_cells)
-        reachable_distance = _reachable_free_distances(seed, free_cells)
-        reachable_cells = set(reachable_distance)
-    with measure_stage(timings, "frontier.boundary_and_holes"):
-        frontier_cells = _find_frontier_cells(grid, reachable_cells)
-        ignored_unknown = set()
-        hole_sizes = ()
-        filter_applied = False
-        original_frontier_count = len(frontier_cells)
-        # 未膨胀图与探索图同格网时才分类，避免膨胀切断未知区域后误判为小孔洞。
-        if visibility_map is not None and hole_area_limit > 0.0:
-            if (
-                visibility_map.frame_id == obstacle_map.frame_id
-                and visibility_map.origin == obstacle_map.origin
-                and visibility_map.resolution_m == obstacle_map.resolution_m
-                and len(visibility_map.occupancy) == len(grid)
-                and all(len(row) == len(grid[0]) for row in visibility_map.occupancy)
-            ):
-                raw_grid = _normalize_grid(visibility_map)
-                seeds = {
-                    neighbor for row, col in frontier_cells
-                    for neighbor in _eight_neighbors(row, col)
-                    if 0 <= neighbor[0] < len(grid) and 0 <= neighbor[1] < len(grid[0])
-                    and grid[neighbor[0]][neighbor[1]] is None
-                }
-                ignored_unknown, hole_sizes = _small_unknown_holes(raw_grid, seeds, resolution, hole_area_limit)
-                frontier_cells = _find_frontier_cells(grid, reachable_cells, ignored_unknown)
-                filter_applied = True
-
-    with measure_stage(timings, "frontier.cluster"):
-        clearance_search_steps = max(
-            1,
-            int(math.ceil(FRONTIER_CLEARANCE_SEARCH_M / resolution)),
-        )
-        candidate_groups = tuple(
-            component
-            for component in _merge_frontier_fragments(frontier_cells, grid, resolution, ignored_unknown)
-            if _frontier_span_m(component, resolution) >= minimum_span
-        )
-
-    with measure_stage(timings, "frontier.representatives_and_rank"):
-        excluded_radius = max(0.4, 2.0 * resolution)
-        candidates = []
-        for cells in candidate_groups:
-            frontier_span = _frontier_span_m(cells, resolution)
-            eligible_cells = {
-                cell for cell in cells
-                if reachable_distance[cell] * resolution >= minimum_distance
-                and not _is_excluded(
-                    grid_cell_center_to_world(*cell, obstacle_map),
-                    excluded_points,
-                    excluded_radius,
-                )
+def _filter_frontier_holes(
+    obstacle_map, visibility_map, grid, reachable_cells, frontier_cells, resolution, hole_area_limit,
+):
+    """在同格网原始图中过滤封闭小孔洞，返回边界、忽略格、孔洞大小及启用标志。"""
+    ignored_unknown = set()
+    hole_sizes = ()
+    filter_applied = False
+    # 未膨胀图与探索图同格网时才分类，避免膨胀切断未知区域后误判为小孔洞。
+    if visibility_map is not None and hole_area_limit > 0.0:
+        if (
+            visibility_map.frame_id == obstacle_map.frame_id
+            and visibility_map.origin == obstacle_map.origin
+            and visibility_map.resolution_m == obstacle_map.resolution_m
+            and len(visibility_map.occupancy) == len(grid)
+            and all(len(row) == len(grid[0]) for row in visibility_map.occupancy)
+        ):
+            raw_grid = _normalize_grid(visibility_map)
+            seeds = {
+                neighbor for row, col in frontier_cells
+                for neighbor in _eight_neighbors(row, col)
+                if 0 <= neighbor[0] < len(grid) and 0 <= neighbor[1] < len(grid[0])
+                and grid[neighbor[0]][neighbor[1]] is None
             }
-            if not eligible_cells:
-                continue
-            row, col = _safest_frontier_cell(
-                eligible_cells,
-                grid,
-                reachable_distance,
-                clearance_search_steps,
-            )
-            path_distance = reachable_distance[(row, col)] * resolution
-            world_xy = grid_cell_center_to_world(row, col, obstacle_map)
-            candidate_id = f"frontier:{row}:{col}"
-            heading = math.atan2(world_xy[1] - pose.y_m, world_xy[0] - pose.x_m)
-            score = frontier_span - PATH_DISTANCE_SCORE_WEIGHT * path_distance
-            semantic_score = normalized_scores.get(candidate_id)
-            if semantic_score is not None:
-                score += SEMANTIC_SCORE_WEIGHT * (2.0 * semantic_score - 1.0)
-            candidates.append(
-                FrontierCandidate(
-                    candidate_id=candidate_id,
-                    row=row,
-                    col=col,
-                    world_xy=world_xy,
-                    heading_world_rad=heading,
-                    frontier_cells=tuple(sorted(cells)),
-                    frontier_cell_count=len(cells),
-                    frontier_span_m=frontier_span,
-                    path_distance_m=path_distance,
-                    score=score,
-                    semantic_score=semantic_score,
-                )
-            )
+            ignored_unknown, hole_sizes = _small_unknown_holes(raw_grid, seeds, resolution, hole_area_limit)
+            frontier_cells = _find_frontier_cells(grid, reachable_cells, ignored_unknown)
+            filter_applied = True
 
-        candidates.sort(
-            key=lambda candidate: (
-                -candidate.score,
-                candidate.path_distance_m,
-                candidate.candidate_id,
+    return frontier_cells, ignored_unknown, hole_sizes, filter_applied
+
+
+def _rank_frontier_candidates(
+    obstacle_map, pose, grid, candidate_groups, reachable_distance,
+    resolution, minimum_distance, excluded_points, normalized_scores, clearance_search_steps,
+):
+    """每片边界选可用代表点，再按几何与语义分排序；不修改区域历史。"""
+    excluded_radius = max(0.4, 2.0 * resolution)
+    candidates = []
+    for cells in candidate_groups:
+        frontier_span = _frontier_span_m(cells, resolution)
+        eligible_cells = {
+            cell for cell in cells
+            if reachable_distance[cell] * resolution >= minimum_distance
+            and not _is_excluded(
+                grid_cell_center_to_world(*cell, obstacle_map),
+                excluded_points,
+                excluded_radius,
+            )
+        }
+        if not eligible_cells:
+            continue
+        # 每片边界只选一个移动代表点，完整边界仍保留给覆盖判断与跨帧关联。
+        row, col = _safest_frontier_cell(
+            eligible_cells,
+            grid,
+            reachable_distance,
+            clearance_search_steps,
+        )
+        path_distance = reachable_distance[(row, col)] * resolution
+        world_xy = grid_cell_center_to_world(row, col, obstacle_map)
+        # 此 ID 只标识本帧格子；history.match_frontier_regions 再分配跨帧区域 ID。
+        candidate_id = f"frontier:{row}:{col}"
+        heading = math.atan2(world_xy[1] - pose.y_m, world_xy[0] - pose.x_m)
+        score = frontier_span - PATH_DISTANCE_SCORE_WEIGHT * path_distance
+        semantic_score = normalized_scores.get(candidate_id)
+        if semantic_score is not None:
+            score += SEMANTIC_SCORE_WEIGHT * (2.0 * semantic_score - 1.0)
+        candidates.append(
+            FrontierCandidate(
+                candidate_id=candidate_id,
+                row=row,
+                col=col,
+                world_xy=world_xy,
+                heading_world_rad=heading,
+                frontier_cells=tuple(sorted(cells)),
+                frontier_cell_count=len(cells),
+                frontier_span_m=frontier_span,
+                path_distance_m=path_distance,
+                score=score,
+                semantic_score=semantic_score,
             )
         )
-    return FrontierExtraction(
-        candidates=tuple(candidates), hole_filter_applied=filter_applied,
-        ignored_hole_count=len(hole_sizes),
-        ignored_hole_area_m2=sum(hole_sizes) * resolution * resolution,
-        ignored_frontier_cell_count=original_frontier_count - len(frontier_cells),
+
+    candidates.sort(
+        key=lambda candidate: (
+            -candidate.score,
+            candidate.path_distance_m,
+            candidate.candidate_id,
+        )
     )
+    return candidates
 
 
 def _small_unknown_holes(

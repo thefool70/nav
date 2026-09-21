@@ -34,6 +34,7 @@ def plan_object_standoff(frame, target_xy, tried_positions):
     }
     robot_xy = (frame.pose.x_m, frame.pose.y_m)
     current_distance = math.dist(robot_xy, target_xy)
+    # 已在合适距离且位置可用时只需对准目标，避免不必要的平移。
     current_cell = world_to_nearest_grid_cell(robot_xy, grid)
     if (
         MIN_STANDOFF_M <= current_distance <= REUSE_CURRENT_DISTANCE_M
@@ -44,6 +45,7 @@ def plan_object_standoff(frame, target_xy, tried_positions):
                        standoff_path_distance_m=0.0)
         return _facing_target(robot_xy, target_xy, frame.camera_extrinsics_in_robot.yaw_rad), details
 
+    # 理想点放在目标朝向机器人这一侧，但候选仍搜索整个圆域。
     heading = math.atan2(robot_xy[1] - target_xy[1], robot_xy[0] - target_xy[0])
     preferred = (target_xy[0] + PREFERRED_STANDOFF_M * math.cos(heading),
                  target_xy[1] + PREFERRED_STANDOFF_M * math.sin(heading))
@@ -71,6 +73,7 @@ def plan_object_standoff(frame, target_xy, tried_positions):
             else:
                 details["standoff_candidate_count"] += 1
                 path_distance = reachable[(row, col)] * grid.resolution_m
+                # 先贴近理想停靠点，再比较路径长度；行列号让同分结果确定。
                 rank = (math.dist(xy, preferred), path_distance, row, col)
                 if best is None or rank < best[0]:
                     best = (rank, xy, distance, path_distance)
@@ -82,9 +85,11 @@ def plan_object_standoff(frame, target_xy, tried_positions):
 
 
 def _near_tried_position(position, tried_positions):
+    """排除已失败停靠点附近的位置，避免换到相邻格反复尝试。"""
     return any(math.dist(position, old) < FAILED_STANDOFF_EXCLUSION_M for old in tried_positions)
 
 
 def _facing_target(position, target_xy, camera_yaw):
+    """计算底盘最终朝向，并扣除相机安装 yaw，使相机朝向目标。"""
     yaw = math.atan2(target_xy[1] - position[1], target_xy[0] - position[0]) - camera_yaw
     return Pose2D(position[0], position[1], (yaw + math.pi) % (2.0 * math.pi) - math.pi)

@@ -355,6 +355,7 @@ class SemanticPerception:
             }
 
     def wait_for_result(self, timeout_s: float = 1.0) -> None:
+        """无完成结果时短暂等待通知；后台异常在等待前后传回导航线程。"""
         with self._condition:
             self._raise_worker_error()
             if not self._completed and not self._closed:
@@ -362,6 +363,7 @@ class SemanticPerception:
             self._raise_worker_error()
 
     def close(self) -> None:
+        """停止接收与排队任务，有限等待后台线程退出；未消费的磁盘快照保留。"""
         with self._condition:
             if self._closed:
                 return
@@ -431,6 +433,7 @@ class SemanticPerception:
         return CapturedView(image, coverage, frame.obstacle_map.frame_id, depth_gzip), candidates, has_direction
 
     def _capture_loop(self) -> None:
+        """消费最新运动帧并生成快照；图像处理在条件锁外进行，避免阻塞主线程提交。"""
         while True:
             with self._condition:
                 self._condition.wait_for(
@@ -462,6 +465,7 @@ class SemanticPerception:
                     self._condition.notify_all()
 
     def _use_motion_frame(self, frame: NavigationFrame) -> bool:
+        """跳过快速转向帧，并按距上次成功预采样的位姿变化控制采样间隔。"""
         previous = self._previous_motion_frame
         self._previous_motion_frame = frame
         if previous is not None:
@@ -481,6 +485,7 @@ class SemanticPerception:
 
     def _enqueue_snapshot(self, views, candidates, source) -> None:
         # 相同拍摄帧只入队一次；无候选的检测批次同样保留。
+        """先冻结快照到磁盘，再发布 FIFO 任务；调用方持有提交锁以保证顺序。"""
         key = tuple((view.map_frame_id, view.coverage.timestamp_s) for view in views)
         with self._condition:
             if self._closed or key in self._submitted_keys:
@@ -520,6 +525,7 @@ class SemanticPerception:
                 self._condition.notify_all()
 
     def _worker_loop(self) -> None:
+        """逐批读取固定快照、调用分析器并发布结果；主线程在下一周期接收。"""
         while True:
             with self._condition:
                 self._condition.wait_for(
@@ -545,6 +551,7 @@ class SemanticPerception:
             if depth_retention.get("errors"):
                 self._emit({"event": "depth_retention_failed", "job_id": job_id,
                             "errors": depth_retention["errors"]})
+            # 先保存分析依据，再把结果放入完成队列；这里不改导航的 SearchState。
             result_record = {**asdict(job_result), "depth_retention": depth_retention}
             try:
                 (folder / "result.json").write_text(json.dumps(result_record, ensure_ascii=False), encoding="utf-8")
@@ -570,6 +577,7 @@ class SemanticPerception:
         except Exception as exc:
             traceback.print_exc()
             with self._condition:
+                # 保留最初异常，唤醒等待者，由主线程取结果时重新抛出。
                 if self._worker_error is None:
                     self._worker_error = exc
                 self._condition.notify_all()

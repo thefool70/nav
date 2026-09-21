@@ -83,6 +83,7 @@ def match_frontier_regions(
             if overlap:
                 exact = len(cells & old_cells[old_index])
                 matches.append((-exact, -overlap, new_index, old_index))
+    # 先按精确重叠、再按邻域重叠配对；旧 ID 只能被一个新区域继承。
     assignments = {}
     used_old = set()
     for _, _, new_index, old_index in sorted(matches):
@@ -97,6 +98,7 @@ def match_frontier_regions(
         if region_id is None:
             region_id = f"region:{next_region_id}"
             next_region_id += 1
+        # 暂存顺序独立于 ID 配对继承，分裂后未继承旧 ID 的部分也保留历史次序。
         deferred_order = _inherited_deferred_order(index, matches, previous)
         updated.append(replace(
             candidate, candidate_id=region_id, deferred_order=deferred_order,
@@ -110,46 +112,6 @@ def match_frontier_regions(
             deferred_order=deferred_order,
         ))
     return tuple(updated), tuple(regions), next_region_id
-
-
-def _boundary_cells_and_neighborhood(
-    obstacle_map: ObstacleMap,
-    boundary_world_xy: Tuple[Tuple[float, float], ...],
-) -> Tuple[Set[Tuple[int, int]], Set[Tuple[int, int]]]:
-    """把世界边界投到当前地图，并沿自由格扩展一格，供关联与屏蔽共用。"""
-    grid = obstacle_map.occupancy
-    height, width = len(grid), len(grid[0])
-    cells = {world_to_nearest_grid_cell(point, obstacle_map) for point in boundary_world_xy}
-    neighborhood = set()
-    for row, col in cells:
-        if not _is_free_grid_cell(grid, row, col, height, width):
-            continue
-        neighborhood.add((row, col))
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            if _is_free_grid_cell(grid, row + dr, col + dc, height, width):
-                neighborhood.add((row + dr, col + dc))
-    return cells, neighborhood
-
-
-def _inherited_deferred_order(
-    candidate_index: int,
-    matches: Sequence[Tuple[int, int, int, int]],
-    previous: Tuple[FrontierRegion, ...],
-) -> Optional[Tuple[int, int]]:
-    """优先实际重叠；matches 使用（负实际重叠数，负邻域重叠数，新序号，旧序号）。"""
-    parents = [item for item in matches if item[2] == candidate_index]
-    exact_parents = [item for item in parents if item[0] < 0]
-    if exact_parents:
-        parents = exact_parents
-    elif parents:
-        best_overlap = min(item[1] for item in parents)
-        parents = [item for item in parents if item[1] == best_overlap]
-    orders = [
-        previous[old_index].deferred_order
-        for _, _, _, old_index in parents
-        if previous[old_index].deferred_order is not None
-    ]
-    return min(orders, key=lambda order: (-order[0], order[1])) if orders else None
 
 
 def defer_unselected_frontiers(
@@ -174,21 +136,6 @@ def defer_unselected_frontiers(
         )
         for region in regions
     )
-
-
-def _is_free_grid_cell(grid, row: int, col: int, height: int, width: int) -> bool:
-    return (
-        0 <= row < height and 0 <= col < width
-        and grid[row][col] is not None and grid[row][col] <= 0.5
-    )
-
-
-def _require_world_xy(value: Tuple[float, float], name: str) -> Tuple[float, float]:
-    """历史位置要求有限坐标，不转换其他输入类型。"""
-    x, y = value
-    if not math.isfinite(x) or not math.isfinite(y):
-        raise ValueError(f"{name} must be two finite numbers")
-    return x, y
 
 
 def freeze_observation_node(
@@ -286,3 +233,58 @@ def set_observation_direction_state(
             for direction in node.directions
         ),
     )
+
+
+def _boundary_cells_and_neighborhood(
+    obstacle_map: ObstacleMap,
+    boundary_world_xy: Tuple[Tuple[float, float], ...],
+) -> Tuple[Set[Tuple[int, int]], Set[Tuple[int, int]]]:
+    """把世界边界投到当前地图，并沿自由格扩展一格，供关联与屏蔽共用。"""
+    grid = obstacle_map.occupancy
+    height, width = len(grid), len(grid[0])
+    cells = {world_to_nearest_grid_cell(point, obstacle_map) for point in boundary_world_xy}
+    neighborhood = set()
+    for row, col in cells:
+        if not _is_free_grid_cell(grid, row, col, height, width):
+            continue
+        neighborhood.add((row, col))
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            if _is_free_grid_cell(grid, row + dr, col + dc, height, width):
+                neighborhood.add((row + dr, col + dc))
+    return cells, neighborhood
+
+
+def _inherited_deferred_order(
+    candidate_index: int,
+    matches: Sequence[Tuple[int, int, int, int]],
+    previous: Tuple[FrontierRegion, ...],
+) -> Optional[Tuple[int, int]]:
+    """优先实际重叠；matches 使用（负实际重叠数，负邻域重叠数，新序号，旧序号）。"""
+    parents = [item for item in matches if item[2] == candidate_index]
+    exact_parents = [item for item in parents if item[0] < 0]
+    if exact_parents:
+        parents = exact_parents
+    elif parents:
+        best_overlap = min(item[1] for item in parents)
+        parents = [item for item in parents if item[1] == best_overlap]
+    orders = [
+        previous[old_index].deferred_order
+        for _, _, _, old_index in parents
+        if previous[old_index].deferred_order is not None
+    ]
+    return min(orders, key=lambda order: (-order[0], order[1])) if orders else None
+
+
+def _is_free_grid_cell(grid, row: int, col: int, height: int, width: int) -> bool:
+    return (
+        0 <= row < height and 0 <= col < width
+        and grid[row][col] is not None and grid[row][col] <= 0.5
+    )
+
+
+def _require_world_xy(value: Tuple[float, float], name: str) -> Tuple[float, float]:
+    """历史位置要求有限坐标，不转换其他输入类型。"""
+    x, y = value
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError(f"{name} must be two finite numbers")
+    return x, y

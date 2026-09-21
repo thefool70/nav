@@ -69,18 +69,6 @@ def build_semantic_analysis_prompt(
     )
 
 
-def _frontier_scoring_rules() -> str:
-    """缺少语义线索给中性分；模型不重复计算核心负责的距离和可达性。"""
-    return (
-        "Independently score each marked direction from 0 to 1 for its semantic "
-        "promise of leading to the target. Use 0.5 when evidence is insufficient, "
-        "above 0.5 for supporting cues and below 0.5 for contrary cues. "
-        "Not seeing the target now is not contrary evidence for future exploration. "
-        "Do not force score differences or normalize scores to sum to 1. "
-        "Do not score distance, travel cost or reachability; navigation handles those."
-    )
-
-
 def parse_semantic_analysis_response(
     text: str, marker_labels: Sequence[str], view_ids: Sequence[int],
 ) -> SemanticAnalysis:
@@ -166,6 +154,18 @@ def parse_target_grounding_response(
         y_min / 1000.0,
         x_max / 1000.0,
         y_max / 1000.0,
+    )
+
+
+def _frontier_scoring_rules() -> str:
+    """缺少语义线索给中性分；模型不重复计算核心负责的距离和可达性。"""
+    return (
+        "Independently score each marked direction from 0 to 1 for its semantic "
+        "promise of leading to the target. Use 0.5 when evidence is insufficient, "
+        "above 0.5 for supporting cues and below 0.5 for contrary cues. "
+        "Not seeing the target now is not contrary evidence for future exploration. "
+        "Do not force score differences or normalize scores to sum to 1. "
+        "Do not score distance, travel cost or reachability; navigation handles those."
     )
 
 
