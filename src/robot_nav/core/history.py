@@ -6,18 +6,16 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import replace
 from typing import Optional, Sequence, Set, Tuple
 
-from .geometry import grid_cell_center_to_world, world_to_nearest_grid_cell, wrap_angle
+from .geometry import grid_cell_center_to_world, world_to_nearest_grid_cell
 from .models import (
     BlockedFrontierRegion,
     FrontierCandidate,
     FrontierRegion,
     ObservationNode,
     ObstacleMap,
-    SearchDirection,
     SearchDirectionState,
 )
 
@@ -138,69 +136,6 @@ def defer_unselected_frontiers(
     )
 
 
-def freeze_observation_node(
-    node_id: str,
-    position_world_xy: Tuple[float, float],
-    directions: Sequence[SearchDirection],
-    committed_direction_id: str,
-) -> ObservationNode:
-    """把一次观测固化为不可变 ObservationNode，方向保持输入顺序。
-
-    node_id、direction_id 与 committed_direction_id 去除首尾空白后使用，
-    空白字符串非法；heading_world_rad 使用有限弧度值并归一化到 [-π, π)；
-    candidate_world_xy、command_world_xy 若提供须为有限世界坐标，保存为坐标二元组。
-    committed_direction_id 必须存在于 directions 中；对应方向标为 COMMITTED，
-    其余方向标为 PENDING。
-    """
-    if not node_id.strip():
-        raise ValueError("node_id must be a non-empty string")
-    node_id = node_id.strip()
-    position = _require_world_xy(position_world_xy, "position_world_xy")
-    committed_direction_id = committed_direction_id.strip()
-    direction_ids = []
-    frozen_directions = []
-    for direction in directions:
-        if not direction.direction_id.strip():
-            raise ValueError("direction_id must be a non-empty string")
-        direction_id = direction.direction_id.strip()
-        if direction_id in direction_ids:
-            raise ValueError("direction_id must be unique")
-        direction_ids.append(direction_id)
-        heading = direction.heading_world_rad
-        if not math.isfinite(heading):
-            raise ValueError("heading_world_rad must be finite")
-        candidate = (
-            _require_world_xy(direction.candidate_world_xy, "candidate_world_xy")
-            if direction.candidate_world_xy is not None
-            else None
-        )
-        command_point = (
-            _require_world_xy(direction.command_world_xy, "command_world_xy")
-            if direction.command_world_xy is not None
-            else None
-        )
-        frozen_directions.append(
-            SearchDirection(
-                direction_id=direction_id,
-                heading_world_rad=wrap_angle(heading),
-                candidate_world_xy=candidate,
-                command_world_xy=command_point,
-                state=(
-                    SearchDirectionState.COMMITTED
-                    if direction_id == committed_direction_id
-                    else SearchDirectionState.PENDING
-                ),
-            )
-        )
-    if committed_direction_id not in direction_ids:
-        raise ValueError("committed_direction_id must be an existing direction_id")
-    return ObservationNode(
-        node_id=node_id,
-        position_world_xy=position,
-        directions=tuple(frozen_directions),
-    )
-
-
 def set_observation_direction_state(
     node: ObservationNode,
     direction_id: str,
@@ -280,11 +215,3 @@ def _is_free_grid_cell(grid, row: int, col: int, height: int, width: int) -> boo
         0 <= row < height and 0 <= col < width
         and grid[row][col] is not None and grid[row][col] <= 0.5
     )
-
-
-def _require_world_xy(value: Tuple[float, float], name: str) -> Tuple[float, float]:
-    """历史位置要求有限坐标，不转换其他输入类型。"""
-    x, y = value
-    if not math.isfinite(x) or not math.isfinite(y):
-        raise ValueError(f"{name} must be two finite numbers")
-    return x, y

@@ -18,14 +18,6 @@
 「采集确认、分析结果、进度」以及搜索核心的显式暂停/继续请求。
 """
 
-from .semantic_queue import (
-    PerceptionPause,
-    SemanticPerception,
-    SemanticPerceptionConfig,
-)
+from .semantic_queue import SemanticPerception
 
-__all__ = [
-    "PerceptionPause",
-    "SemanticPerception",
-    "SemanticPerceptionConfig",
-]
+__all__ = ["SemanticPerception"]

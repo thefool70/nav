@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from time import monotonic
 from typing import Any, Callable, Mapping, Optional
 
@@ -55,7 +56,7 @@ from .core.timing import TimingSpans, measure_stage
 from .perception import SemanticPerception
 from .run_log import NavigationRunLogger
 from .runtime_reporting import (
-    with_run_log, with_frontier_debug, optional_callback, print_cycle, report_cycle_decision,
+    record_decision, optional_callback, print_cycle, report_cycle_decision,
 )
 
 NavigationCycleCallback = Callable[
@@ -84,10 +85,12 @@ def run_navigation(
     on_cycle = optional_callback(on_cycle, "导航可视化")
     while decision_cycles < max_cycles:
         cycle_index += 1
-        cycle_callback = with_frontier_debug(on_cycle, debug_frontier)
         if run_logger is not None:
             run_logger.log_cycle_start(cycle_index)
-            cycle_callback = with_run_log(cycle_callback, run_logger, cycle_index)
+        cycle_callback = partial(
+            record_decision, on_cycle=on_cycle, debug_frontier=debug_frontier,
+            run_logger=run_logger, cycle_index=cycle_index,
+        )
         result = run_navigation_cycle(
             chassis,
             goal,
@@ -201,7 +204,6 @@ def _supply_perception(
     ):
         return decision
 
-    perception.set_goal(goal)
     if decision.status is NavigationStatus.NEEDS_OBJECT_LOCALIZATION:
         clue = decision.state.active_target_clue
         if clue is None:

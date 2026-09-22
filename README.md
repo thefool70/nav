@@ -24,6 +24,9 @@ Adapter 先列公共操作，再列内部实现。数据类型仍先于使用它
 `_assemble_and_run` 展示组件连接，`app.py` 从 `run_navigation` 总循环读到
 `run_navigation_cycle` 单周期；计时与显示细节集中在 `runtime_reporting.py`。
 函数前缀 `_` 表示模块内部接口，不表示它是否属于算法计算。
+行为入口保留重要分支和恢复规则，计算函数直接表达具体算法；不为未使用的
+调用方式维护通用选项或转发接口。深度定位只保留当前导航使用的正深度采样与
+中位数估计，背景过滤和假定距离回退不再作为 Python 参数提供。
 
 算法细节见 [算法说明](docs/algorithm.md)，坐标和接口约定见
 [底盘接口标准](docs/chassis-interface.md)。

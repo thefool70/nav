@@ -133,43 +133,6 @@ def apply_execution_result(decision: NavigationResult, execution: ActionExecutio
     return recovered
 
 
-def recover_from_motion_failure(
-    result_in: NavigationResult,
-    reason: str,
-    *,
-    rejected_path_world_xy: tuple = (),
-) -> Optional[NavigationResult]:
-    """按失败动作的类型分派恢复：未知路径超限屏蔽整片区域，普通失败淘汰目标点。"""
-    return _recover_motion(result_in, reason, stalled=False, rejected_path_world_xy=rejected_path_world_xy)
-
-
-def continue_after_motion_stall(
-    result_in: NavigationResult,
-    reason: str,
-) -> Optional[NavigationResult]:
-    """移动停滞时保留当前位置，并按失败动作类型分派恢复。"""
-    return _recover_motion(result_in, reason, stalled=True)
-
-
-def capture_semantic_view(frame: NavigationFrame, observation_points: tuple = ()):
-    """记录固定帧的真实视角与覆盖，供感知模块拍摄语义快照使用。"""
-    from .scan_behavior import capture_semantic_view as _capture
-
-    return _capture(frame, observation_points)
-
-
-def preview_frontier_candidates(
-    frame: NavigationFrame, state: SearchState,
-    *,
-    timings: Optional[TimingSpans] = None,
-    frontier_cache: Optional[FrameFrontierCache] = None,
-):
-    """对固定帧预览有效候选，不提交区域编号或修改导航状态。"""
-    from .frontier_regions import preview_frontier_candidates as _preview
-
-    return _preview(frame, state, timings=timings, frontier_cache=frontier_cache)
-
-
 def _recover_motion(
     result_in: NavigationResult,
     reason: str,
@@ -244,10 +207,4 @@ def _recover_motion(
     )
 
 
-__all__ = [
-    "capture_semantic_view",
-    "continue_after_motion_stall",
-    "navigate",
-    "preview_frontier_candidates",
-    "recover_from_motion_failure",
-]
+__all__ = ["navigate", "apply_execution_result"]

@@ -63,23 +63,6 @@ PREFETCH_MAX_YAW_SPEED_RAD_S = math.radians(25.0)
 
 
 @dataclass(frozen=True)
-class SemanticPerceptionConfig:
-    """感知模块的可选配置；缺省时按运行目录前缀与本地模型参数推断。"""
-
-    directory: Optional[Path] = None
-    object_config: Optional[ObjectLocalizerConfig] = None
-    on_event: Optional[Callable[[Mapping[str, Any]], None]] = None
-
-
-@dataclass(frozen=True)
-class PerceptionPause:
-    """搜索核心通过显式请求告知感知模块暂停或继续后台任务。"""
-
-    paused: bool
-    reason: str = ""
-
-
-@dataclass(frozen=True)
 class CycleIntake:
     """一次周期取回的已完成分析：新的已检查覆盖与目标线索。"""
 
@@ -133,8 +116,8 @@ class SemanticPerception:
         self._pending_coverage: Dict[int, Tuple[ObservationView, ...]] = {}
         self._clues: Deque[TargetClue] = deque()
         self._clue_vantages = set()
-        self._scores: Dict[Tuple[str, str, float, float], float] = {}
-        self._score_origins: Dict[Tuple[str, str, float, float], Tuple[int, Optional[int]]] = {}
+        # 同一候选的分数与来源一起写入、读取。
+        self._scores: Dict[Tuple[str, str, float, float], Tuple[float, int, Optional[int]]] = {}
         self._received_jobs = []
         self._cycle_score_sources = []
         self._submitted_keys = set()
@@ -186,8 +169,7 @@ class SemanticPerception:
                 value = item.result.frontier_scores.get(candidate.candidate_id)
                 if value is not None and item.views:
                     key = _target_key(item.views[0][0], candidate.world_xy, region_id)
-                    self._scores[key] = value
-                    self._score_origins[key] = (item.job_id, item.result.interaction_id)
+                    self._scores[key] = (value, item.job_id, item.result.interaction_id)
             if item.result.target_view_ids is not None:
                 for map_id, view in item.views:
                     if map_id == frame.obstacle_map.frame_id and view.timestamp_s not in timestamps:
@@ -238,7 +220,16 @@ class SemanticPerception:
 
     def flush_scan(self) -> None:
         """扫描结束或被目标处理打断时保留已采集的部分批次。"""
-        self._flush_scan()
+        if not self._scan_views:
+            return
+        views = tuple(self._scan_views)
+        with self._condition:
+            candidates = tuple(
+                item for key, item in self._scan_candidates.items() if key not in self._scored_targets
+            )
+        self._enqueue(views, candidates, "scan")
+        self._scan_views.clear()
+        self._scan_candidates.clear()
 
     def set_goal(self, goal: TargetSearchGoal) -> None:
         """登记本次运行的搜索目标；同一队列不能混用不同目标。"""
@@ -279,7 +270,7 @@ class SemanticPerception:
         if scan_context.index == 0:
             # 扫描被打断后重建计划时，先提交上一轮已拍到的部分画面。
             with measure_stage(timings, "snapshot.flush_previous"):
-                self._flush_scan()
+                self.flush_scan()
         captured, candidates, _ = self._capture(
             frame, context=self._capture_context,
             timings=timings, frontier_cache=frontier_cache,
@@ -291,7 +282,7 @@ class SemanticPerception:
         })
         if scan_context.index + 1 >= scan_context.count:
             with measure_stage(timings, "snapshot.submit"):
-                self._flush_scan()
+                self.flush_scan()
             return "submitted"
         return "buffered"
 
@@ -303,10 +294,10 @@ class SemanticPerception:
             key = _target_key(map_id, candidate.world_xy, candidate.candidate_id)
             if key not in self._scores:
                 continue
-            scores[candidate.candidate_id] = self._scores[key]
-            job_id, interaction_id = self._score_origins[key]
+            score, job_id, interaction_id = self._scores[key]
+            scores[candidate.candidate_id] = score
             self._cycle_score_sources.append({
-                "candidate_id": candidate.candidate_id, "score": self._scores[key],
+                "candidate_id": candidate.candidate_id, "score": score,
                 "job_id": job_id, "interaction_id": interaction_id,
             })
         return scores
@@ -392,18 +383,6 @@ class SemanticPerception:
     # ------------------------------------------------------------------
     # 内部：采集与队列
     # ------------------------------------------------------------------
-
-    def _flush_scan(self) -> None:
-        if not self._scan_views:
-            return
-        views = tuple(self._scan_views)
-        with self._condition:
-            candidates = tuple(
-                item for key, item in self._scan_candidates.items() if key not in self._scored_targets
-            )
-        self._enqueue(views, candidates, "scan")
-        self._scan_views.clear()
-        self._scan_candidates.clear()
 
     def _capture(
         self, frame: NavigationFrame,
@@ -609,7 +588,5 @@ def _turn_distance(first, second):
 
 __all__ = [
     "CycleIntake",
-    "PerceptionPause",
     "SemanticPerception",
-    "SemanticPerceptionConfig",
 ]

@@ -15,8 +15,7 @@ def localize_segmented_object(frame: NavigationFrame, bbox_norm, mask=None) -> T
         return TargetEstimate(False, "object_depth_or_intrinsics_missing")
     return ground_target_bbox(
         bbox_norm, frame.depth, frame.camera_intrinsics, frame.pose, frame.camera_extrinsics_in_robot,
-        min_depth_m=0.0, max_depth_m=math.inf, min_valid_points=1,
-        target_mask=mask, filter_background=False,
+        target_mask=mask,
     )
 
 

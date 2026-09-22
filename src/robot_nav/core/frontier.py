@@ -499,7 +499,7 @@ def _occupied_clearance_score(
     row, col = cell
     height, width = len(grid), len(grid[0])
     maximum_distance_squared = search_steps * search_steps
-    nearest_distance_squared: Optional[int] = None
+    nearest_distance_squared = (search_steps + 1) ** 2
     for near_row in range(
         max(0, row - search_steps),
         min(height, row + search_steps + 1),
@@ -514,13 +514,7 @@ def _occupied_clearance_score(
             distance_squared = (near_row - row) ** 2 + (near_col - col) ** 2
             if distance_squared > maximum_distance_squared:
                 continue
-            if (
-                nearest_distance_squared is None
-                or distance_squared < nearest_distance_squared
-            ):
-                nearest_distance_squared = distance_squared
-    if nearest_distance_squared is None:
-        return (search_steps + 1) ** 2
+            nearest_distance_squared = min(nearest_distance_squared, distance_squared)
     return nearest_distance_squared
 
 

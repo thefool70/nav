@@ -22,18 +22,12 @@ def ground_target_bbox(
     intrinsics: CameraIntrinsics,
     robot_pose_world: Pose2D,
     camera_extrinsics_in_robot: CameraExtrinsics,
-    min_depth_m: float = 0.10,
-    max_depth_m: float = 5.0,
-    min_valid_points: int = 8,
-    no_valid_depth_fallback_m: Optional[float] = None,
     target_mask: Optional[MaskImage] = None,
-    filter_background: bool = True,
 ) -> TargetEstimate:
     """返回目标在机器人与世界坐标系中的位置；输入不可靠时显式失败。
 
     有 ``target_mask`` 时只使用掩码像素；否则优先使用目标框中央区域，深度
-    不足时退回完整目标框。``no_valid_depth_fallback_m`` 只在目标区域完全
-    没有有效深度时使用。``filter_background=False`` 时保留全部有效深度点。
+    缺失时退回完整目标框。保留所有有限正深度点，不做背景筛选或假定距离回退。
     """
     bbox = _normalize_bbox(bbox_norm)
     if bbox is None:
@@ -45,67 +39,30 @@ def ground_target_bbox(
         return TargetEstimate(False, "target_calibration_invalid")
     if not _valid_extrinsics(camera_extrinsics_in_robot):
         return TargetEstimate(False, "camera_extrinsics_invalid")
-    if (
-        not math.isfinite(min_depth_m)
-        or math.isnan(float(max_depth_m))
-        or float(min_depth_m) < 0.0
-        or float(max_depth_m) <= float(min_depth_m)
-    ):
-        return TargetEstimate(False, "target_depth_range_invalid")
-    if min_valid_points < 1:
-        return TargetEstimate(False, "target_min_points_invalid")
-    if no_valid_depth_fallback_m is not None and (
-        not math.isfinite(no_valid_depth_fallback_m)
-        or not (
-            float(min_depth_m)
-            <= float(no_valid_depth_fallback_m)
-            <= float(max_depth_m)
-        )
-    ):
-        return TargetEstimate(False, "target_depth_fallback_invalid")
-
     height, width = len(depth), len(depth[0])
     if not (
         0.0 <= float(intrinsics.cx) < width
         and 0.0 <= float(intrinsics.cy) < height
     ):
         return TargetEstimate(False, "target_calibration_invalid")
-    fallback_pixel = _bbox_center_pixel(bbox, height, width)
     used_target_mask = target_mask is not None
     if target_mask is not None:
         if not _mask_matches_image(target_mask, height, width):
             return TargetEstimate(False, "target_mask_invalid")
-        points_base, fallback_pixel, mask_pixel_count = _depth_points_in_mask(
+        points_base, mask_pixel_count = _depth_points_in_mask(
             depth,
             target_mask,
             intrinsics,
             camera_extrinsics_in_robot,
-            float(min_depth_m),
-            float(max_depth_m),
         )
         if mask_pixel_count == 0:
             return TargetEstimate(False, "target_mask_empty")
     else:
         points_base = _bbox_depth_points(
             bbox, depth, intrinsics, camera_extrinsics_in_robot,
-            min_depth_m, max_depth_m, min_valid_points,
         )
 
-    used_depth_fallback = False
-    if not points_base and no_valid_depth_fallback_m is not None:
-        center_row, center_col = fallback_pixel
-        fallback_point = _camera_pixel_to_robot(
-            center_row,
-            center_col,
-            float(no_valid_depth_fallback_m),
-            intrinsics,
-            camera_extrinsics_in_robot,
-        )
-        if fallback_point is not None:
-            points_base = [fallback_point]
-            used_depth_fallback = True
-
-    if not used_depth_fallback and len(points_base) < min_valid_points:
+    if not points_base:
         return TargetEstimate(
             False,
             "target_depth_points_insufficient",
@@ -113,13 +70,12 @@ def ground_target_bbox(
         )
 
     return _estimate_world_target(
-        points_base, robot_pose_world, filter_background, used_target_mask, used_depth_fallback,
+        points_base, robot_pose_world, used_target_mask,
     )
 
 
-def _bbox_depth_points(bbox, depth, intrinsics, camera_extrinsics_in_robot,
-                       min_depth_m, max_depth_m, min_valid_points):
-    """先取目标框内缩区域，点数不足时改用完整框；输出机器人平面上的米制点。"""
+def _bbox_depth_points(bbox, depth, intrinsics, camera_extrinsics_in_robot):
+    """先取目标框内缩区域，无有效点时改用完整框；输出机器人平面上的米制点。"""
     height, width = len(depth), len(depth[0])
     rows, columns = _bbox_pixels(bbox, height, width, inset_ratio=0.15)
     points_base = _depth_points_in_robot(
@@ -128,10 +84,8 @@ def _bbox_depth_points(bbox, depth, intrinsics, camera_extrinsics_in_robot,
         columns,
         intrinsics,
         camera_extrinsics_in_robot,
-        float(min_depth_m),
-        float(max_depth_m),
     )
-    if len(points_base) < min_valid_points:
+    if not points_base:
         rows, columns = _bbox_pixels(bbox, height, width, inset_ratio=0.0)
         points_base = _depth_points_in_robot(
             depth,
@@ -139,18 +93,13 @@ def _bbox_depth_points(bbox, depth, intrinsics, camera_extrinsics_in_robot,
             columns,
             intrinsics,
             camera_extrinsics_in_robot,
-            float(min_depth_m),
-            float(max_depth_m),
         )
 
     return points_base
 
 
-def _estimate_world_target(points_base, robot_pose_world, filter_background,
-                           used_target_mask, used_depth_fallback):
+def _estimate_world_target(points_base, robot_pose_world, used_target_mask):
     """从机器人系点取中位数，转换成世界位置并保留深度来源诊断。"""
-    if filter_background:
-        points_base = _keep_near_points(points_base)
     target_forward = float(statistics.median(point[0] for point in points_base))
     target_left = float(statistics.median(point[1] for point in points_base))
     distance = math.hypot(target_forward, target_left)
@@ -170,20 +119,12 @@ def _estimate_world_target(points_base, robot_pose_world, filter_background,
     )
     return TargetEstimate(
         success=True,
-        reason=(
-            "target_grounded_with_depth_fallback"
-            if used_depth_fallback
-            else (
-                "target_grounded_with_mask"
-                if used_target_mask
-                else "target_grounded"
-            )
-        ),
+        reason="target_grounded_with_mask" if used_target_mask else "target_grounded",
         target_base_xy=(target_forward, target_left),
         target_world_xy=target_world,
         distance_m=distance,
         bearing_rad=bearing,
-        sample_count=0 if used_depth_fallback else len(points_base),
+        sample_count=len(points_base),
     )
 
 
@@ -193,8 +134,6 @@ def _depth_points_in_robot(
     columns: range,
     intrinsics: CameraIntrinsics,
     extrinsics: CameraExtrinsics,
-    min_depth_m: float,
-    max_depth_m: float,
 ) -> list[Tuple[float, float]]:
     """把指定像素区域内的有效深度转换为机器人平面点。"""
     points_base = []
@@ -204,7 +143,7 @@ def _depth_points_in_robot(
             if raw_depth is None or not math.isfinite(raw_depth):
                 continue
             forward_camera = float(raw_depth)
-            if forward_camera <= 0.0 or not min_depth_m <= forward_camera <= max_depth_m:
+            if forward_camera <= 0.0:
                 continue
             point_base = _camera_pixel_to_robot(
                 row,
@@ -223,27 +162,21 @@ def _depth_points_in_mask(
     mask: MaskImage,
     intrinsics: CameraIntrinsics,
     extrinsics: CameraExtrinsics,
-    min_depth_m: float,
-    max_depth_m: float,
-) -> Tuple[list[Tuple[float, float]], Tuple[int, int], int]:
-    """把掩码内有效深度转为机器人平面点，并返回掩码质心像素。"""
+) -> Tuple[list[Tuple[float, float]], int]:
+    """把掩码内有效深度转为机器人平面点，并返回掩码像素数。"""
     points_base = []
     foreground_count = 0
-    row_sum = 0
-    col_sum = 0
     for row_index, mask_row in enumerate(mask):
         for col_index, selected in enumerate(mask_row):
             if not bool(selected):
                 continue
             foreground_count += 1
-            row_sum += row_index
-            col_sum += col_index
 
             raw_depth = depth[row_index][col_index]
             if raw_depth is None or not math.isfinite(raw_depth):
                 continue
             forward_camera = float(raw_depth)
-            if forward_camera <= 0.0 or not min_depth_m <= forward_camera <= max_depth_m:
+            if forward_camera <= 0.0:
                 continue
             point_base = _camera_pixel_to_robot(
                 row_index,
@@ -255,13 +188,7 @@ def _depth_points_in_mask(
             if point_base is not None:
                 points_base.append(point_base)
 
-    if foreground_count == 0:
-        return points_base, (0, 0), 0
-    center_pixel = (
-        int(round(row_sum / foreground_count)),
-        int(round(col_sum / foreground_count)),
-    )
-    return points_base, center_pixel, foreground_count
+    return points_base, foreground_count
 
 
 def _normalize_bbox(
@@ -305,20 +232,6 @@ def _bbox_pixels(
     first_row = max(0, min(height - 1, int(math.floor((y1 + inset_y) * height))))
     last_row = max(first_row + 1, min(height, int(math.ceil((y2 - inset_y) * height))))
     return range(first_row, last_row), range(first_col, last_col)
-
-
-def _bbox_center_pixel(
-    bbox: Tuple[float, float, float, float],
-    height: int,
-    width: int,
-) -> Tuple[int, int]:
-    """返回目标框中心对应的有效图像像素。"""
-    center_col = int((bbox[0] + bbox[2]) * 0.5 * width)
-    center_row = int((bbox[1] + bbox[3]) * 0.5 * height)
-    return (
-        max(0, min(height - 1, center_row)),
-        max(0, min(width - 1, center_col)),
-    )
 
 
 def _camera_pixel_to_robot(
@@ -377,18 +290,6 @@ def _camera_point_to_robot(
         + yaw_sine * pitched_forward
         + yaw_cosine * rolled_left,
     )
-
-
-def _keep_near_points(
-    points: Sequence[Tuple[float, float]],
-) -> Sequence[Tuple[float, float]]:
-    """保留距离不超过第 60 百分位的点，降低框内背景影响。"""
-    distances = sorted(math.hypot(point[0], point[1]) for point in points)
-    threshold = distances[int((len(distances) - 1) * 0.60)]
-    near_points = [
-        point for point in points if math.hypot(point[0], point[1]) <= threshold
-    ]
-    return near_points or points
 
 
 def _valid_intrinsics(intrinsics: CameraIntrinsics) -> bool:

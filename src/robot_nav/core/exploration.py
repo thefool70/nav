@@ -12,8 +12,8 @@ from typing import Any, Mapping, Optional, Tuple
 
 from .frontier import PATH_DISTANCE_SCORE_WEIGHT, SEMANTIC_SCORE_WEIGHT, FrameFrontierCache
 from .frontier_regions import frontier_candidate_debug, refresh_frontier_regions, scan_coverage_details
-from .geometry import world_point_to_robot
-from .history import defer_unselected_frontiers, freeze_observation_node, set_observation_direction_state
+from .geometry import world_point_to_robot, wrap_angle
+from .history import defer_unselected_frontiers, set_observation_direction_state
 from .models import (
     ActionConstraint,
     ActionKind,
@@ -130,13 +130,15 @@ def commit_frontier_move(
     # 只有实际出发探索时才创建历史；暂存序号指向创建时的父节点位置。
     direction = SearchDirection(
         direction_id=selected.candidate_id,
-        heading_world_rad=selected.heading_world_rad,
+        heading_world_rad=wrap_angle(selected.heading_world_rad),
         candidate_world_xy=selected.world_xy,
         command_world_xy=destination,
+        state=SearchDirectionState.COMMITTED,
     )
-    node = freeze_observation_node(
-        f"observation:{len(state.observation_history)}",
-        (frame.pose.x_m, frame.pose.y_m), (direction,), direction.direction_id,
+    node = ObservationNode(
+        node_id=f"observation:{len(state.observation_history)}",
+        position_world_xy=(frame.pose.x_m, frame.pose.y_m),
+        directions=(direction,),
     )
     from .scan_behavior import reset_scan_after_move
 

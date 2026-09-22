@@ -4,7 +4,6 @@ from time import monotonic
 
 from .core.models import NavigationResult, NavigationStatus
 from .core.timing import measure_stage
-from .run_log import NavigationRunLogger
 
 
 def report_cycle_decision(frame, decision, started, timings, *, on_cycle, on_timing):
@@ -24,32 +23,20 @@ def report_cycle_decision(frame, decision, started, timings, *, on_cycle, on_tim
         })
 
 
-def with_run_log(on_cycle, run_logger: NavigationRunLogger, cycle_index: int):
-    """把发送命令前的完整决策帧写入当前运行日志。"""
-
-    def callback(frame, observation, result) -> None:
-        timings = []
+def record_decision(frame, observation, result, *, on_cycle, debug_frontier,
+                    run_logger, cycle_index):
+    """按固定顺序记录决策、更新显示、输出候选，再保存各步骤耗时。"""
+    timings = [] if run_logger is not None else None
+    if run_logger is not None:
         with measure_stage(timings, "callback.decision_log"):
             run_logger.log_cycle_decision(cycle_index, frame, observation, result)
-        with measure_stage(timings, "callback.visualization_and_debug"):
-            if on_cycle is not None:
-                on_cycle(frame, observation, result)
-        run_logger.log_callback_timing(timings)
-
-    return callback
-
-
-def with_frontier_debug(on_cycle, enabled: bool):
-    """把可选 Frontier 终端输出接到发送命令前的周期回调。"""
-    if not enabled:
-        return on_cycle
-
-    def callback(frame, observation, result) -> None:
+    with measure_stage(timings, "callback.visualization_and_debug"):
         if on_cycle is not None:
             on_cycle(frame, observation, result)
-        _print_frontier_debug(frame, result)
-
-    return callback
+        if debug_frontier:
+            _print_frontier_debug(frame, result)
+    if run_logger is not None:
+        run_logger.log_callback_timing(timings)
 
 
 def optional_callback(callback, description):
