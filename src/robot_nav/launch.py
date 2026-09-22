@@ -4,8 +4,7 @@
 导航循环由 app.run_navigation 执行。
 阅读顺序：入口分派 → 运行日志生命周期 → 组件装配 → 各组件与回调的构造。
 
-``__main__.py`` 只负责解析参数并调用本模块；标定流程在
-:mod:`~robot_nav.calibration_launch` 中保持独立入口。
+``__main__.py`` 只负责解析参数并调用本模块。
 """
 
 from __future__ import annotations

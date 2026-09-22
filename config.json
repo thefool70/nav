@@ -60,10 +60,5 @@
     "no_rerun": false,
     "rerun_save": null,
     "run_log": null
-  },
-  "calibration": {
-    "output": "data/hermes_d435i/extrinsics.json",
-    "turn_angle_deg": 30.0,
-    "drive_distance_m": 0.2
   }
 }

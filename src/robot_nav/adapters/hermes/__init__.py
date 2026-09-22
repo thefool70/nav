@@ -4,7 +4,6 @@ from .adapter import HermesAdapter, HermesConfig
 from .mount_config import (
     DEFAULT_CAMERA_EXTRINSICS_PATH,
     load_camera_extrinsics,
-    save_camera_extrinsics,
 )
 from .rest_client import (
     HermesExploreMap,
@@ -22,5 +21,4 @@ __all__ = [
     "HermesRobotHealth",
     "HermesSlamState",
     "load_camera_extrinsics",
-    "save_camera_extrinsics",
 ]

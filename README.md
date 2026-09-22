@@ -135,8 +135,8 @@ python -m pip install -e '.[visualization]'
 
 ## 统一运行配置
 
-项目根目录的 `config.json` 集中保存导航与标定的常用参数，按 navigation、habitat、
-hermes、camera、perception、logging、calibration 分组。默认读取当前目录下的该文件；
+项目根目录的 `config.json` 集中保存导航的常用参数，按 navigation、habitat、
+hermes、camera、perception、logging 分组。默认读取当前目录下的该文件；
 切换工作目录时通过 `--config /绝对路径/config.json` 指定，配置文件必须完整。
 命令行显式参数优先于文件，配置中的相对文件路径以配置文件所在目录为基准，
 命令行相对路径仍以当前工作目录为基准。
@@ -154,7 +154,7 @@ python -m robot_nav hermes --config config.json --target "chair" --enable-motion
 `navigation.target` 的 null 表示本次需要指定目标；`perception.object_python` 的 null
 表示自动查找已有 robot-nav 模型环境。`hermes.startup_forward_m` 默认 1 米，设为 0
 可跳过真机启动前移。外参文件仍独立，`camera.camera_calibration` 只保存其路径。
-标定输出位置为 `calibration.output`。密钥继续通过环境变量或已有凭据读取。
+密钥继续通过环境变量或已有凭据读取。
 `navigation.max_unknown_path_m` 是两种环境共用的未知路径长度上限（默认 1.5 米），
 从原来的 `hermes.max_unknown_path_m` 移到此处；自定义配置文件也需同步移动该字段。
 `--enable-motion`、`--preflight-only`、`--base-only` 只接受命令行设置，不能写入配置。
@@ -185,9 +185,6 @@ python -m robot_nav hermes --camera-source remote \
 
 # 只读预检，不发送运动命令
 python -m robot_nav hermes --preflight-only
-
-# D435i 安装外参标定（独立入口，会移动真机）
-python -m robot_nav calibrate-hermes --enable-motion
 ```
 
 ## 当前实现
@@ -222,7 +219,6 @@ python -m robot_nav calibrate-hermes --enable-motion
 | `src/robot_nav/__main__.py`、`cli.py` | 启动分派、参数定义与组合校验 |
 | `src/robot_nav/launch.py` | 两种环境共用的组件装配、日志与可视化接线 |
 | `src/robot_nav/environment.py` | Adapter 创建、真机预检与启动前移 |
-| `src/robot_nav/calibration_launch.py` | 真机外参标定独立入口 |
 | `src/robot_nav/app.py` | 完整导航循环、单周期编排与显式动作执行 |
 | `src/robot_nav/core/navigator.py` | 行为分派与公共输入检查 |
 | `src/robot_nav/core/scan_behavior.py` | 首次环扫、补扫与扫描画面采集 |
@@ -245,8 +241,8 @@ python -m robot_nav calibrate-hermes --enable-motion
 | `src/robot_nav/perception/analyzer.py` | 语义分析的模型边界协议 |
 | `src/robot_nav/perception/snapshot_store.py` | 语义快照的写入与读取 |
 | `src/robot_nav/adapters/habitat/` | Habitat Adapter |
-| `src/robot_nav/adapters/hermes/` | Hermes + D435i Adapter、REST 客户端与标定 |
-| `src/robot_nav/adapters/realsense/` | RealSense RGB-D 采集、D435i 配置与相机外参标定 |
+| `src/robot_nav/adapters/hermes/` | Hermes + D435i Adapter、REST 客户端与外参读取 |
+| `src/robot_nav/adapters/realsense/` | RealSense RGB-D 采集、D435i 配置 |
 | `src/robot_nav/adapters/openai_compatible.py` | VLM 请求与结构化结果解析 |
 | `src/robot_nav/perception/object_localizer.py` | 历史定位的 YOLO/VLM 组合、SAM2 分割与定位回退策略 |
 | `src/robot_nav/adapters/object_detection_worker.py` | 在指定环境中常驻运行 YOLO 或 SAM2，记录阶段与调用栈 |

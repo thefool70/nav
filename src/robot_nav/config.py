@@ -26,7 +26,6 @@ FIELDS = {
         "object_timeout_s"
     ),
     "logging": "no_rerun rerun_save run_log",
-    "calibration": "output turn_angle_deg drive_distance_m",
 }
 NULLABLE = {
     "target", "scene", "camera_serial", "camera_height_m", "camera_forward_m",
@@ -35,7 +34,7 @@ NULLABLE = {
 }
 PATHS = {
     "scene", "camera_calibration", "object_yolo_model", "object_sam_checkpoint",
-    "rerun_save", "run_log", "output",
+    "rerun_save", "run_log",
 }
 BOOLS = {"debug_random_score", "debug_frontier", "no_rerun"}
 INTS = {"seed", "gpu_device_id", "max_cycles", "min_localization_quality", "vlm_max_output_tokens"}

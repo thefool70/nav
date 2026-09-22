@@ -144,7 +144,7 @@
   和 `object.approach` 使用。`app.py::_execute_action` 对物体停靠优先传入
   `frame.navigation_map`，其余动作传入 `frame.obstacle_map`，同时显式传入
   `reference_pose=frame.pose`。不能用 FOV 图检查完整导航图选出的物体停靠路径。
-  启动前移、标定与扫描转向仍走普通接口；
+  启动前移与扫描转向仍走普通接口；
   Habitat 当前未实现该扩展。
 - Hermes `_send_relative_pose` 用 `reference_pose` 还原世界目标与目标 yaw，
   `start_pose` 仅计算剩余距离和反馈。排查“Action 完成但未到达父节点”时对照

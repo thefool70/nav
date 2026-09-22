@@ -26,19 +26,18 @@ def parse_arguments(argv=None):
     args = parser.parse_args(remaining)
     args.config = selected.config.resolve()
     _validate_arguments(parser, args)
-    if args.adapter != "calibrate-hermes" and args.object_python is None:
+    if args.object_python is None:
         args.object_python = _default_object_python()
     return parser, args
 
 
 def _build_parser():
-    """定义运行入口与标定入口的参数。"""
+    """定义仿真与真机运行入口的参数。"""
     parser = argparse.ArgumentParser(description="运行机器人语义目标搜索")
     adapters = parser.add_subparsers(dest="adapter", required=True)
 
     _add_habitat_parser(adapters)
     _add_hermes_parser(adapters)
-    _add_calibration_parser(adapters)
     return parser, adapters.choices
 
 
@@ -141,52 +140,6 @@ def _add_hermes_parser(adapters):
     hermes.add_argument("--startup-forward-m", type=_non_negative_float, help="启动前移距离，0 表示跳过")
     _add_hermes_tuning(hermes)
     _add_camera_source_arguments(hermes)
-
-
-def _add_calibration_parser(adapters):
-    """独立标定的采集源和受控运动参数。"""
-    calibration = adapters.add_parser(
-        "calibrate-hermes",
-        help="利用本机 D435i IMU/RGB-D 和 Hermes 位姿标定安装外参",
-    )
-    calibration.add_argument(
-        "--base-url",
-        help="Hermes Robot Agent 地址",
-    )
-    calibration.add_argument(
-        "--camera-serial",
-        help="有多台 RealSense 时指定 D435i 序列号",
-    )
-    calibration.add_argument(
-        "--output",
-        help="标定结果 JSON 路径",
-    )
-    calibration.add_argument(
-        "--turn-angle-deg",
-        type=_positive_float,
-        help="左右标定转角，默认 30°",
-    )
-    calibration.add_argument(
-        "--drive-distance-m",
-        type=_positive_float,
-        help="标定直行距离，默认 0.20 m",
-    )
-    calibration.add_argument(
-        "--action-timeout-s",
-        type=_positive_float,
-        help="单个 Hermes 标定 Action 的超时秒数",
-    )
-    calibration.add_argument(
-        "--min-localization-quality",
-        type=_localization_quality,
-        help="定位模式的最低质量；建图模式不应用该阈值",
-    )
-    calibration.add_argument(
-        "--enable-motion",
-        action="store_true",
-        help="确认场地清空并允许标定程序移动真机",
-    )
-    _add_camera_source_arguments(calibration)
 
 
 def _add_navigation_arguments(
@@ -329,11 +282,6 @@ def _add_vlm_arguments(parser):
 
 def _validate_arguments(parser, args):
     """按入口检查参数组合，后续装配直接使用已解析的字段。"""
-    if args.adapter == "calibrate-hermes":
-        if not args.enable_motion:
-            parser.error("外参标定会移动真机，必须显式提供 --enable-motion")
-        return
-
     if args.adapter == "habitat" and not args.scene:
         parser.error("必须设置 habitat.scene 或 --scene")
     if not args.preflight_only and not args.target:

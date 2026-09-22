@@ -8,14 +8,13 @@
 
 `app.py` 负责调用设备和感知能力，将结果交回核心，不按搜索阶段自行决定换点、屏蔽区域、跳过节点或放弃线索。设备适配器仍负责动作执行、监控、取消和终态确认；设备离线等系统错误不因此降级为可恢复的搜索结果。
 
-导航循环从 `__main__.py` 移入 `app.py`，与单周期编排共同形成完整运行入口。`__main__.py` 只串联参数解析、组件创建和程序启动；参数定义与检查、组件装配以及标定流程移出主入口，标定仍保留独立启动方式。三个阅读入口分别回答如何启动、如何运行、如何决策，日志排版和展示细节留在记录模块。
+导航循环从 `__main__.py` 移入 `app.py`，与单周期编排共同形成完整运行入口。`__main__.py` 只串联参数解析、组件创建和程序启动；参数定义与检查、组件装配移出主入口。三个阅读入口分别回答如何启动、如何运行、如何决策，日志排版和展示细节留在记录模块。
 
 决策意图与执行反馈使用明确的动作类型和数据表达，替代通过 `debug.stage` 字符串决定执行和恢复方式。保留当前同步运动语义，采用简单枚举和数据类，不引入通用任务调度框架；具体字段尚待设计。
 
 本轮已按上述边界实施：行为落在 `core/scan_behavior.py`、`core/exploration.py`、
 `core/backtracking.py` 与目标处理模块，`core/navigator.py` 只做分派与公共输入检查；
-导航循环在 `app.py::run_navigation`，单周期在 `app.py::run_navigation_cycle`，启动装配在 `launch.py`，标定入口在
-`calibration_launch.py`。执行侧使用 `NavigationAction`（`ActionKind` + `ActionPurpose` +
+导航循环在 `app.py::run_navigation`，单周期在 `app.py::run_navigation_cycle`，启动装配在 `launch.py`。执行侧使用 `NavigationAction`（`ActionKind` + `ActionPurpose` +
 `ActionConstraint`）与 `ActionExecutionResult`（`ActionOutcome`）传递意图与结果，
 `debug` 只用于解释和记录。
 

@@ -14,7 +14,6 @@ remote-camera = ["numpy>=1.24,<2", "pyzmq>=25", "msgpack>=1"]
 visualization = ["rerun-sdk==0.22.1"]
 hermes = [
     "numpy>=1.24,<2",
-    "opencv-python-headless>=4.8,<4.12",
     "pyrealsense2==2.56.5.9235",
 ]
 

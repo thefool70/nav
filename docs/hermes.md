@@ -12,11 +12,11 @@ D435i RGB ─► VLM 视觉队列 ─────────────┘
 core 相对位姿 ─► 地图系目标 ─► Hermes MoveTo / Rotate Action
 ```
 
-Adapter、REST 客户端和标定入口都在 `src/robot_nav/adapters/hermes/`，包名与
+Adapter、REST 客户端和外参读取都在 `src/robot_nav/adapters/hermes/`，包名与
 CLI 子命令均为 `hermes`。默认在本机采集 USB 图像和 IMU；
 相机连接随车笔记本时使用文末的远程采集方式。本机直连前关闭占用 D435i 的服务。旧 L515 安装外参不能用于这台相机。
 
-导航及标定参数统一在根目录 `config.json`，命令行可以临时覆盖；规则见
+导航参数统一在根目录 `config.json`，命令行可以临时覆盖；规则见
 [统一运行配置](../README.md#统一运行配置)。底盘 GUI 和 SSH 脚本仍使用各自的参数。
 
 ## 首次安装
@@ -84,28 +84,16 @@ hardware/hermes/run.sh \
   `--min-localization-quality`，默认 1。
 - `mode=odometry`、`health=error` 或 `health=fatal`：拒绝运动。
 
-## 标定 D435i
+## 相机安装外参
 
-相机固定后标定一次；安装位置改变后必须重做。标定是独立入口
-`calibrate-hermes`，程序会左右旋转并向前移动约
-0.20 m，执行前清空四周及前方至少 0.5 m，并确保可以立即急停。
-画面应同时包含地面和约 1–3 m 的静止纹理物体。程序在运动前检查至少 80 个
-RGB 特征点有 0.25–4 m 的可用深度；空旷地面或远景纹理不能替代这一条件。
+项目不再提供自动标定程序。导航仍读取
+`data/hermes_d435i/extrinsics.json`，也可用 `--camera-calibration` 指定已有外参文件。
+安装位置改变后，应通过外部测量或标定更新外参，不能沿用旧安装参数。
 
-```bash
-hardware/hermes/run.sh \
-  python -m robot_nav calibrate-hermes \
-  --enable-motion
-```
-
-标定使用 Motion Module、深度地面拟合、RGB-D 视觉运动和 Hermes 位姿，估计
-相机的前、左、高度、yaw、pitch 和 roll。结果默认保存到
-`data/hermes_d435i/extrinsics.json`，导航时自动读取。它是算法开发所需的初值，
-不是计量级标定。修改安装位置后重做，或把新外参写到同一路径。
-
-无法自动标定时，至少用 `--camera-height-m` 提供手测高度；其余字段可用
+没有外参文件时，至少用 `--camera-height-m` 提供手测高度；其余字段可用
 `--camera-forward-m`、`--camera-left-m`、`--camera-yaw-deg`、
-`--camera-pitch-down-deg` 和 `--camera-roll-deg` 覆盖。
+`--camera-pitch-down-deg` 和 `--camera-roll-deg` 提供或覆盖。
+已有外参文件与历史标定数据不受程序移除影响。
 
 ## 运行物体搜索
 
@@ -166,7 +154,7 @@ hardware/hermes/run.sh \
 
 默认每次正式导航都会先沿当前朝向用 `MoveToAction` 规划前移 1 m（可用
 `hermes.startup_forward_m` 或 `--startup-forward-m` 调整，0 表示跳过），然后才开始首次
-8×45° 扫描。预检和标定不执行这个启动动作。
+8×45° 扫描。预检不执行这个启动动作。
 启动前移规划失败或停滞且已确认动作结束时，从实际位置开始搜索；扫描转向的
 可恢复失败也从实际朝向重新规划观察。
 
@@ -260,7 +248,7 @@ D435i 筛选后的算法地图，
 停止程序。Hermes 当前接口在 Action 创建后才提供路径，因此取消前可能已有
 位移。物体保底返回与停靠命令也使用这项路径检查：保底返回用探索图，停靠用
 完整导航图；两者失败均不屏蔽 Frontier 区域。
-启动前移、标定和扫描转向不启用它。
+启动前移和扫描转向不启用它。
 
 - 单个 Action 默认总超时 120 秒。
 - `MoveToAction` 连续 1 秒平移不足 2 cm 时结束本次动作；原地转向不重置该计时。
@@ -396,8 +384,7 @@ python -m robot_nav hermes --camera-source remote \
 ```
 
 `--camera-url` 和旧 HTTP 服务已移除。远程方式无需在开发机运行 USB 转发脚本。
-发布器不提供 IMU，`calibrate-hermes --camera-source remote` 在连接设备前拒绝执行；
-导航使用已有有效安装外参。需要重新自动标定时使用本地相机方式，先释放发布器对相机的占用。
+远程导航使用已有有效安装外参，不要求发布器提供 IMU。
 
 原协议依次为 topic、msgpack 元数据、RGB8、本机字节序 uint16 深度；
 随车 x86 主机为小端，接收端按小端读取。深度乘 `depth_scale_m`
@@ -469,5 +456,5 @@ GUI 入口与操作编排在 `chassis_gui.py`，页面在 `chassis_gui.html`，�
 
 完整参数以 `python -m robot_nav hermes --help` 为准。
 
-该链路使用 Hermes 自带规划和激光避障，但不是独立的功能安全系统。标定和导航
+该链路使用 Hermes 自带规划和激光避障，但不是独立的功能安全系统。导航
 期间必须有人能够立即急停。

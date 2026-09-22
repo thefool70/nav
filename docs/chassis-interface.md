@@ -61,7 +61,7 @@ H×W×3 uint8 RGB 数组及 H×W 米制浮点深度数组；进入核心时转�
 显式传入命令、决策地图与 `frame.pose`。Adapter 必须用该参考位姿还原世界目标，
 不能用发送时重新读取的位姿解释同一条相对命令；
 物体停靠优先传入 `frame.navigation_map`，其余上述动作传入 `frame.obstacle_map`；
-启动前移、标定与扫描转向使用普通发送接口。
+启动前移与扫描转向使用普通发送接口。
 Hermes 与 Habitat 均支持该扩展；不支持时运行层报错停止，不降级为普通运动。
 `NavigationAction.destination` 是完整世界系位姿，执行时须保留指定的最终 yaw，
 不能把它替换为当前位置到目标点的方位角。

@@ -1,7 +1,7 @@
-"""robot-nav 启动入口：读取参数并分派导航或标定。
+"""robot-nav 启动入口：读取参数并分派仿真或真机导航。
 
 本模块只做三件事：读取参数、按需读取凭据、把控制权交给 :mod:`~robot_nav.launch`。
-参数定义在 ``cli.py``，运行装配在 ``launch.py``，导航循环在 ``app.py``，外参标定在 ``calibration_launch.py``。
+参数定义在 ``cli.py``，运行装配在 ``launch.py``，导航循环在 ``app.py``。
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .calibration_launch import run_calibration_entries
 from .cli import parse_arguments
 from .launch import run_entries
 
@@ -19,8 +18,6 @@ from .launch import run_entries
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """解析运行环境并启动所选入口。"""
     parser, args = parse_arguments(argv)
-    if args.adapter == "calibrate-hermes":
-        return run_calibration_entries(args)
 
     # 预检和随机评分都不调用 VLM，因此无需模型凭据。
     api_key = ""

@@ -1,4 +1,4 @@
-"""保存和读取 Hermes 与 D435i 的完整安装外参。
+"""读取 Hermes 与 D435i 的完整安装外参。
 
 外参描述相机相对底盘的安装位姿，供地图刷新与历史物体定位共用。
 """
@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Union
 
@@ -47,53 +46,6 @@ def load_camera_extrinsics(path: PathLike) -> CameraExtrinsics:
     return extrinsics
 
 
-def save_camera_extrinsics(
-    path: PathLike,
-    extrinsics: CameraExtrinsics,
-    diagnostics: Mapping[str, Any],
-    *,
-    device: str = "Intel RealSense D435i on SLAMTEC Hermes 48V",
-) -> Path:
-    """原子写入 Hermes 相机外参与精简质量指标，默认使用 D435i 设备标识。"""
-    _validate_extrinsics(extrinsics)
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": 1,
-        "device": device,
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "coordinate_convention": {
-            "translation": "robot forward / left / up, metres",
-            "yaw": "positive left, degrees",
-            "pitch": "positive down, degrees",
-            "roll": "image clockwise, degrees",
-        },
-        "camera_extrinsics": {
-            "height_m": round(float(extrinsics.height_m), 6),
-            "forward_m": round(float(extrinsics.forward_m), 6),
-            "left_m": round(float(extrinsics.left_m), 6),
-            "yaw_deg": round(math.degrees(float(extrinsics.yaw_rad)), 6),
-            "pitch_down_deg": round(
-                math.degrees(float(extrinsics.pitch_down_rad)), 6
-            ),
-            "roll_deg": round(
-                math.degrees(float(extrinsics.roll_rad)), 6
-            ),
-        },
-        "diagnostics": dict(diagnostics),
-    }
-    temporary = destination.with_name(destination.name + ".tmp")
-    try:
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(destination)
-    except OSError as exc:
-        raise RuntimeError(f"无法写入相机外参 {destination}：{exc}") from exc
-    return destination
-
-
 def _finite_field(payload: Mapping[str, Any], name: str) -> float:
     value = payload.get(name)
     if isinstance(value, bool):
@@ -127,5 +79,4 @@ def _validate_extrinsics(extrinsics: CameraExtrinsics) -> None:
 __all__ = [
     "DEFAULT_CAMERA_EXTRINSICS_PATH",
     "load_camera_extrinsics",
-    "save_camera_extrinsics",
 ]
