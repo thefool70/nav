@@ -42,24 +42,6 @@ def build_unobserved_scan_headings(
     )
 
 
-def build_uniform_scan_headings(
-    start_heading_rad: float, view_count: int = 4
-) -> Tuple[float, ...]:
-    """返回从 start_heading_rad 起绕一周均匀分布的 view_count 个扫描朝向（弧度），
-    默认四向（相对起点 0°、90°、180°、270°）。
-
-    返回朝向全部用 wrap_angle 归一化到 [-π, π)。view_count 必须为正整数，
-    start_heading_rad 必须为有限角度。
-    """
-    if view_count < 1:
-        raise ValueError("view_count must be a positive integer")
-    start_heading = _require_finite_angle(start_heading_rad, "start_heading_rad")
-    step_rad = 2.0 * math.pi / view_count
-    return tuple(
-        wrap_angle(start_heading + i * step_rad) for i in range(view_count)
-    )
-
-
 def build_covering_scan_headings(
     point_headings_world_rad: Sequence[float],
     current_robot_heading_rad: float,

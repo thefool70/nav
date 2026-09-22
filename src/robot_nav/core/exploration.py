@@ -47,9 +47,10 @@ def select_exploration_target(
 ) -> NavigationResult:
     """优先选择新 Frontier；新候选耗尽时沿当前分支逐个返回父节点。"""
     explored_state = mark_latest_committed_explored(state)
-    explored_state, candidates = refresh_frontier_regions(frame, explored_state,
+    explored_state, frontiers = refresh_frontier_regions(frame, explored_state,
         timings=timings, frontier_cache=frontier_cache,
     )
+    candidates = frontiers.candidates
     if not candidates:
         from .backtracking import begin_backtracking
 

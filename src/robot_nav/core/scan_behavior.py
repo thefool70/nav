@@ -1,4 +1,4 @@
-"""扫描行为：首次环扫与后续局部 Frontier 补查。
+"""扫描行为：按局部可见且尚未观察的 Frontier 规划朝向并采集画面。
 
 同一行为的正常推进与可恢复失败放在一起：规划视角、对齐朝向、登记已检查
 覆盖，以及转向未完成时按实际朝向重规划。本模块只读写 ``SearchState``。
@@ -36,14 +36,11 @@ from .observation_coverage import (
 )
 from .scan import (
     build_unobserved_scan_headings,
-    build_uniform_scan_headings,
     shortest_turn_to_heading,
 )
 from .timing import TimingSpans
 
 TURN_TOLERANCE_RAD = math.radians(5.0)
-INITIAL_SCAN_TURN_COUNT = 8
-INITIAL_SCAN_STEP_RAD = 2.0 * math.pi / INITIAL_SCAN_TURN_COUNT
 
 
 def continue_scanning(
@@ -54,33 +51,27 @@ def continue_scanning(
     timings: Optional[TimingSpans] = None,
     frontier_cache: Optional[FrameFrontierCache] = None,
 ) -> NavigationResult:
-    """首次环扫；之后补查局部可见 Frontier，两种模式均至少采集当前画面。"""
+    """每轮都按未观察的局部 Frontier 扫描；没有待查方向时采集当前画面。"""
     working_state = state
     scan_debug_details: Optional[Mapping[str, Any]] = None
     if not working_state.scan_headings_world_rad:
         try:
-            working_state, candidates = refresh_frontier_regions(frame, working_state,
+            working_state, frontiers = refresh_frontier_regions(frame, working_state,
                 timings=timings, frontier_cache=frontier_cache,
             )
-            local_points = frontier_observation_points(frame, candidates)
+            local_points = frontier_observation_points(frame, frontiers.boundary_cells)
             # 待分析视角也暂时避免重复采集；只有分析成功才会登记为已检查覆盖。
             points = unobserved_observation_points(
                 local_points, frame, working_state.observed_views + working_state.pending_observation_views,
             )
-            headings = ()
-            if not working_state.initial_scan_complete:
-                headings = build_uniform_scan_headings(
-                    frame.pose.yaw_rad + INITIAL_SCAN_STEP_RAD,
-                    INITIAL_SCAN_TURN_COUNT,
-                )
-            elif points:
+            if points:
                 camera_offset, horizontal_fov = horizontal_camera_view(frame)
                 camera_xy = camera_world_position(frame)
                 headings = build_unobserved_scan_headings(
                     points, Pose2D(camera_xy[0], camera_xy[1], frame.pose.yaw_rad),
                     camera_offset, horizontal_fov,
                 )
-            if not headings:
+            else:
                 # 覆盖可复用也保留当前画面的目标检查，不为此额外转向。
                 headings = (frame.pose.yaw_rad,)
         except ValueError as exc:
@@ -89,10 +80,8 @@ def continue_scanning(
                 f"无法规划待检查视角：{exc}",
             )
         scan_debug_details = {
-            "frontier_scan_candidate_count": len(candidates),
-            "frontier_scan_cell_count": len(
-                {cell for candidate in candidates for cell in candidate.frontier_cells}
-            ),
+            "frontier_move_candidate_count": len(frontiers.candidates),
+            "frontier_scan_cell_count": len(frontiers.boundary_cells),
             "local_observation_point_count": len(local_points),
             "observation_point_count": len(points),
             "reused_observation_point_count": len(local_points) - len(points),
@@ -197,11 +186,7 @@ def finish_scan(
     frontier_cache: Optional[FrameFrontierCache] = None,
 ) -> NavigationResult:
     """结束本轮采集并进入探索；场景模式此前已由后台观察器判定。"""
-    completed_state = replace(
-        state,
-        phase=SearchPhase.EXPLORING,
-        initial_scan_complete=True,
-    )
+    completed_state = replace(state, phase=SearchPhase.EXPLORING)
     from .exploration import select_exploration_target
 
     return select_exploration_target(
@@ -296,20 +281,13 @@ def scan_debug_details_of(
         **scan_coverage_details(state),
         "scan_index": state.next_scan_index if scan_index is None else scan_index,
         "scan_heading_count": len(state.scan_headings_world_rad),
-        "scan_mode": _scan_mode(state),
+        "scan_mode": "frontier" if state.scan_observation_points else "current_view",
         "target_heading_world_rad": target_heading,
         "checked_view_count": len(state.observed_views),
     }
     if extra is not None:
         details.update(extra)
     return details
-
-
-def _scan_mode(state: SearchState) -> str:
-    """区分首次环扫、Frontier 补查和无待查方向时的当前画面采集。"""
-    if not state.initial_scan_complete:
-        return "initial"
-    return "frontier" if state.scan_observation_points else "current_view"
 
 
 def _camera_image_width(frame: NavigationFrame) -> int:

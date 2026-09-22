@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence, Tuple
+from typing import Iterable, Sequence, Tuple
 
 from .geometry import (
     grid_cell_center_to_world,
@@ -15,7 +15,7 @@ from .geometry import (
     world_to_nearest_grid_cell,
     wrap_angle,
 )
-from .models import FrontierCandidate, NavigationFrame, ObservationView, ObstacleMap
+from .models import NavigationFrame, ObservationView, ObstacleMap
 
 
 WorldPoint = Tuple[float, float]
@@ -30,18 +30,17 @@ SAME_POSITION_REUSE_M = 0.10
 
 def frontier_observation_points(
     frame: NavigationFrame,
-    candidates: Sequence[FrontierCandidate],
+    frontier_cells: Iterable[Tuple[int, int]],
 ) -> Tuple[WorldPoint, ...]:
-    """返回局部可见 Frontier 的全部边界点，新旧候选都可提供待检查方向。
+    """将边界格转换为局部可见的观察点，不判断它们能否作为移动目标。
 
-    使用边界格而非单个代表点，避免聚类缩减观察方向；不扫描隔墙或远处边界。
+    扫描传入移动筛选前的完整边界；距离和地图遮挡仍限制可观察范围。
     """
     origin = camera_world_position(frame)
     visibility_map = _visibility_map(frame)
     points = {
         grid_cell_center_to_world(row, col, frame.obstacle_map)
-        for candidate in candidates
-        for row, col in candidate.frontier_cells
+        for row, col in frontier_cells
     }
     return tuple(
         point for point in sorted(points)

@@ -401,7 +401,6 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
             }
             for evidence in state.scan_evidence
         ),
-        "initial_scan_complete": state.initial_scan_complete,
         "history_node_count": len(state.observation_history),
         "history_direction_counts": direction_counts,
         "active_frontier_id": state.active_frontier_id,

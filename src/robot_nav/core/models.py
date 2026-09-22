@@ -396,7 +396,6 @@ class SearchState:
     observed_views: Tuple[ObservationView, ...] = ()
     scan_observation_points: Tuple[Tuple[float, float], ...] = ()
     scan_local_point_count: int = 0
-    initial_scan_complete: bool = False
     blocked_frontier_regions: Tuple[BlockedFrontierRegion, ...] = ()
     backtrack_node_id: Optional[str] = None
     branch_node_ids: Tuple[str, ...] = ()

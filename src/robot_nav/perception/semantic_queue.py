@@ -395,7 +395,10 @@ class SemanticPerception:
                 frame, context, timings=timings, frontier_cache=frontier_cache,
             )
         with measure_stage(timings, "snapshot.observation_points"):
-            points = frontier_observation_points(frame, candidates)
+            # 此处只筛选待评分的移动候选；扫描覆盖使用 context 中冻结的观察点。
+            points = frontier_observation_points(
+                frame, (cell for candidate in candidates for cell in candidate.frontier_cells),
+            )
             visible_points = {_xy_key(point) for point in points}
             candidates = tuple(
                 item for item in candidates

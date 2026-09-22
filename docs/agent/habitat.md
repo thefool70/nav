@@ -96,10 +96,11 @@
   候选的全部 `frontier_cells`，绿色格数不等于导航目标数。`Frontiers` 表格每行
   才是一个候选；JSONL 的 `frontier_candidates` 长度与各项
   `frontier_cell_count` 可分别核对候选数和边界格数，截图须关联周期后才能比较。
-- `frontier.py::extract_frontiers` 返回候选及过滤统计，按八邻接保留完整连续边界，不按长度
+- `frontier.py::extract_frontiers` 返回完整边界、移动候选及过滤统计，按八邻接保留完整连续边界，不按长度
   或跨度拆分。`_merge_frontier_fragments` 仅按 0.30 m 自由区短路径和未知侧
   朝向判断断段是否合并，不限制总跨度；合并后统一过滤跨度小于 0.50 m 的区域。
-  每个有效区域只产生一个移动代表点，`frontier_cells` 保留完整边界供扫描与匹配。
+  每个有效区域只产生一个移动代表点，候选的 `frontier_cells` 保留完整边界供区域匹配。
+  `FrontierExtraction.boundary_cells` 在小孔洞过滤后、移动候选筛选前保存，供扫描使用。
   排查连续边界被分成多个候选时，先核对边界是否实际八邻接连通和候选刷新周期。
   聚类前 `_small_unknown_holes` 仅从候选邻接的未知格开始，在同格网 `visibility_map`
   上搜索面积不超过 `MAX_UNKNOWN_HOLE_AREA_M2=0.05` 的封闭八连通块；触图边、
@@ -107,7 +108,7 @@
   `_find_frontier_cells` 与 `_unknown_side_normal` 使用同一排除集，避免合并时重新
   引入孔洞方向。排除集仅在本次提取有效；JSONL `state.frontier_hole_filter` 的
   applied=false 表示未执行过滤，不能与执行后未发现孔洞混淆。
-- `core/navigator.py::_refresh_frontier_regions` 重提有效边界；
+- `core/frontier_regions.py::refresh_frontier_regions` 返回更新状态与 `FrontierExtraction`；
   `core/history.py::match_frontier_regions` 用世界坐标边界关联 ID。历史节点只保留
   实际尝试的 Frontier 移动，节点的出发位置也是本轮未选方向的父节点。
 - `FrontierRegion.deferred_order` 保存暂存时的（观测节点序号，候选排名），与
@@ -177,18 +178,18 @@
   确认失败不得转换为可恢复异常，否则下一目标可能覆盖仍在执行的动作。成功后
   将异常及其完整 `path_world_xy` 送回 `app.py`；必须先于父类
   `RecoverableMotionError` 捕获，不能只转成字符串丢失路径。
-- `recover_from_motion_failure(rejected_path_world_xy=...)` 将尝试标为
+- `core/navigator.py::apply_execution_result` 接收 `PATH_UNKNOWN` 反馈后将尝试标为
   `INVALIDATED`，并把当时完整世界边界存入
   `SearchState.blocked_frontier_regions`。取消结果记录 `rejection_scope=region`、
   `rejected_path_world_xy`；首个未知格仍保存在 Action 日志和历史 `execution_reason`。
   这适用于 `explore.select` / `backtrack.resume`；`backtrack.return` 的执行失败、
-  停滞或未知路径长度超限均调用 `_recover_backtrack_issue`，不能据返回失败屏蔽未尝试的区域。
+  停滞或未知路径长度超限均调用 `backtracking.recover_backtrack_issue`，不能据返回失败屏蔽未尝试的区域。
   恢复从 `branch_node_ids` 弹出失败节点，将其所属区域的 `deferred_order` 清为
   `None`，保留边界和整片屏蔽记录，再由下一周期按实际帧重新检查。日志
   `motion.backtrack_recovered` 记录失败种类、跳过节点、释放区域及可用的位置误差。
   返回被目标检测中断时，`_release_interrupted_direction` 清除回退状态并转扫描，
   保留所有暂存方向供后续恢复。
-- `_refresh_frontier_regions` 在区域 ID 关联之前调用
+- `frontier_regions.refresh_frontier_regions` 在区域 ID 关联之前调用
   `history.filter_blocked_frontier_regions`。被屏蔽边界独立于候选保存，按世界格心
   与自由区一格邻域匹配，并保留所有匹配过的完整边界。不能只屏蔽失败坐标附近
   `max(0.4 m, 2 格)`，也不能只靠旧 `region_id`，否则换代表点或分裂会反复下发。
@@ -196,16 +197,21 @@
   `BlockedFrontierRegion` 只保存区域 ID 与边界；被拒绝路径仅写入取消日志。
   新动作仍用自己的选点地图检查实时路径；普通失败、停滞、目标检测中断不额外
   屏蔽整片区域。Rerun `Frontiers` 与 JSONL `blocked_frontier_regions` 可查屏蔽记录。
-- `SearchState.scan_observation_points` 来自本轮有效 Frontier 的全部边界格，
-  新候选和暂存候选均参与；观察点与朝向在整轮扫描期间冻结，不因途中边界消失
+- `SearchState.scan_observation_points` 来自 `FrontierExtraction.boundary_cells`，
+  不受最小移动距离、区域跨度、历史目标排除或未知路径区域屏蔽影响。
+  `refresh_frontier_regions` 只替换提取结果中的移动候选，保留扫描边界与帧缓存。
+  观察点与朝向在整轮扫描期间冻结，不因途中边界消失
   而重排。`observed_views` 只在有效本地观测或成功后台目标判断后增加；相机采集、
   地图公开和 Rerun 运动帧均不代表 VLM 已检查。
 - 扫描未指向 Frontier 代表点时，先检查 `observation_coverage.py` 的
   `frontier_observation_points`：只保留光心距离大于 0.10 m、至多 4 m 且地图
   视线可达的边界格。`scan.py::build_unobserved_scan_headings` 合并视场后，
-  镜头中心可在多个边界点之间。首次仍环扫；之后无局部待查点时两种模式均采集
-  当前朝向。日志 `scan_mode` 分别为 `initial`、`frontier`、`current_view`，
+  镜头中心可在多个边界点之间。启动与后续扫描共用此规则；无局部待查点时两种
+  模式均采集当前朝向。日志 `scan_mode` 为 `frontier` 或 `current_view`，
   Rerun `scan basis` 显示对应原因；旧录制的 `scene_current_view` 仅对应当时的场景采集。
+- 扫描规划日志的 `frontier_scan_cell_count` 是移动筛选前的边界格数，
+  `frontier_move_candidate_count` 是筛选后的移动候选数，两者可能一个非零、一个为零。
+  `WAITING_FOR_SEMANTICS` 也检查这些边界的未观察覆盖，无移动候选时仍可恢复扫描。
 - `core/observation_coverage.py::_local_coverage_points` 的 0.25 m 固定世界
   网格和首层未知格仅用于记录已检查图像，不触发扫描。`capture_observation_view`
   必须同时接收冻结的 Frontier 观察点：覆盖复用按世界坐标匹配，边界格心未必落在
@@ -250,7 +256,7 @@
 - `VlmInteraction.context` 与 `SemanticAnalyzer.analyze_views(trace_context=...)`
   只增加记录来源，不参与提示词或 HTTP payload；不能为了显示关联关系串用
   `_scan_images` 或共享可变的当前任务 ID。场景返回不另发视觉请求；物体定位请求通过 job/view 编号关联历史画面。
-- `SemanticPerception._score_origins` 随评分缓存保留 J/R 来源；
+- `SemanticPerception._scores` 每项保存 `(score, job_id, interaction_id)`，保留 J/R 来源；
   `semantic_received_jobs` 是该周期接收结果，`semantic_score_sources` 是传给
   排序的有效缓存输入。两者不是同一件事，返回有效分数不等于已用于导航。
 - `perception/semantic_queue.py::SemanticPerception` 是 CLI 的默认感知实现。
@@ -426,9 +432,9 @@
   `core/object_approach.py::recover_object_motion` 对 object.approach 清空目的地，
   下一周期用最新地图换停靠点；object.fallback_return/object.fallback_turn 失败则 STOPPED。
   接近阶段不沿用 Frontier 整区域屏蔽，三次停靠仍失败才放弃线索。
-- `core/navigator.py::recover_from_motion_failure` / `continue_after_motion_stall`
-  对 `scan.turn` 使用 `_recover_scan_turn`，清除扫描计划后按真实朝向重新规划，
-  不登记失败方向的覆盖。首次扫描尚未完成时仍按首次环扫规则重建。
+- `core/navigator.py::apply_execution_result`
+  对 `scan.turn` 使用 `scan_behavior.recover_scan_turn`，清除扫描计划后按真实朝向重新规划，
+  不登记失败方向的覆盖；所有扫描都按当前边界与已有覆盖重新规划。
 - `environment.py::_move_hermes_forward_on_start` 在 `run_navigation` 之前直接调用
   底盘；前移 1 m 的可恢复失败/停滞在确认动作结束后继续启动，其他异常仍停止。
 - `adapters/hermes/adapter.py::_execute_action` 将 Action 创建、起始位姿读取和监控

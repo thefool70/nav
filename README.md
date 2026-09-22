@@ -56,7 +56,7 @@ ChassisInterface ──► NavigationFrame
 
 - `core/` 只做算法计算，不读取设备、不请求模型、不发送控制命令。
 - `app.py` 负责导航循环与单周期编排，并把可恢复的运动结果送回状态机。
-- 搜索核心按四类行为组织：`core/scan_behavior.py`（环扫与补扫）、
+- 搜索核心按四类行为组织：`core/scan_behavior.py`（观察方向规划与采集）、
   `core/exploration.py`（Frontier 探索）、`core/backtracking.py`（分支回退）、
   目标处理（`core/scene_target.py`、`core/target_clue.py`、`core/object_approach.py`）。
 - `perception/` 组织取帧、视觉队列、语义判定与历史物体定位；不直接控制底盘，
@@ -76,7 +76,10 @@ ChassisInterface ──► NavigationFrame
 两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，动作结束后
 再观察和选择下一目标。新出现的 Frontier 优先探索，未选方向暂存；新候选耗尽
 后，沿当前分支逐个返回父节点，直到到达仍有有效探索方向的节点，再继续寻找。
-首次环扫后，仅补查局部可见且尚未检查的 Frontier 方向；返回父节点不额外环扫。
+启动与后续扫描共用同一规则，只观察局部可见且尚未检查的 Frontier 方向。
+返回父节点后直接检查剩余探索方向，不额外扫描。
+扫描使用移动筛选前的完整边界；边界过近、跨度不足或移动尝试被排除，都不影响
+原地观察该方向。观察范围、地图遮挡与已有视觉覆盖仍决定是否需要补查。
 地图已知与视觉已检查分别记录；两种模式没有待查方向时仍采集当前画面，不额外转向。
 返回节点未完成时保留实际位置，跳过该返回节点并重新检查有效方向，不直接结束搜索。
 
@@ -97,7 +100,7 @@ ChassisInterface ──► NavigationFrame
 有效探索方向耗尽后先等待队列，模型失败不冒充“已经检查”。
 
 Hermes 与 Habitat 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
-未知区的累计长度超过 1.5 m 才取消动作，在本次运行中持续屏蔽整个连通 Frontier 区域并转向其他候选，
+未知区的累计长度超过 1.5 m 才取消动作，在本次运行中持续禁止向整个连通 Frontier 区域探索移动并转向其他候选，
 避免在同一片边界内换点反复取消。
 
 两种环境只在 `environment.py` 中创建各自 Adapter；感知、日志、回调和导航循环
@@ -221,7 +224,7 @@ python -m robot_nav hermes --preflight-only
 | `src/robot_nav/environment.py` | Adapter 创建、真机预检与启动前移 |
 | `src/robot_nav/app.py` | 完整导航循环、单周期编排与显式动作执行 |
 | `src/robot_nav/core/navigator.py` | 行为分派与公共输入检查 |
-| `src/robot_nav/core/scan_behavior.py` | 首次环扫、补扫与扫描画面采集 |
+| `src/robot_nav/core/scan_behavior.py` | Frontier 观察方向规划、补扫与画面采集 |
 | `src/robot_nav/core/exploration.py` | Frontier 选点、提交、淘汰与暂存方向恢复 |
 | `src/robot_nav/core/backtracking.py` | 分支节点回退与到点后恢复方向 |
 | `src/robot_nav/core/scene_target.py` | 场景线索返回拍摄位姿并完成 |

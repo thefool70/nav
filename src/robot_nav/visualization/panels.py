@@ -425,11 +425,11 @@ def _scan_status_lines(result):
             f"target yaw={target_heading_deg:.1f} deg"
         )
         lines.append(_scan_basis_text(details.get("scan_mode", "unknown")))
-    if "frontier_scan_candidate_count" in details:
+    if "frontier_scan_cell_count" in details:
         lines.append(
             "frontier map: "
-            f"clusters={details['frontier_scan_candidate_count']}, "
-            f"candidate_cells={details['frontier_scan_cell_count']}"
+            f"move_candidates={details['frontier_move_candidate_count']}, "
+            f"scan_boundary_cells={details['frontier_scan_cell_count']}"
         )
     if "local_observation_point_count" in details:
         lines.append(
@@ -709,9 +709,8 @@ def _wrap_multiline_text(
 
 
 def _scan_basis_text(mode: str) -> str:
-    """说明本次观察由 Frontier、首次环扫还是当前位置场景确认触发。"""
+    """说明本次观察用于 Frontier 补查还是当前画面目标检查。"""
     basis = {
-        "initial": "initial 360 deg sweep",
         "frontier": "unchecked local Frontier directions",
         "current_view": "target check at current pose (no extra turn)",
     }

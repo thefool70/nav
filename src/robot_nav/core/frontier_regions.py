@@ -13,6 +13,7 @@ from typing import Any, Mapping, Optional, Tuple
 from .frontier import (
     PATH_DISTANCE_SCORE_WEIGHT,
     FrameFrontierCache,
+    FrontierExtraction,
     extract_frame_frontiers,
 )
 from .history import filter_blocked_frontier_regions, match_frontier_regions
@@ -32,8 +33,8 @@ def refresh_frontier_regions(
     *,
     timings: Optional[TimingSpans] = None,
     frontier_cache: Optional[FrameFrontierCache] = None,
-) -> Tuple[SearchState, Tuple[FrontierCandidate, ...]]:
-    """重提边界、过滤仍被未知路径屏蔽的整片区域，再关联有效候选的稳定 ID。"""
+) -> Tuple[SearchState, FrontierExtraction]:
+    """保留完整扫描边界，只对移动候选应用区域屏蔽与稳定 ID 关联。"""
     with measure_stage(timings, "frontier.extract"):
         extraction = extract_frame_frontiers(
             frame, tried_candidate_points(state.observation_history),
@@ -59,19 +60,7 @@ def refresh_frontier_regions(
         ignored_frontier_hole_count=extraction.ignored_hole_count,
         ignored_frontier_hole_area_m2=extraction.ignored_hole_area_m2,
         ignored_frontier_cell_count=extraction.ignored_frontier_cell_count,
-    ), candidates
-
-
-def preview_frontier_candidates(
-    frame: NavigationFrame, state: SearchState,
-    *,
-    timings: Optional[TimingSpans] = None,
-    frontier_cache: Optional[FrameFrontierCache] = None,
-) -> Tuple[FrontierCandidate, ...]:
-    """对固定帧预览有效候选，不提交区域编号或修改导航状态；结果用于提前拍摄。"""
-    return refresh_frontier_regions(
-        frame, state, timings=timings, frontier_cache=frontier_cache
-    )[1]
+    ), replace(extraction, candidates=candidates)
 
 
 def scan_coverage_details(state: SearchState) -> Mapping[str, Any]:
@@ -137,7 +126,6 @@ def block_region(regions, region_id: str):
 __all__ = [
     "block_region",
     "frontier_candidate_debug",
-    "preview_frontier_candidates",
     "refresh_frontier_regions",
     "scan_coverage_details",
     "tried_candidate_points",

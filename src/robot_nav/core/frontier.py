@@ -25,8 +25,10 @@ MAX_UNKNOWN_HOLE_AREA_M2 = 0.05
 
 @dataclass(frozen=True)
 class FrontierExtraction:
-    """有效候选与本次提取的小孔洞过滤统计；不修改输入地图。"""
+    """去除小孔洞后的完整边界、移动候选及过滤统计；不修改输入地图。"""
 
+    # 扫描使用移动筛选前的边界；距离、跨度和历史排除只影响 candidates。
+    boundary_cells: Tuple[Cell, ...] = ()
     candidates: Tuple[FrontierCandidate, ...] = ()
     hole_filter_applied: bool = False
     ignored_hole_count: int = 0
@@ -77,7 +79,7 @@ def extract_frontiers(
     max_unknown_hole_area_m2: float = MAX_UNKNOWN_HOLE_AREA_M2,
     timings: Optional[TimingSpans] = None,
 ) -> FrontierExtraction:
-    """提取可达候选并返回过滤统计；仅用同格网未膨胀图判断小孔洞。"""
+    """提取可达自由区边界，再筛选移动候选；仅用同格网未膨胀图判断小孔洞。"""
     with measure_stage(timings, "frontier.prepare"):
         grid = _normalize_grid(obstacle_map)
         resolution = _positive_finite(obstacle_map.resolution_m, "resolution_m")
@@ -128,6 +130,7 @@ def extract_frontiers(
         )
 
     return FrontierExtraction(
+        boundary_cells=tuple(sorted(frontier_cells)),
         candidates=tuple(candidates), hole_filter_applied=filter_applied,
         ignored_hole_count=len(hole_sizes),
         ignored_hole_area_m2=sum(hole_sizes) * resolution * resolution,

@@ -185,8 +185,8 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB）；WebSocket 服务端�
 前往 Frontier 时，黄色点与橙色命令指向同一个最终位置，等待本次移动结束后再决策。
 返回父节点时，橙色命令指向本次返回节点，`Motion details` 显示节点编号、分支深度与
 该节点暂存方向数。
-区域用 `region:N` 标识，状态面板显示局部 Frontier 待检查点与复用点数；首次
-环扫后，只补查含局部可见 Frontier 且覆盖不可复用的方向。`scan basis` 显示
+区域用 `region:N` 标识，状态面板显示局部 Frontier 待检查点与复用点数；启动与
+后续扫描都只检查局部可见且覆盖不可复用的 Frontier 方向。`scan basis` 显示
 观察依据，具体规则见 [算法说明](algorithm.md)。
 `frontier choice` 的 `source=new` 表示优先探索新方向，`source=deferred` 表示
 新候选耗尽后逐个返回父节点，遇到仍有有效方向的节点再继续探索，对应 `backtrack.return` 与

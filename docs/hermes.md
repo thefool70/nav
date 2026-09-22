@@ -153,8 +153,8 @@ hardware/hermes/run.sh \
 `--debug-frontier` 会在移动前打印候选坐标、跨度、路径距离和分数组成。
 
 默认每次正式导航都会先沿当前朝向用 `MoveToAction` 规划前移 1 m（可用
-`hermes.startup_forward_m` 或 `--startup-forward-m` 调整，0 表示跳过），然后才开始首次
-8×45° 扫描。预检不执行这个启动动作。
+`hermes.startup_forward_m` 或 `--startup-forward-m` 调整，0 表示跳过），然后按局部可见且
+尚未观察的 Frontier 规划扫描；启动与后续扫描使用同一规则。预检不执行这个启动动作。
 启动前移规划失败或停滞且已确认动作结束时，从实际位置开始搜索；扫描转向的
 可恢复失败也从实际朝向重新规划观察。
 

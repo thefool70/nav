@@ -80,18 +80,24 @@ def navigate(
     # 等待并非终态：新帧若出现可用方向，仍可重新进入扫描与探索。
     if working_state.phase is SearchPhase.WAITING_FOR_SEMANTICS:
         from .frontier_regions import refresh_frontier_regions
+        from .observation_coverage import frontier_observation_points, unobserved_observation_points
         from .scan_behavior import continue_scanning, reset_scan_after_move
 
-        refreshed, candidates = refresh_frontier_regions(
+        refreshed, frontiers = refresh_frontier_regions(
             frame, working_state, timings=timings, frontier_cache=frontier_cache,
         )
-        if candidates:
+        local_points = frontier_observation_points(frame, frontiers.boundary_cells)
+        unchecked_points = unobserved_observation_points(
+            local_points, frame, refreshed.observed_views + refreshed.pending_observation_views,
+        )
+        # 没有移动目标时，仍可原地观察新边界；已检查和待分析的覆盖不会重复采集。
+        if frontiers.candidates or unchecked_points:
             return continue_scanning(frame, goal, reset_scan_after_move(refreshed),
                 timings=timings, frontier_cache=frontier_cache,
             )
         from .backtracking import wait_for_semantics_or_finish
 
-        return wait_for_semantics_or_finish(working_state)
+        return wait_for_semantics_or_finish(refreshed)
     if working_state.phase is SearchPhase.BACKTRACKING:
         from .backtracking import continue_backtracking
 
