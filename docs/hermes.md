@@ -279,10 +279,11 @@ D435i 筛选后的算法地图，
 启动前移和扫描转向不启用它。
 
 - 单个 Action 默认总超时 120 秒。
-- `MoveToAction` 只在收到当前动作的新 `PATH_OCCUPIED` 后开始受阻计时。
-  等待上限沿用 `action_stall_timeout_s`（当前根配置 1 秒），从接收事件时起算，
-  不从机器人首次停住起算。离开受阻起点至少 `max(0.40 m, action_stall_translation_m)`
-  才清除计时，原地转向或厘米级抖动不算恢复。重复事件不延长等待，空事件不解除受阻。
+- `MoveToAction` 期间连续观察位姿：默认在 0.5 米半径内停留 10 秒后，
+  建立横向人工墙并取消动作；离开半径则重新计时。近深度只辅助墙的位置，
+  缺少近深度仍会触发，此时墙放在观察起点朝目标方向 0.6 米处。
+  人工墙保存在本次运行的观察图中，不写入底盘地图；后续路径穿墙也会取消。
+  关闭 Rerun 不关闭这项连续组帧与检测。
 - `RotateToAction` 以 1° 为有效进展，进入目标朝向 5° 内并达到上述稳定门槛即可主动收尾。
 - Frontier 明确规划失败时淘汰当前方向并继续其他候选。
 - Frontier 路径未知长度超过上限时，记录累计长度、上限、首个未知格和被拒绝路径，取消并屏蔽整个区域。
@@ -291,8 +292,8 @@ D435i 筛选后的算法地图，
 - 物体模式停靠命令成功后直接完成，不再复检或测距；实际运动失败时每条线索最多尝试三次停靠。
 - 网络、相机、地图或健康状态异常仍会停止程序。
 
-普通 VLM 推理在后台进行，不阻塞 Action 监控。平移不再因短时无位移直接取消；
-没有受阻事件时仍保留整体 Action 超时。Action 创建和后续读取均在异常收尾范围内，Adapter 退出也会取消
+普通 VLM 推理在后台进行，不阻塞 Action 监控。平移采用上述位姿停滞门槛，
+同时保留整体 Action 超时。Action 创建和后续读取均在异常收尾范围内，Adapter 退出也会取消
 尚未结束的动作；取消或终态确认失败时停止程序。
 
 ## Rerun 与日志
@@ -329,18 +330,9 @@ D435i 筛选后的算法地图，
 运动前的健康检查仍按原规则执行，读取失败或 error/fatal 仍会停止导航。
 `action` 复用运动轮询响应，保留任务编号、stage、state.status、result 和 reason，
 包括正常结束、失败与取消确认。它表示最后一次任务反馈，不保证此刻仍有活跃任务。
-`events` 在平移 Action 监控中读取并记录 `GET /api/platform/v1/events` 的每批事件，包括空数组和重复事件；
-可视化不按类型过滤、不去重，以便核对固件的实际返回语义。事件接口读取失败显示
-`read_error` 并取消动作、停止运行，不再把作为判断依据的读取失败当作普通诊断故障。
-`PATH_OCCUPIED` 表示路径受阻，`ROBOT_BLOCKED` 表示长时间受困（文档默认 3 分钟），
-另有 `CURRENT_POSE_OCCUPIED`、`BUMPER_TRIGGERED` 等事件，具体以设备返回为准。
-事件 `timestamp` 为底盘启动以来的毫秒数，不是 Unix 时间，不能直接与本机时间相减。
-各类响应带本机 `received_at`，未采集的项不显示；面板显示最近批次，完整历史通过
-RRD 时间轴回看。空批次不代表阻挡解除，历史事件也不代表当前仍受阻。
-事件监控不依赖 Rerun，空闲或转向期间不轮询事件；健康的后台诊断请求仅在开启
-Rerun 时执行。每次平移开始前通过 `/api/platform/v1/timestamp` 取得底盘时间水位，
-只处理更新的 `PATH_OCCUPIED`；恢复平移时推进水位，排除重复及迟到的旧事件。
-受阻起点、恢复和取消写入 Action 日志，区域屏蔽原因写入周期结果。
+当前版本不再轮询平台事件或底盘时间水位。受阻判断依赖连续帧位姿，
+计时、位移、辅助深度及人工墙位置写入 Action 日志，区域屏蔽原因写入周期结果。
+健康的后台诊断请求仍仅在开启 Rerun 时执行。
 
 World 隐藏候选的浮动标签；下方 `Live` 显示实时位姿和当前阶段，`Frontiers` 表格
 显示编号与暂存顺序，编号链接到对应点。VLM 和状态页显示当前分析与导航结果；
@@ -371,7 +363,7 @@ World 在占用图上按任务显示拍摄点，聚合邻近任务，完整视�
 
 `frame.convert_rgb`、`frame.convert_depth` 是 `frame.build` 的子阶段。
 Action 创建后输出“下发计时”：`motion.ready_check` 为健康与定位许可检查，
-`motion.start_pose` 为发送前位姿，`motion.event_watermark` 为受阻事件水位，
+`motion.start_pose` 为发送前位姿，
 `motion.create_action` 为创建请求，`motion.monitor_pose` 为监控初始位姿。
 这些诊断不参与控制；比较动作衔接时，将“到位交接”或“完成”作为上一任务交回控制的时刻。
 
@@ -428,7 +420,9 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB），WebSocket 服务缓�
 该 venv 基于随车已有 Conda Python 创建，因此需保留
 `/home/hri/miniconda3/envs/robot-nav` 的基础解释器。
 
-随车目录的 `config.json` 使用 `camera_source=remote`、
+仓库用 `config.onboard.json` 保存随车配置快照，运行时通过
+`python -m robot_nav --config config.onboard.json hermes ...` 显式选择。
+现有随车部署目录仍使用自己的 `config.json`，本次归档不改变部署文件。该配置使用 `camera_source=remote`、
 `camera_endpoint=ipc:///tmp/rgbd_pose.ipc` 和 `base_url=http://192.168.11.1:1448`，
 默认 `no_rerun=true`。这里 `remote` 表示读取发布器协议，不要求跨机器。
 固定安装外参沿用开发机配置，YOLO、SAM2 和 CLIP 权重保存在随车目录。
@@ -596,7 +590,9 @@ GUI 入口与操作编排在 `chassis_gui.py`，页面在 `chassis_gui.html`，�
 | `--base-url` | Robot Agent 地址，默认 `http://192.168.11.1:1448` |
 | `--search-mode` | `object` 或 `scene`，默认 `object` |
 | `--action-timeout-s` | 单 Action 总超时，默认 120 秒 |
-| `--action-stall-timeout-s` | 平移确认受阻后的等待上限；转向无进展上限，当前根配置 1 秒 |
+| `--action-stall-timeout-s` | 转向无进展上限，当前根配置 1 秒 |
+| `--blocked-pose-radius-m` / `--blocked-pose-duration-s` | 平移停滞观察半径和时长，默认 0.5 m / 10 s |
+| `--front-blockage-distance-m` | 辅助人工墙定位的近深度上限，默认 0.5 m |
 | `--max-unknown-path-m` | 当前剩余路径允许的累计未知长度，默认 1.5 m；超过才取消，0 表示不允许正长度未知段 |
 | `--min-localization-quality` | 定位模式最低质量，默认 1 |
 | `--camera-source` | `local`（默认）或 `remote`，不改变导航实现 |
