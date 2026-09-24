@@ -13,6 +13,7 @@ FIELDS = {
         "startup_forward_m request_timeout_s action_poll_interval_s "
         "action_progress_interval_s action_stall_translation_m action_stall_rotation_deg "
         "action_arrival_position_m action_arrival_hold_s motion_frame_interval_s "
+        "front_blockage_distance_m blocked_pose_radius_m blocked_pose_duration_s "
         "position_tolerance_m yaw_tolerance_deg"
     ),
     "camera": (

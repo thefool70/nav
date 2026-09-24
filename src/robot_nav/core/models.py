@@ -269,7 +269,7 @@ class FrontierRegion:
 
 @dataclass(frozen=True)
 class BlockedFrontierRegion:
-    """因未知路径长度超限被屏蔽的整片边界，独立于当前候选及其编号保存。
+    """因未知路径超限或前向人工墙被屏蔽的整片边界，独立于当前候选及其编号保存。
 
     boundary_world_xy 保留已关联的区域边界；本次运行中不自动解除屏蔽。
     """

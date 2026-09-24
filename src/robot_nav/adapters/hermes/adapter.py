@@ -25,6 +25,11 @@ from ..chassis import (
 )
 from ..realsense import D435iCapture
 from ..realsense.d435i_camera import D435iCamera, D435iConfig
+from .front_obstruction import (
+    FrontObstruction,
+    FrontObstructionDetector,
+    FrontObstructionProgress,
+)
 from .observed_map import HERMES_OBSTACLE_INFLATION_RADIUS_M, HermesObservedMap
 from .remote.wire import RgbdPoseCapture
 from .rest_client import (
@@ -83,6 +88,9 @@ class HermesConfig:
     action_arrival_hold_s: float = 0.001
     max_unknown_path_m: float = 1.5
     motion_frame_interval_s: float = 0.5
+    front_blockage_distance_m: float = 0.5
+    blocked_pose_radius_m: float = 0.5
+    blocked_pose_duration_s: float = 10.0
     minimum_localization_quality: int = 1
     position_tolerance_m: float = 0.03
     # 与 core 的扫描朝向容差一致，避免为已经可接受的微小误差再创建 Action。
@@ -95,10 +103,6 @@ class _ActionMonitorState:
     last_sample_s: float
     last_motion_s: float
     last_motion_pose: Pose2D
-    # 当前动作的事件水位与受阻起点；恢复平移即清空，动作结束即丢弃。
-    event_after_ms: int = 0
-    blocked_since_s: Optional[float] = None
-    blocked_pose: Optional[Pose2D] = None
     path_error_reported: bool = False
     unknown_path_length_m: Optional[float] = None
     arrival_since_s: Optional[float] = None
@@ -152,6 +156,15 @@ class HermesAdapter:
         self._action_pending = False
         self._camera: Optional[RgbdCamera] = None
         self._observed_map = HermesObservedMap()
+        self._front_obstruction_detector = FrontObstructionDetector(
+            maximum_depth_m=config.front_blockage_distance_m,
+            movement_radius_m=config.blocked_pose_radius_m,
+            duration_s=config.blocked_pose_duration_s,
+        )
+        self._front_obstruction_lock = threading.Lock()
+        self._pending_front_obstruction: Optional[FrontObstruction] = None
+        self._front_obstruction_progress_started_s: Optional[float] = None
+        self._front_obstruction_progress_second = -1
 
         action_names = self._client.get_action_names()
         self._move_to_action = resolve_action_name(
@@ -171,9 +184,8 @@ class HermesAdapter:
                 self._camera = camera_factory(camera_config)
             self._map_thread = threading.Thread(target=self._map_loop, name="hermes-map", daemon=True)
             self._map_thread.start()
-            if on_continuous_frame is not None:
-                if self._camera is None:
-                    raise ValueError("连续视觉帧需要启用 D435i")
+            # 前向挡路检测依赖运动期间连续 RGB-D；是否开启 Rerun 不改变检测行为。
+            if self._camera is not None:
                 self._continuous_frame_thread = threading.Thread(
                     target=self._continuous_frame_loop, name="hermes-frames", daemon=True)
                 self._continuous_frame_thread.start()
@@ -366,10 +378,8 @@ class HermesAdapter:
             self._continuous_frame_stop.wait(self.config.motion_frame_interval_s)
 
     def _continuous_frame_loop(self) -> None:
-        """为可视化定期组帧；相机接收和地图请求由各自线程持续进行。"""
+        """持续组帧供挡路检测使用，并在启用时同时交给可视化。"""
         callback = self._on_continuous_frame
-        if callback is None:
-            return
         while not self._continuous_frame_stop.is_set():
             try:
                 if self._on_chassis_status is not None:
@@ -377,7 +387,37 @@ class HermesAdapter:
                         self._client.get_robot_health()
                     except RuntimeError as exc:
                         self._on_chassis_status("health", {"read_error": str(exc)})
-                callback(self._capture_frame())
+                frame = self._capture_frame()
+                obstruction = self._front_obstruction_detector.observe(frame)
+                self._report_front_obstruction_progress(
+                    self._front_obstruction_detector.progress()
+                )
+                if obstruction is not None:
+                    wall_map = frame.visibility_map or frame.obstacle_map
+                    with self._frame_build_lock:
+                        wall_cell_count = self._observed_map.add_permanent_wall(
+                            wall_map,
+                            obstruction.center_world_xy,
+                            obstruction.heading_world_rad,
+                        )
+                    with self._front_obstruction_lock:
+                        self._pending_front_obstruction = obstruction
+                    depth_detail = (
+                        f"depth={obstruction.depth_m:.3f} m，"
+                        if obstruction.depth_m is not None
+                        else "depth=未用于定位，"
+                    )
+                    self._report_action_progress(
+                        "底盘持续停留在阻塞半径内："
+                        f"{depth_detail}"
+                        f"duration={obstruction.duration_s:.1f}s，"
+                        f"samples={obstruction.sample_count}；"
+                        f"已在 ({obstruction.center_world_xy[0]:.3f}, "
+                        f"{obstruction.center_world_xy[1]:.3f}) 横向建立永久人工墙，"
+                        f"新增 {wall_cell_count} 个原始占用格。"
+                    )
+                if callback is not None:
+                    callback(frame)
             except BaseException as exc:
                 with self._map_condition:
                     self._continuous_frame_error = exc
@@ -387,6 +427,40 @@ class HermesAdapter:
                 )
                 return
             self._continuous_frame_stop.wait(self.config.motion_frame_interval_s)
+
+    def _report_front_obstruction_progress(
+        self,
+        progress: Optional[FrontObstructionProgress],
+    ) -> None:
+        """每秒记录一次候选计时，让未触发原因能从 Action 日志直接看出。"""
+        if progress is None:
+            return
+        elapsed_second = int(progress.duration_s)
+        with self._front_obstruction_lock:
+            new_candidate = (
+                progress.started_s != self._front_obstruction_progress_started_s
+            )
+            if not new_candidate and elapsed_second <= self._front_obstruction_progress_second:
+                return
+            self._front_obstruction_progress_started_s = progress.started_s
+            self._front_obstruction_progress_second = elapsed_second
+        prefix = "开始底盘阻塞计时" if new_candidate else "底盘阻塞计时"
+        depth_detail = (
+            f"{progress.depth_m:.3f} m"
+            if progress.depth_m is not None
+            else "未检测到可靠近深度"
+        )
+        restart = (
+            f"，重新计时原因={progress.restart_reason}"
+            if new_candidate and progress.restart_reason
+            else ""
+        )
+        self._report_action_progress(
+            f"{prefix}：duration={progress.duration_s:.1f}s，"
+            f"depth={depth_detail}，"
+            f"translation={progress.displacement_m:.3f} m，"
+            f"samples={progress.sample_count}{restart}。"
+        )
 
     def _raise_continuous_frame_error(self) -> None:
         """把后台设备错误带回主循环，而不是静默停止采样。"""
@@ -492,6 +566,34 @@ class HermesAdapter:
         known_space_map: Optional[ObstacleMap] = None,
         dispatch_timings=None,
     ) -> None:
+        """在平移动作生命周期内启停前向深度挡路检测。"""
+        detect_front_obstruction = action_name == self._move_to_action
+        if detect_front_obstruction:
+            with self._front_obstruction_lock:
+                self._pending_front_obstruction = None
+                self._front_obstruction_progress_started_s = None
+                self._front_obstruction_progress_second = -1
+            self._front_obstruction_detector.start_translation(target_world_xy)
+        try:
+            return self._execute_monitored_action(
+                action_name,
+                options,
+                target_world_xy=target_world_xy,
+                known_space_map=known_space_map,
+                dispatch_timings=dispatch_timings,
+            )
+        finally:
+            if detect_front_obstruction:
+                self._front_obstruction_detector.stop_translation()
+
+    def _execute_monitored_action(
+        self,
+        action_name: str,
+        options: Mapping[str, Any],
+        target_world_xy: Optional[Tuple[float, float]] = None,
+        known_space_map: Optional[ObstacleMap] = None,
+        dispatch_timings=None,
+    ) -> None:
         """监控活跃 Action 的反馈和位姿；不计入 VLM 等待时间。"""
         action_label = action_name.rsplit(".", 1)[-1]
         target_yaw = float(options["angle"]) if action_name == self._rotate_to_action else None
@@ -500,11 +602,6 @@ class HermesAdapter:
             dispatch_timings = []
         self._action_pending = True
         try:
-            with measure_stage(dispatch_timings, "motion.event_watermark"):
-                event_after_ms = (
-                    self._client.get_system_timestamp_ms()
-                    if action_name == self._move_to_action else 0
-                )
             previous_action_id = self._active_action_id
             # POST 失败时无法确定新任务是否被受理，异常路径必须取消 :current。
             self._active_action_id = None
@@ -517,7 +614,6 @@ class HermesAdapter:
             monitor_state = _ActionMonitorState(
                 started_s=started_s, last_sample_s=float("-inf"),
                 last_motion_s=started_s, last_motion_pose=started_pose,
-                event_after_ms=event_after_ms,
             )
             self._report_action_progress(f"Hermes Action #{action_id} {action_label} 已创建。")
             self._report_action_progress(
@@ -675,17 +771,8 @@ class HermesAdapter:
     ) -> None:
         """每次轮询判断到位与停滞，仅终端输出按进度间隔节流。"""
         self._raise_continuous_frame_error()
-        events = []
         if requires_translation:
-            # 控制线程是唯一事件读取者，关闭可视化仍执行同样的受阻判断。
-            try:
-                events = self._client.get_robot_events()
-            except RuntimeError as exc:
-                if self._on_chassis_status is not None:
-                    self._on_chassis_status("events", {"read_error": str(exc)})
-                raise
-            if self._on_chassis_status is not None:
-                self._on_chassis_status("events", {"events": events})
+            self._raise_front_obstruction(action_id)
         pose = self._client.get_pose()
         now = time.monotonic()
         if requires_translation and known_space_map is not None:
@@ -712,8 +799,6 @@ class HermesAdapter:
             state, status, pose, now, target_world_xy, target_yaw,
             requires_translation,
         )
-        if requires_translation:
-            self._check_path_blocked(action_id, state, events, pose, now)
         still_s = now - state.last_motion_s
         if not requires_translation and still_s >= self.config.action_stall_timeout_s:
             raise _ActionStalledError(
@@ -749,41 +834,17 @@ class HermesAdapter:
         )
         state.last_sample_s = now
 
-    def _check_path_blocked(self, action_id, state, events, pose, now):
-        """只对新的受阻事件计时；离开受阻起点至少 40 cm 才认为恢复平移。"""
-        for event in events:
-            if event["type"] != "PATH_OCCUPIED":
-                continue
-            stamp = int(event["timestamp"])
-            if stamp <= state.event_after_ms:
-                continue
-            state.event_after_ms = stamp
-            if state.blocked_since_s is None:
-                state.blocked_since_s = now
-                state.blocked_pose = pose
-                self._report_action_progress(
-                    f"Hermes Action #{action_id} PATH_OCCUPIED：开始受阻等待，"
-                    f"event_timestamp_ms={stamp}，上限 {self.config.action_stall_timeout_s:.1f}s"
-                )
-        if state.blocked_since_s is None:
+    def _raise_front_obstruction(self, action_id: int) -> None:
+        """人工墙写入完成后取消当前动作，让核心从新地图重新决策。"""
+        with self._front_obstruction_lock:
+            obstruction = self._pending_front_obstruction
+        if obstruction is None:
             return
-        moved_m = math.hypot(pose.x_m - state.blocked_pose.x_m,
-                             pose.y_m - state.blocked_pose.y_m)
-        if moved_m >= max(0.40, self.config.action_stall_translation_m):
-            # 水位推进至恢复时刻，迟到的旧事件不能重新启动受阻等待。
-            state.event_after_ms = self._client.get_system_timestamp_ms()
-            state.blocked_since_s = None
-            state.blocked_pose = None
-            self._report_action_progress(
-                f"Hermes Action #{action_id} 受阻后恢复平移 {moved_m:.2f}m，清除受阻计时"
-            )
-            return
-        blocked_s = now - state.blocked_since_s
-        if blocked_s >= self.config.action_stall_timeout_s:
-            raise MotionBlockedError(
-                f"Hermes Action {action_id} 收到 PATH_OCCUPIED 后持续 {blocked_s:.1f}s "
-                "未恢复有效平移，取消本次移动"
-            )
+        raise MotionBlockedError(
+            f"Hermes Action {action_id} 的底盘已在"
+            f" {self.config.blocked_pose_radius_m:.3f} m 范围内停留"
+            f" {obstruction.duration_s:.1f}s，人工墙已建立，取消本次移动"
+        )
 
     def _pose_at_action_target(
         self, pose: Pose2D, target_xy: Optional[Tuple[float, float]], target_yaw: Optional[float],
@@ -839,6 +900,16 @@ class HermesAdapter:
             # 规划尚未发布路径时继续等待，不能据此判定目标不可达。
             return
         path_world_xy = ((pose.x_m, pose.y_m),) + remaining_path
+        with self._frame_build_lock:
+            wall_crossing = self._observed_map.first_artificial_wall_crossing(
+                path_world_xy
+            )
+        if wall_crossing is not None:
+            raise MotionBlockedError(
+                f"Hermes Action {action_id} 的剩余路径将穿过永久人工墙："
+                f"首次交点 ({wall_crossing[0]:.3f}, {wall_crossing[1]:.3f})，"
+                "取消本次移动"
+            )
         measurement = measure_unknown_path_length(path_world_xy, obstacle_map)
         limit_m = self.config.max_unknown_path_m
         # 只吸收纳米量级的浮点误差；恰好达到上限时仍允许继续。
@@ -1026,6 +1097,9 @@ def _validate_config(config: HermesConfig) -> None:
         "action_arrival_position_m",
         "action_arrival_hold_s",
         "motion_frame_interval_s",
+        "front_blockage_distance_m",
+        "blocked_pose_radius_m",
+        "blocked_pose_duration_s",
         "position_tolerance_m",
         "yaw_tolerance_rad",
     ):

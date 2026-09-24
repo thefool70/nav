@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Mapping, Optional, Set, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Set, Tuple
 
 from ...core.geometry import (
     grid_cell_center_to_world,
@@ -55,6 +55,9 @@ class HermesObservedMap:
         # 原始值独立保存，避免下一帧把上次膨胀的格子再当成真实障碍。
         self._raw_occupancy: Dict[WorldGridKey, Optional[float]] = {}
         self._inflated_occupancy: Dict[WorldGridKey, Optional[float]] = {}
+        # 人工墙独立于 Hermes 实时图保存；本次运行内不会被后续自由格覆盖。
+        self._artificial_wall_keys: Set[WorldGridKey] = set()
+        self._inflated_artificial_wall_keys: Set[WorldGridKey] = set()
 
     def update(
         self,
@@ -89,6 +92,8 @@ class HermesObservedMap:
         }
         for (row, col), key in update_keys.items():
             self._raw_occupancy[key] = source.occupancy[row][col]
+        for key in self._artificial_wall_keys:
+            self._raw_occupancy[key] = 1.0
 
         occupancy = self._cached_occupancy_in(source, self._raw_occupancy)
         visibility_map = ObstacleMap(
@@ -107,6 +112,8 @@ class HermesObservedMap:
         # 不能让视野内新障碍把视野外的未知格或历史自由格一并刷新。
         for (row, col), key in update_keys.items():
             self._inflated_occupancy[key] = occupancy[row][col]
+        for key in self._inflated_artificial_wall_keys:
+            self._inflated_occupancy[key] = 1.0
         obstacle_map = ObstacleMap(
             occupancy=tuple(tuple(row) for row in self._cached_occupancy_in(source, self._inflated_occupancy)),
             resolution_m=source.resolution_m,
@@ -114,6 +121,85 @@ class HermesObservedMap:
             frame_id=source.frame_id,
         )
         return obstacle_map, visibility_map
+
+    def add_permanent_wall(
+        self,
+        obstacle_map: ObstacleMap,
+        center_world_xy: Tuple[float, float],
+        forward_heading_rad: float,
+    ) -> int:
+        """在障碍前横向封住当前已知通道，返回新增的原始占用格数。"""
+        self._prepare_map_geometry(obstacle_map)
+        center_cell = world_to_nearest_grid_cell(center_world_xy, obstacle_map)
+        if not _cell_in_map(center_cell, obstacle_map):
+            raise ValueError("人工墙中心落在当前地图外")
+
+        wall_cells = {center_cell}
+        left_heading = forward_heading_rad + math.pi / 2.0
+        maximum_steps = 2 * max(
+            len(obstacle_map.occupancy),
+            len(obstacle_map.occupancy[0]),
+        )
+        # 半格采样避免斜墙在栅格上留下可通行缝隙；遇到已有墙或未知边界即闭合。
+        step_m = obstacle_map.resolution_m * 0.5
+        for sign in (-1.0, 1.0):
+            previous_cell = center_cell
+            for step in range(1, maximum_steps + 1):
+                distance_m = sign * step * step_m
+                world_xy = (
+                    center_world_xy[0] + distance_m * math.cos(left_heading),
+                    center_world_xy[1] + distance_m * math.sin(left_heading),
+                )
+                cell = world_to_nearest_grid_cell(world_xy, obstacle_map)
+                if cell == previous_cell:
+                    continue
+                previous_cell = cell
+                if not _cell_in_map(cell, obstacle_map):
+                    break
+                value = obstacle_map.occupancy[cell[0]][cell[1]]
+                if value is None or _is_occupied(value):
+                    break
+                wall_cells.add(cell)
+
+        keys = {self._cell_to_world_key(cell, obstacle_map) for cell in wall_cells}
+        new_count = len(keys - self._artificial_wall_keys)
+        self._artificial_wall_keys.update(keys)
+        offsets = _inflation_offsets(obstacle_map.resolution_m, self._inflation_radius_m)
+        self._inflated_artificial_wall_keys.update(
+            (key[0] + row_offset, key[1] + col_offset)
+            for key in keys
+            for row_offset, col_offset in offsets
+        )
+        for key in self._artificial_wall_keys:
+            self._raw_occupancy[key] = 1.0
+        for key in self._inflated_artificial_wall_keys:
+            self._inflated_occupancy[key] = 1.0
+        return new_count
+
+    def first_artificial_wall_crossing(
+        self,
+        path_world_xy: Sequence[Tuple[float, float]],
+    ) -> Optional[Tuple[float, float]]:
+        """返回实际路径首次进入人工墙净空的位置；没有穿墙时返回 None。"""
+        if not self._inflated_artificial_wall_keys or len(path_world_xy) < 2:
+            return None
+        resolution = self._require_resolution()
+        previous = path_world_xy[0]
+        for current in path_world_xy[1:]:
+            delta_x = current[0] - previous[0]
+            delta_y = current[1] - previous[1]
+            length_m = math.hypot(delta_x, delta_y)
+            sample_count = max(1, int(math.ceil(length_m / (0.5 * resolution))))
+            for index in range(sample_count + 1):
+                ratio = index / sample_count
+                point = (
+                    previous[0] + ratio * delta_x,
+                    previous[1] + ratio * delta_y,
+                )
+                if self._world_to_key(point) in self._inflated_artificial_wall_keys:
+                    return point
+            previous = current
+        return None
 
     def _prepare_map_geometry(self, obstacle_map: ObstacleMap) -> None:
         """坐标系、分辨率或方向变化时清空缓存；平移原点扩图时按世界位置复用。"""
@@ -137,6 +223,8 @@ class HermesObservedMap:
             self._start_world_xy = None
             self._raw_occupancy.clear()
             self._inflated_occupancy.clear()
+            self._artificial_wall_keys.clear()
+            self._inflated_artificial_wall_keys.clear()
 
     def _cell_to_world_key(
         self, cell: Cell, obstacle_map: ObstacleMap
@@ -149,6 +237,21 @@ class HermesObservedMap:
         )
         delta_x = world_x - anchor.x_m
         delta_y = world_y - anchor.y_m
+        cosine = math.cos(anchor.yaw_rad)
+        sine = math.sin(anchor.yaw_rad)
+        local_x = delta_x * cosine + delta_y * sine
+        local_y = -delta_x * sine + delta_y * cosine
+        return (
+            _nearest_int(local_y / resolution),
+            _nearest_int(local_x / resolution),
+        )
+
+    def _world_to_key(self, world_xy: Tuple[float, float]) -> WorldGridKey:
+        """把世界点投到首次地图格网，供跨扩图的人工墙路径检查使用。"""
+        anchor = self._require_anchor()
+        resolution = self._require_resolution()
+        delta_x = world_xy[0] - anchor.x_m
+        delta_y = world_xy[1] - anchor.y_m
         cosine = math.cos(anchor.yaw_rad)
         sine = math.sin(anchor.yaw_rad)
         local_x = delta_x * cosine + delta_y * sine

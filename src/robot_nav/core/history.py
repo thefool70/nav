@@ -25,7 +25,7 @@ def filter_blocked_frontier_regions(
     candidates: Tuple[FrontierCandidate, ...],
     blocked_regions: Tuple[BlockedFrontierRegion, ...],
 ) -> Tuple[Tuple[FrontierCandidate, ...], Tuple[BlockedFrontierRegion, ...]]:
-    """整片过滤被未知路径拒绝的边界，本次运行中持续保留屏蔽。
+    """整片过滤被路径约束或人工墙拒绝的边界，本次运行中持续保留屏蔽。
 
     按世界边界匹配，不依赖代表点或 region ID。记住匹配过的完整边界，使分裂、
     合并、一格移动及短暂消失不会遗忘屏蔽；已知障碍之间不做邻域匹配。

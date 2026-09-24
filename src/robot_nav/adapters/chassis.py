@@ -33,7 +33,7 @@ class MotionStalledError(RuntimeError):
 
 
 class MotionBlockedError(RecoverableMotionError):
-    """确认路径受阻后持续未恢复平移，动作已取消并确认结束。"""
+    """前向持续挡路已生成永久人工墙，动作已取消并确认结束。"""
 
 
 class ChassisInterface(Protocol):

@@ -147,27 +147,6 @@ class HermesRestClient:
             has_fatal=_boolean_field(payload, "hasFatal"),
         )
 
-    def get_robot_events(self) -> list:
-        """读取平台事件原始批次，保留底盘启动毫秒时间戳及未知事件字段。"""
-        payload = self._request_json("GET", "/api/platform/v1/events")
-        if not isinstance(payload, list):
-            raise RuntimeError("Hermes 机器人事件不是数组")
-        for event in payload:
-            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-                raise RuntimeError("Hermes 事件缺少 type 字符串")
-            if event["type"] == "PATH_OCCUPIED":
-                stamp = event.get("timestamp")
-                if not isinstance(stamp, str) or not stamp.isdigit():
-                    raise RuntimeError("Hermes PATH_OCCUPIED 缺少毫秒时间戳字符串")
-        return payload
-
-    def get_system_timestamp_ms(self) -> int:
-        """底盘启动毫秒数，用于排除动作开始前及恢复移动前的历史事件。"""
-        payload = self._request_json("GET", "/api/platform/v1/timestamp")
-        if not isinstance(payload, str) or not payload.isdigit():
-            raise RuntimeError("Hermes 系统时间戳不是毫秒数字字符串")
-        return int(payload)
-
     def get_action_names(self) -> Tuple[str, ...]:
         """读取本机固件实际支持的运动 Action 名称。"""
         payload = self._request_json(

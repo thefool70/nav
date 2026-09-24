@@ -115,7 +115,7 @@ def _add_hermes_parser(adapters):
     hermes.add_argument(
         "--action-stall-timeout-s",
         type=_positive_float,
-        help="平移收到路径受阻事件后的等待秒数；转向仍用作无进展上限",
+        help="原地转向没有有效进展时的等待秒数",
     )
     hermes.add_argument(
         "--min-localization-quality",
@@ -302,5 +302,20 @@ def _add_hermes_tuning(parser):
     parser.add_argument("--action-arrival-position-m", type=_positive_float)
     parser.add_argument("--action-arrival-hold-s", type=_positive_float)
     parser.add_argument("--motion-frame-interval-s", type=_positive_float)
+    parser.add_argument(
+        "--front-blockage-distance-m",
+        type=_positive_float,
+        help="用于细化人工墙位置的最远近深度，当前默认 0.5 米",
+    )
+    parser.add_argument(
+        "--blocked-pose-radius-m",
+        type=_positive_float,
+        help="判断底盘未脱困的位置半径，当前默认 0.5 米",
+    )
+    parser.add_argument(
+        "--blocked-pose-duration-s",
+        type=_positive_float,
+        help="底盘持续留在阻塞半径内多久后建立人工墙，当前默认 10 秒",
+    )
     parser.add_argument("--position-tolerance-m", type=_positive_float)
     parser.add_argument("--yaw-tolerance-deg", type=_positive_float)
