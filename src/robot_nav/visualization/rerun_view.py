@@ -193,10 +193,7 @@ class RerunVisualizer:
                 "action: status 0=新建, 1=执行中, 3=暂停, 4=结束；\n"
                 "result 在结束时解释：0=成功, -1=失败, -2=取消。\n"
                 "action 是最后一次任务反馈，不代表当前仍有活跃任务；未出现表示尚未采集。\n"
-                "events 是最近响应批次：PATH_OCCUPIED=路径受阻；ROBOT_BLOCKED=长时间受困；\n"
-                "CURRENT_POSE_OCCUPIED=当前位姿被占据；BUMPER_TRIGGERED=碰撞传感器触发。\n"
-                "事件 timestamp 是底盘启动后的毫秒数；received_at 是本机接收时间。\n"
-                "空数组不表示阻挡解除；重复事件原样保留，完整批次可拖动时间轴回看。\n\n"
+                "前向深度持续挡路与人工墙通过 Action 日志记录；平台事件不参与该判断。\n\n"
                 + json.dumps(self._chassis_status, ensure_ascii=False, indent=2)
             )
             self._log("chassis/status", self._rr.TextDocument(text, media_type="text/plain"))
