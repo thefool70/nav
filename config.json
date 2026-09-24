@@ -1,5 +1,13 @@
 {
   "navigation": {
+    "_comments": {
+      "target": "搜索目标描述；null 时运行导航须通过 --target 指定。",
+      "search_mode": "object 搜索具体物体；scene 搜索场景。",
+      "max_cycles": "最大决策周期数，不计等待后台感知结果的空转周期。",
+      "debug_random_score": "true 使用随机评分，不调用视觉模型，不能用于验收目标识别。",
+      "debug_frontier": "true 在终端打印 Frontier 候选及评分详情。",
+      "max_unknown_path_m": "剩余规划路径中允许经过未知区域及地图外的累计长度（米）；超过后取消。"
+    },
     "target": null,
     "search_mode": "object",
     "max_cycles": 200,
@@ -8,14 +16,36 @@
     "max_unknown_path_m": 1.5
   },
   "habitat": {
+    "_comments": {
+      "scene": "仿真场景 .glb 文件；相对路径以本配置文件所在目录为准。",
+      "seed": "仿真随机起点种子。",
+      "gpu_device_id": "Habitat 渲染设备编号；Mesa/llvmpipe 使用 -1，与本地视觉模型设备无关。"
+    },
     "scene": "data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb",
     "seed": 1,
     "gpu_device_id": -1
   },
   "hermes": {
+    "_comments": {
+      "base_url": "底盘 REST 地址；随车直连用 192.168.11.1:1448，SSH 转发通常用 127.0.0.1:11448。",
+      "action_timeout_s": "单个底盘 Action 的最长等待时间（秒）。",
+      "action_stall_timeout_s": "平移收到 PATH_OCCUPIED 后等待恢复的时限（秒）；转向时作为无进展时限。平移恢复门槛为 0.4 米。",
+      "min_localization_quality": "定位质量门槛（0–100）；具体运动许可同时受底盘模式和健康状态约束。",
+      "startup_forward_m": "真机开始搜索前的前移距离（米）；0 跳过。",
+      "request_timeout_s": "单次底盘 HTTP 请求超时（秒）。",
+      "action_poll_interval_s": "动作状态轮询间隔（秒）。",
+      "action_progress_interval_s": "动作进度日志输出间隔（秒）。",
+      "action_stall_translation_m": "更新平移进展计时的位移门槛（米），不是受阻恢复所需的 0.4 米。",
+      "action_stall_rotation_deg": "更新转向进展计时的角度门槛（度）。",
+      "action_arrival_position_m": "按位姿提前确认平移到达的位置误差容差（米）。",
+      "action_arrival_hold_s": "满足到达条件后需保持的时长（秒）；实际确认还受轮询间隔影响。",
+      "motion_frame_interval_s": "运动中采集导航帧的间隔（秒），不是相机发布帧率。",
+      "position_tolerance_m": "判断是否需要下发平移动作的距离容差（米）。",
+      "yaw_tolerance_deg": "转向到位及是否需要修正朝向的角度容差（度）。"
+    },
     "base_url": "http://192.168.11.1:1448",
     "action_timeout_s": 120.0,
-    "action_stall_timeout_s": 1.0,
+    "action_stall_timeout_s": 1,
     "min_localization_quality": 1,
     "startup_forward_m": 1.0,
     "request_timeout_s": 5.0,
@@ -30,23 +60,50 @@
     "yaw_tolerance_deg": 5.0
   },
   "camera": {
+    "_comments": {
+      "camera_source": "local 为本机 USB；remote 订阅发布器，发布器在同一台随车笔记本上也选 remote。",
+      "camera_endpoint": "remote 的 ZMQ 地址；开发机 SSH 转发用 ipc:///tmp/robot-nav-camera.sock，随车本机用 ipc:///tmp/rgbd_pose.ipc。",
+      "camera_topic": "remote 订阅的消息主题，须与发布器一致。",
+      "camera_timeout_s": "remote 等待新帧的最长时间（秒），不表示跨机器的帧龄上限。",
+      "camera_serial": "local 模式的 RealSense 序列号；null 不指定。",
+      "camera_calibration": "local 模式的外参文件；以下六项固定外参齐全时不读取此文件。",
+      "camera_height_m": "相机光心相对底盘参考平面的高度（米）。",
+      "camera_forward_m": "相机光心相对底盘原点的前向偏移（米）。",
+      "camera_left_m": "相机光心相对底盘原点的左向偏移（米）。",
+      "camera_yaw_deg": "相机朝向相对底盘的左偏角（度）。",
+      "camera_pitch_down_deg": "相机向下俯仰角（度）。",
+      "camera_roll_deg": "相机图像顺时针侧倾角（度）；固定外参只在启动时读取。"
+    },
     "camera_source": "local",
     "camera_endpoint": "ipc:///tmp/robot-nav-camera.sock",
-    "camera_topic": "ngd.frame",
+    "camera_topic": "rgbd.pose",
     "camera_timeout_s": 3.0,
     "camera_serial": null,
     "camera_calibration": "data/hermes_d435i/extrinsics.json",
-    "camera_height_m": null,
-    "camera_forward_m": null,
-    "camera_left_m": null,
-    "camera_yaw_deg": null,
-    "camera_pitch_down_deg": null,
-    "camera_roll_deg": null
+    "camera_height_m": 0.347,
+    "camera_forward_m": 0.24906509814078862,
+    "camera_left_m": 0.04723814939280101,
+    "camera_yaw_deg": 0.1292526659108721,
+    "camera_pitch_down_deg": 0.5936488256256967,
+    "camera_roll_deg": -1.4298267383913303
   },
   "perception": {
-    "vlm_endpoint": "https://opencode.ai/zen/go/v1/messages",
-    "vlm_model": "qwen3.7-plus",
-    "vlm_api_format": "anthropic_messages",
+    "_comments": {
+      "vlm_endpoint": "远程视觉语言模型接口地址；密钥不放入此文件。",
+      "vlm_model": "远程模型名称。",
+      "vlm_api_format": "接口格式：chat_completions、responses 或 anthropic_messages。",
+      "vlm_timeout_s": "远程模型请求超时（秒）。",
+      "vlm_max_output_tokens": "远程模型输出 token 上限。",
+      "object_class": "本地 YOLO 的简短目标类别；null 复用 target。",
+      "object_python": "本地视觉模型使用的 Python 解释器；null 自动选择已有 robot-nav 环境或当前解释器。",
+      "object_device": "本地 YOLO/SAM2 计算设备，例如 cuda 或 cpu；不控制导航算法的计算设备。",
+      "object_yolo_model": "YOLO-World 模型权重路径。",
+      "object_sam_checkpoint": "SAM2 模型权重路径。",
+      "object_timeout_s": "一次本地视觉模型请求的超时时间（秒）。"
+    },
+    "vlm_endpoint": "https://api.siliconflow.cn/v1/chat/completions",
+    "vlm_model": "Qwen/Qwen3.8-27B",
+    "vlm_api_format": "chat_completions",
     "vlm_timeout_s": 90.0,
     "vlm_max_output_tokens": 2048,
     "object_class": null,
@@ -57,7 +114,14 @@
     "object_timeout_s": 120.0
   },
   "logging": {
+    "_comments": {
+      "no_rerun": "true 同时关闭 Rerun 实时显示和录制；JSONL 日志仍保留。",
+      "rerun_viewer": "web 使用网页，native 启动桌面 App；仅开启 Rerun 时生效。",
+      "rerun_save": "Rerun 录制路径；null 自动在 data/run_logs 下创建，不覆盖已有文件。",
+      "run_log": "导航 JSONL 日志路径；null 自动在 data/run_logs 下创建。"
+    },
     "no_rerun": false,
+    "rerun_viewer": "web",
     "rerun_save": null,
     "run_log": null
   }

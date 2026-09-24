@@ -201,6 +201,7 @@ def reject_frontier_direction(
     candidate_id: str,
     node_id: Optional[str],
     blocked_regions: Tuple[BlockedFrontierRegion, ...] = (),
+    block_region: bool = False,
     rejected_path_world_xy: Tuple[Tuple[float, float], ...] = (),
 ) -> Optional[NavigationResult]:
     """探索移动失败：屏蔽整片区域或淘汰目标点后回到扫描。
@@ -230,7 +231,7 @@ def reject_frontier_direction(
             blocked_frontier_regions=blocked_regions,
             frontier_regions=(
                 tuple(region for region in state.frontier_regions if region.region_id != candidate_id)
-                if rejected_path_world_xy else state.frontier_regions
+                if block_region else state.frontier_regions
             ),
             observation_history=replace_history_node(state.observation_history, updated_node),
         ))
@@ -239,14 +240,14 @@ def reject_frontier_direction(
             next_state,
             "motion.frontier_rejected",
             (
-                "路径中的未知长度超限，已屏蔽整个 Frontier 区域，本次运行中不再重试该区域。"
-                if rejected_path_world_xy
+                "移动被取消，已屏蔽整个 Frontier 区域，本次运行中不再重试该区域。"
+                if block_region
                 else "本次探索动作执行失败，先检查当前位置，再重新选择区域。"
             ),
             details={
                 "direction_id": candidate_id,
                 "reason": str(reason),
-                "rejection_scope": "region" if rejected_path_world_xy else "point",
+                "rejection_scope": "region" if block_region else "point",
                 "blocked_frontier_region_count": len(blocked_regions),
                 "rejected_path_world_xy": rejected_path_world_xy,
             },

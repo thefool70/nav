@@ -75,7 +75,7 @@ def _add_hermes_parser(adapters):
     )
     hermes.add_argument(
         "--camera-calibration",
-        help="完整相机外参 JSON；存在时自动读取，手动参数可覆盖",
+        help="本地 USB 的外参文件；config.json 中六项固定外参齐全时不再读取",
     )
     hermes.add_argument(
         "--camera-height-m",
@@ -115,7 +115,7 @@ def _add_hermes_parser(adapters):
     hermes.add_argument(
         "--action-stall-timeout-s",
         type=_positive_float,
-        help="活跃 Action 无足够位姿变化的终止秒数，默认 1",
+        help="平移收到路径受阻事件后的等待秒数；转向仍用作无进展上限",
     )
     hermes.add_argument(
         "--min-localization-quality",
@@ -195,6 +195,8 @@ def _add_navigation_arguments(
         action="store_true",
         help="关闭 Rerun 实时可视化及自动录制",
     )
+    parser.add_argument("--rerun-viewer", choices=("web", "native"),
+                        help="Rerun 查看方式：网页或桌面 App")
     parser.add_argument(
         "--rerun-save",
         type=Path,
@@ -262,7 +264,7 @@ def _add_camera_source_arguments(parser):
                         help="D435i 在本机 USB 或随车笔记本上采集")
     parser.add_argument("--camera-endpoint",
                         help="ZMQ IPC 订阅地址；默认经 SSH Unix 套接字转发到随车发布器")
-    parser.add_argument("--camera-topic", )
+    parser.add_argument("--camera-topic", help="同步 RGB-D/位姿主题，默认 rgbd.pose")
     parser.add_argument("--camera-timeout-s", type=_positive_float,
                         help="订阅新帧的最大等待秒数；不是跨机绝对帧龄")
 

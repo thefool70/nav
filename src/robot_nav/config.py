@@ -25,7 +25,7 @@ FIELDS = {
         "object_class object_python object_device object_yolo_model object_sam_checkpoint "
         "object_timeout_s"
     ),
-    "logging": "no_rerun rerun_save run_log",
+    "logging": "no_rerun rerun_viewer rerun_save run_log",
 }
 NULLABLE = {
     "target", "scene", "camera_serial", "camera_height_m", "camera_forward_m",
@@ -52,6 +52,8 @@ def load_config(path):
         expected = set(fields.split())
         if not isinstance(values, dict):
             raise ValueError(f"配置 {group} 必须是对象")
+        # 保持标准 JSON；每组的 _comments 仅供人工阅读，不参与参数解析。
+        values = {name: value for name, value in values.items() if name != "_comments"}
         unknown, missing = set(values) - expected, expected - set(values)
         if unknown or missing:
             raise ValueError(f"配置 {group} 字段错误：未知 {sorted(unknown)}，缺少 {sorted(missing)}")

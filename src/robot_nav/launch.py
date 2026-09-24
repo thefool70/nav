@@ -69,14 +69,14 @@ def _run_logged_navigation(args: argparse.Namespace, api_key: str) -> int:
 def _assemble_and_run(args: argparse.Namespace, api_key: str, run_logger: NavigationRunLogger) -> int:
     """创建显示、感知和设备，完成准备后进入两种环境共用的导航循环。"""
     visualization = _build_visualization(args)
-    # 感知先创建，设备后创建；退出时先关闭设备，避免继续向已关闭队列送帧。
+    # 感知先创建，设备后创建；退出时先关闭设备并结束尚未完成的动作。
     with _build_perception(args, api_key, visualization, run_logger) as perception:
         with create_chassis(
             args,
-            on_motion_frame=visualization.on_motion_frame,
-            on_sample_frame=_motion_prefetch_callback(visualization.on_motion_frame, perception),
+            on_motion_frame=optional_callback(visualization.on_motion_frame, "运动帧可视化"),
             on_motion_plan=visualization.on_motion_plan,
             on_action_progress=_action_progress_callback(run_logger),
+            on_chassis_status=visualization.on_chassis_status,
         ) as chassis:
             # 仅真机执行启动前移；随后两种环境进入完全相同的导航循环。
             prepare_navigation(args, chassis)
@@ -117,13 +117,14 @@ def _build_visualization(args: argparse.Namespace) -> _VisualizationCallbacks:
 
     from .visualization import RerunVisualizer
 
-    visualizer = RerunVisualizer(args.target, recording_path=args.rerun_save)
+    visualizer = RerunVisualizer(args.target, recording_path=args.rerun_save, viewer=args.rerun_viewer)
     return _VisualizationCallbacks(
         on_cycle=visualizer.log_cycle,
         on_motion_frame=visualizer.log_motion_frame,
         on_vlm_interaction=optional_callback(visualizer.log_vlm_interaction, "VLM 交互可视化"),
         on_motion_plan=optional_callback(visualizer.log_motion_plan, "路径可视化"),
         on_semantic_event=visualizer.log_semantic_queue_event,
+        on_chassis_status=optional_callback(visualizer.log_chassis_status, "底盘状态可视化"),
     )
 
 
@@ -183,26 +184,14 @@ def _object_config(args) -> Optional[ObjectLocalizerConfig]:
     )
 
 
-def _motion_prefetch_callback(on_motion_frame, perception: SemanticPerception):
-    """把最新帧送往语义预采样，并旁路记录到 Rerun。"""
-    visualization = optional_callback(on_motion_frame, "运动帧可视化")
-
-    def callback(frame) -> None:
-        # 回调由 Adapter 提供帧；感知只接收它，不在这里再次读取设备。
-        perception.observe_motion_frame(frame)
-        if visualization is not None:
-            visualization(frame)
-
-    return callback
-
-
 def _perception_event_callback(on_event, run_logger: NavigationRunLogger):
     """队列事件分别送往 Rerun 和 JSONL，显示故障不影响日志。"""
     visualization = optional_callback(on_event, "VLM 队列可视化")
 
     def callback(event):
         run_logger.log_semantic_queue_event(event)
-        if visualization is not None:
+        # 采样和编码计时只落 JSONL，不为它们刷新整套 VLM 可视化。
+        if visualization is not None and event["event"] != "scan_prepared":
             visualization(event)
 
     return callback
@@ -227,6 +216,7 @@ class _VisualizationCallbacks:
     on_vlm_interaction: Optional[Callable] = None
     on_motion_plan: Optional[Callable] = None
     on_semantic_event: Optional[Callable] = None
+    on_chassis_status: Optional[Callable] = None
 
 
 __all__ = [

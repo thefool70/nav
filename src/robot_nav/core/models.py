@@ -372,7 +372,7 @@ class SearchState:
     scan_local_point_count 是复用已检查覆盖前的局部可见 Frontier 点数。
     frontier_regions 保存当前有效区域及旧方向的暂存顺序；active_frontier_id
     标识最近选择的区域，扫描转向不改变新旧方向的优先级。
-    blocked_frontier_regions 保留因未知路径长度超限被取消的完整区域，防止换代表点重试。
+    blocked_frontier_regions 保留因未知路径超限或持续受阻被取消的完整区域，防止换代表点重试。
     branch_node_ids 按根到叶保存当前分支的出发节点；逐个返回，已退完节点出栈。
     backtrack_node_id 是正在返回的栈顶父节点，到达后才检查该节点的暂存方向。
     active_target_clue 在物体定位、接近和保底返回期间保留拍摄位姿与快照编号。
@@ -477,6 +477,7 @@ class ActionOutcome(Enum):
     STALLED = "stalled"
     INTERRUPTED = "interrupted"
     PATH_UNKNOWN = "path_unknown"
+    PATH_BLOCKED = "path_blocked"
 
 
 @dataclass(frozen=True)

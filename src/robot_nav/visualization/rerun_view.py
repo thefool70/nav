@@ -91,6 +91,7 @@ class RerunVisualizer:
         target_text: str,
         *,
         recording_path: Optional[Path] = None,
+        viewer: str = "web",
     ) -> None:
         try:
             import rerun as rr
@@ -109,6 +110,8 @@ class RerunVisualizer:
         self._selected_frontier_id: Optional[str] = None
         self._last_result: Optional[NavigationResult] = None
         self._last_frame: Optional[NavigationFrame] = None
+        # 各类底盘反馈独立到达；保留最近响应及接收时间，完整历史写入 RRD。
+        self._chassis_status: Dict[str, Any] = {}
         self._vlm_trace = VlmTraceHistory()
         self._world_nodes = SemanticWorldNodes(rr, self._log)
         self._object_progress = None
@@ -134,21 +137,23 @@ class RerunVisualizer:
         rr.save(recording_path, recording=disk_recording)
         self._recordings = (disk_recording, live_recording)
         print(f"Rerun 自动录制文件：{recording_path}", flush=True)
-        # Rerun 0.22.1 的 serve_web 持有 GIL 等待 sink 切换完成；必须在
-        # 发送 blueprint / Arrow 数据前启动，避免后台释放数据时争用 GIL。
-        # 浏览器由用户手动打开，Rerun 启动不依赖 WSL 的浏览器调用。
-        print(
-            "正在启动 Rerun Web 服务；启动后请手动打开显示的地址。",
-            flush=True,
-        )
-        rr.serve_web(
-            open_browser=False,
-            web_port=9090,
-            ws_port=9877,
-            recording=live_recording,
-            server_memory_limit=RERUN_SERVER_MEMORY_LIMIT,
-        )
-        print("Rerun Web 服务已启动；正在发送界面布局。", flush=True)
+        # 先连接实时输出，再发送布局和图像，避免切换 sink 时与后台写入争用。
+        if viewer == "native":
+            print("正在启动 Rerun 桌面 App。", flush=True)
+            rr.spawn(port=9878, recording=live_recording)
+        else:
+            rr.serve_web(
+                open_browser=False,
+                web_port=9090,
+                ws_port=9877,
+                recording=live_recording,
+                server_memory_limit=RERUN_SERVER_MEMORY_LIMIT,
+            )
+            print(
+                "Rerun Web Viewer 地址："
+                "http://127.0.0.1:9090/?url=ws://127.0.0.1:9877",
+                flush=True,
+            )
         _send_default_blueprint(
             rr,
             recordings=self._recordings,
@@ -158,11 +163,6 @@ class RerunVisualizer:
         # 文件由 SDK 后台持续写入；SDK 的退出钩子负责刷新并关闭两个流。
         for recording in self._recordings:
             recording.flush(blocking=True)
-        print(
-            "Rerun Web Viewer 地址："
-            "http://127.0.0.1:9090/?url=ws://127.0.0.1:9877",
-            flush=True,
-        )
 
     def log_cycle(
         self,
@@ -178,6 +178,28 @@ class RerunVisualizer:
         """记录 Adapter 执行动作后的传感器帧，不推进算法状态。"""
         with self._log_lock:
             self._log_motion_frame(frame)
+
+    def log_chassis_status(self, source: str, payload: Mapping[str, Any]) -> None:
+        """显示 Hermes 健康、任务和事件原始反馈，不据此改变导航判断。"""
+        with self._log_lock:
+            self._begin_sample()
+            self._chassis_status[source] = {
+                "received_at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                "response": dict(payload),
+            }
+            text = (
+                "Hermes 最近采集的反馈（各项独立更新，时间不代表硬件同步）\n"
+                "health: baseError 保留错误码、等级和说明；read_error 表示读取失败。\n"
+                "action: status 0=新建, 1=执行中, 3=暂停, 4=结束；\n"
+                "result 在结束时解释：0=成功, -1=失败, -2=取消。\n"
+                "action 是最后一次任务反馈，不代表当前仍有活跃任务；未出现表示尚未采集。\n"
+                "events 是最近响应批次：PATH_OCCUPIED=路径受阻；ROBOT_BLOCKED=长时间受困；\n"
+                "CURRENT_POSE_OCCUPIED=当前位姿被占据；BUMPER_TRIGGERED=碰撞传感器触发。\n"
+                "事件 timestamp 是底盘启动后的毫秒数；received_at 是本机接收时间。\n"
+                "空数组不表示阻挡解除；重复事件原样保留，完整批次可拖动时间轴回看。\n\n"
+                + json.dumps(self._chassis_status, ensure_ascii=False, indent=2)
+            )
+            self._log("chassis/status", self._rr.TextDocument(text, media_type="text/plain"))
 
     def log_motion_plan(
         self,
@@ -979,7 +1001,7 @@ def _send_default_blueprint(
     world_views = rrb.Tabs(
         rrb.Spatial2DView(
             origin="/world", name="World",
-            contents=["/world/**", "- /world/observations/**", "- /world/history/**", "- /world/scan/planned/**"],
+            contents=["/world/**", "- /world/observations/**", "- /world/history/**"],
         ),
         rrb.Spatial2DView(
             origin="/world", name="World history",
@@ -992,6 +1014,7 @@ def _send_default_blueprint(
         rrb.TextDocumentView(origin="/observations/index", name="Observations"),
         rrb.TextDocumentView(origin="/navigation/frontiers", name="Frontiers"),
         rrb.TextDocumentView(origin="/navigation/motion", name="Motion details"),
+        rrb.TextDocumentView(origin="/chassis/status", name="Chassis"),
         panel_view(origin="/navigation/status", name="Status"),
         rrb.Spatial2DView(
             origin="/model/yolo_world/latest",

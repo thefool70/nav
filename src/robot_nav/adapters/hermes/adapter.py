@@ -19,12 +19,14 @@ from ...core.path_validation import UnknownPathMeasurement, measure_unknown_path
 from ...core.timing import measure_stage
 from ..chassis import (
     MotionPathUnknownError,
+    MotionBlockedError,
     MotionStalledError,
     RecoverableMotionError,
 )
 from ..realsense import D435iCapture
 from ..realsense.d435i_camera import D435iCamera, D435iConfig
 from .observed_map import HERMES_OBSTACLE_INFLATION_RADIUS_M, HermesObservedMap
+from .remote.wire import RgbdPoseCapture
 from .rest_client import (
     HermesActionError,
     HermesExploreMap,
@@ -52,7 +54,7 @@ _OCCUPANCY_VALUES = (None,) + (0.0,) * 127 + (1.0,) * 128
 class RgbdCamera(Protocol):
     """Hermes 组帧只要求采集与关闭，允许本地 USB 或远程 RGB-D 来源。"""
 
-    def capture(self) -> D435iCapture:
+    def capture(self, *, after_s: float = 0.0) -> D435iCapture:
         ...
 
     def close(self) -> None:
@@ -93,6 +95,10 @@ class _ActionMonitorState:
     last_sample_s: float
     last_motion_s: float
     last_motion_pose: Pose2D
+    # 当前动作的事件水位与受阻起点；恢复平移即清空，动作结束即丢弃。
+    event_after_ms: int = 0
+    blocked_since_s: Optional[float] = None
+    blocked_pose: Optional[Pose2D] = None
     path_error_reported: bool = False
     unknown_path_length_m: Optional[float] = None
     arrival_since_s: Optional[float] = None
@@ -100,7 +106,7 @@ class _ActionMonitorState:
 
 
 class _ActionArrivedError(RuntimeError):
-    """位姿已到达且稳定，通知执行层终止 Action 并确认结束。"""
+    """位姿已到达且稳定，交回控制权，由下一 Action 替换当前任务。"""
 
 
 class _ActionStalledError(RuntimeError):
@@ -119,6 +125,7 @@ class HermesAdapter:
         on_motion_plan: Optional[MotionPlanCallback] = None,
         *,
         camera_factory: Callable[[D435iConfig], RgbdCamera] = D435iCamera,
+        on_chassis_status: Optional[Callable[[str, Mapping[str, Any]], None]] = None,
     ) -> None:
         _validate_config(config)
         self.config = config
@@ -126,13 +133,20 @@ class HermesAdapter:
         self._on_continuous_frame = on_continuous_frame
         self._on_action_progress = on_action_progress
         self._on_motion_plan = on_motion_plan
+        self._on_chassis_status = on_chassis_status
         self._last_motion_frame_s = float("-inf")
-        self._frame_read_lock = threading.Lock()
+        self._frame_build_lock = threading.Lock()
+        self._map_condition = threading.Condition()
+        # 地图线程发布完整转换结果；相机与地图独立更新，不宣称两者同时采集。
+        self._latest_map = None
+        self._map_updated_s = 0.0
+        self._map_thread = None
+        self._camera_after_s = 0.0
         self._continuous_frame_stop = threading.Event()
         self._continuous_frame_thread = None
         self._continuous_frame_error = None
         self._client = HermesRestClient(
-            config.base_url, config.request_timeout_s
+            config.base_url, config.request_timeout_s, on_status=on_chassis_status
         )
         self._active_action_id: Optional[int] = None
         self._action_pending = False
@@ -155,6 +169,8 @@ class HermesAdapter:
                         camera_config, serial_number=config.camera_serial
                     )
                 self._camera = camera_factory(camera_config)
+            self._map_thread = threading.Thread(target=self._map_loop, name="hermes-map", daemon=True)
+            self._map_thread.start()
             if on_continuous_frame is not None:
                 if self._camera is None:
                     raise ValueError("连续视觉帧需要启用 D435i")
@@ -198,20 +214,34 @@ class HermesAdapter:
     def read_frame(self) -> NavigationFrame:
         """组合 Hermes 地图/位姿与同机 D435i 对齐 RGB-D。"""
         self._raise_continuous_frame_error()
-        return self._read_frame_locked()
+        return self._capture_frame()
+
+    def stop(self) -> None:
+        """没有下一动作或需要原地处理时，取消残留 Action 并确认终态。"""
+        if self._action_pending:
+            try:
+                self._cancel_active_action()
+            finally:
+                self._camera_after_s = time.monotonic()
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
         """执行普通运动，用于启动、标定、转向和相对位姿运动。"""
-        self._send_relative_pose(command)
+        try:
+            self._send_relative_pose(command)
+        finally:
+            self._camera_after_s = time.monotonic()
 
     def send_relative_pose_in_known_space(
         self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
         *, reference_pose: Pose2D,
     ) -> None:
         """按决策位姿固定探索／回退的世界目标，用决策地图约束实际路径。"""
-        self._send_relative_pose(
-            command, known_space_map=obstacle_map, reference_pose=reference_pose,
-        )
+        try:
+            self._send_relative_pose(
+                command, known_space_map=obstacle_map, reference_pose=reference_pose,
+            )
+        finally:
+            self._camera_after_s = time.monotonic()
 
     def close(self) -> None:
         """退出先取消遗留动作，再关闭采集；取消失败仍显式上报。"""
@@ -221,6 +251,8 @@ class HermesAdapter:
         except RuntimeError as exc:
             cancellation_error = exc
         self._continuous_frame_stop.set()
+        with self._map_condition:
+            self._map_condition.notify_all()
         frame_thread = self._continuous_frame_thread
         self._continuous_frame_thread = None
         if frame_thread is not None and frame_thread is not threading.current_thread():
@@ -237,6 +269,9 @@ class HermesAdapter:
                     + 2.0,
                 )
             )
+        if self._map_thread is not None:
+            self._map_thread.join()
+            self._map_thread = None
         self._on_continuous_frame = None
         self._on_motion_frame = None
         camera = self._camera
@@ -252,31 +287,42 @@ class HermesAdapter:
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         self.close()
 
-    def _read_frame_locked(self) -> NavigationFrame:
-        """串行读取相机和 Hermes，避免主循环与运动监控线程争用设备。"""
+    def _capture_frame(self) -> NavigationFrame:
+        """读取最新相机包和地图快照；串行更新观察图，避免并发改写历史。"""
         timings = []
-        lock_started = time.monotonic()
-        with self._frame_read_lock:
-            lock_acquired = time.monotonic()
-            timings.append({
-                "stage": "frame.lock_wait",
-                "started_monotonic_s": lock_started,
-                "ended_monotonic_s": lock_acquired,
-                "duration_s": lock_acquired - lock_started,
-                "completed": True,
-            })
+        waiting = time.monotonic()
+        with self._frame_build_lock:
+            acquired = time.monotonic()
+            timings.append({"stage": "frame.build_lock_wait", "started_monotonic_s": waiting,
+                            "ended_monotonic_s": acquired, "duration_s": acquired - waiting,
+                            "completed": True})
             with measure_stage(timings, "frame.camera_capture"):
                 capture = (
-                    self._camera.capture()
+                    self._camera.capture(after_s=self._camera_after_s)
                     if self._camera is not None
                     else None
                 )
-            with measure_stage(timings, "frame.get_pose"):
-                pose = self._client.get_pose()
-            with measure_stage(timings, "frame.get_map"):
-                hermes_map = self._client.get_explore_map()
-            with measure_stage(timings, "frame.convert_map"):
-                navigation_map = _to_obstacle_map(hermes_map)
+            if isinstance(capture, RgbdPoseCapture):
+                pose = capture.pose
+            else:
+                with measure_stage(timings, "frame.get_pose"):
+                    pose = self._client.get_pose()
+            with measure_stage(timings, "frame.map_snapshot"):
+                with self._map_condition:
+                    self._map_condition.wait_for(lambda: (
+                        self._latest_map is not None or self._continuous_frame_error is not None
+                        or self._continuous_frame_stop.is_set()
+                    ))
+                    self._raise_continuous_frame_error()
+                    if self._continuous_frame_stop.is_set():
+                        raise RuntimeError("Hermes 数据采集已关闭")
+                    if time.monotonic() - self._map_updated_s > (
+                        self.config.request_timeout_s + self.config.motion_frame_interval_s
+                    ):
+                        raise RuntimeError("Hermes 地图更新超时")
+                    navigation_map = self._latest_map
+                    map_age_s = time.monotonic() - self._map_updated_s
+            timings[-1]["map_age_s"] = map_age_s
             # 完整图用于物体定位与停靠；探索图和视觉图随后按相机 FOV 限制公开范围。
             obstacle_map = navigation_map
             visibility_map = None
@@ -288,36 +334,59 @@ class HermesAdapter:
                         capture,
                         self.config.camera_extrinsics_in_robot,
                     )
-            with measure_stage(timings, "frame.build"):
-                frame = _build_navigation_frame(
-                    timestamp_s=time.monotonic(),
-                    pose=pose,
-                    obstacle_map=obstacle_map,
-                    capture=capture,
-                    camera_extrinsics=self.config.camera_extrinsics_in_robot,
-                    navigation_map=navigation_map,
-                    visibility_map=visibility_map,
-                )
-            return replace(frame, acquisition_timings=tuple(timings))
+            timestamp_s = capture.timestamp_s if isinstance(capture, RgbdPoseCapture) else time.monotonic()
+        # 相机包和地图快照已固定；RGB-D 转换不改历史图，无需继续占用采集锁。
+        with measure_stage(timings, "frame.build"):
+            frame = _build_navigation_frame(
+                timestamp_s=timestamp_s,
+                pose=pose,
+                obstacle_map=obstacle_map,
+                capture=capture,
+                camera_extrinsics=self.config.camera_extrinsics_in_robot,
+                navigation_map=navigation_map,
+                visibility_map=visibility_map,
+                timings=timings,
+            )
+        return replace(frame, acquisition_timings=tuple(timings))
+
+    def _map_loop(self) -> None:
+        """独立请求并转换完整地图，发布成功结果；失败不沿用旧图掩盖故障。"""
+        while not self._continuous_frame_stop.is_set():
+            try:
+                navigation_map = _to_obstacle_map(self._client.get_explore_map())
+                with self._map_condition:
+                    self._latest_map = navigation_map
+                    self._map_updated_s = time.monotonic()
+                    self._map_condition.notify_all()
+            except BaseException as exc:
+                with self._map_condition:
+                    self._continuous_frame_error = exc
+                    self._map_condition.notify_all()
+                return
+            self._continuous_frame_stop.wait(self.config.motion_frame_interval_s)
 
     def _continuous_frame_loop(self) -> None:
-        """独立采集线程发布最新帧，控制轮询不等待相机或语义计算。"""
+        """为可视化定期组帧；相机接收和地图请求由各自线程持续进行。"""
         callback = self._on_continuous_frame
         if callback is None:
             return
         while not self._continuous_frame_stop.is_set():
             try:
-                callback(self._read_frame_locked())
+                if self._on_chassis_status is not None:
+                    try:
+                        self._client.get_robot_health()
+                    except RuntimeError as exc:
+                        self._on_chassis_status("health", {"read_error": str(exc)})
+                callback(self._capture_frame())
             except BaseException as exc:
-                self._continuous_frame_error = exc
+                with self._map_condition:
+                    self._continuous_frame_error = exc
+                    self._map_condition.notify_all()
                 self._report_action_progress(
-                    "Hermes/D435i 连续视觉帧停止："
-                    f"{str(exc) or type(exc).__name__}"
+                    f"Hermes/D435i 连续视觉帧停止：{str(exc) or type(exc).__name__}"
                 )
                 return
-            self._continuous_frame_stop.wait(
-                self.config.motion_frame_interval_s
-            )
+            self._continuous_frame_stop.wait(self.config.motion_frame_interval_s)
 
     def _raise_continuous_frame_error(self) -> None:
         """把后台设备错误带回主循环，而不是静默停止采样。"""
@@ -325,7 +394,7 @@ class HermesAdapter:
         if error is None:
             return
         raise RuntimeError(
-            "Hermes/D435i 连续视觉帧失败："
+            "Hermes/D435i 数据采集失败："
             f"{str(error) or type(error).__name__}"
         ) from error
 
@@ -337,9 +406,11 @@ class HermesAdapter:
     ) -> None:
         """把机器人局部相对位姿转换为 Hermes 的全局规划与原地转向。"""
         _validate_command(command)
-        self._require_motion_ready()
-
-        start_pose = self._client.get_pose()
+        dispatch_timings = []
+        with measure_stage(dispatch_timings, "motion.ready_check"):
+            self._require_motion_ready()
+        with measure_stage(dispatch_timings, "motion.start_pose"):
+            start_pose = self._client.get_pose()
         # 相对命令基于决策帧，不能再用运动后的朝向旋转一次，否则世界目标会漂移。
         reference_pose = reference_pose if reference_pose is not None else start_pose
         target_xy = _relative_target_world(reference_pose, command)
@@ -359,13 +430,17 @@ class HermesAdapter:
             f"{math.degrees(target_yaw):.2f}°)"
         )
 
+        sent_action = False
         if translation > self.config.position_tolerance_m:
             self._execute_action(
                 self._move_to_action,
                 {"target": {"x": target_xy[0], "y": target_xy[1], "z": 0.0}},
                 target_world_xy=target_xy,
                 known_space_map=known_space_map,
+                dispatch_timings=dispatch_timings,
             )
+            sent_action = True
+            dispatch_timings = []
 
         should_restore_yaw = (
             translation > self.config.position_tolerance_m
@@ -380,7 +455,11 @@ class HermesAdapter:
                 self._execute_action(
                     self._rotate_to_action,
                     {"angle": target_yaw},
+                    dispatch_timings=dispatch_timings,
                 )
+                sent_action = True
+        if not sent_action:
+            self.stop()  # 零位移命令没有新 Action 可替换旧任务。
         self._publish_motion_frame(force=True)
 
     def _require_motion_ready(self) -> None:
@@ -411,30 +490,53 @@ class HermesAdapter:
         options: Mapping[str, Any],
         target_world_xy: Optional[Tuple[float, float]] = None,
         known_space_map: Optional[ObstacleMap] = None,
+        dispatch_timings=None,
     ) -> None:
         """监控活跃 Action 的反馈和位姿；不计入 VLM 等待时间。"""
         action_label = action_name.rsplit(".", 1)[-1]
         target_yaw = float(options["angle"]) if action_name == self._rotate_to_action else None
         action_id = None
+        if dispatch_timings is None:
+            dispatch_timings = []
         self._action_pending = True
         try:
-            action_id = self._client.create_action(action_name, options)
+            with measure_stage(dispatch_timings, "motion.event_watermark"):
+                event_after_ms = (
+                    self._client.get_system_timestamp_ms()
+                    if action_name == self._move_to_action else 0
+                )
+            previous_action_id = self._active_action_id
+            # POST 失败时无法确定新任务是否被受理，异常路径必须取消 :current。
+            self._active_action_id = None
+            with measure_stage(dispatch_timings, "motion.create_action"):
+                action_id = self._client.create_action(action_name, options)
             self._active_action_id = action_id
             started_s = time.monotonic()
-            started_pose = self._client.get_pose()
+            with measure_stage(dispatch_timings, "motion.monitor_pose"):
+                started_pose = self._client.get_pose()
             monitor_state = _ActionMonitorState(
                 started_s=started_s, last_sample_s=float("-inf"),
                 last_motion_s=started_s, last_motion_pose=started_pose,
+                event_after_ms=event_after_ms,
             )
             self._report_action_progress(f"Hermes Action #{action_id} {action_label} 已创建。")
+            self._report_action_progress(
+                f"Hermes Action #{action_id} 下发计时（秒）："
+                + ", ".join(f"{span['stage']}={span['duration_s']:.4f}" for span in dispatch_timings)
+            )
+            if previous_action_id is not None:
+                self._report_action_progress(f"Hermes Action #{action_id} 替换到位的 Action #{previous_action_id}。")
             self._report_motion_plan(target_world_xy, ())
 
-            def monitor_action(status: int, stage: str) -> None:
+            def monitor_action(status: int, stage: str) -> Optional[float]:
                 self._monitor_action(
                     action_id, action_label, monitor_state, status, stage,
                     action_name == self._move_to_action, target_world_xy, known_space_map,
                     target_yaw,
                 )
+                if monitor_state.arrival_since_s is not None:
+                    return max(0.0, self.config.action_arrival_hold_s
+                               - (time.monotonic() - monitor_state.arrival_since_s))
 
             try:
                 self._client.wait_for_action(
@@ -444,16 +546,14 @@ class HermesAdapter:
                     on_poll=monitor_action,
                 )
             except _ActionArrivedError as arrived:
-                # 不能仅凭位姿直接返回；先取消固件中的活跃动作并确认终态。
-                self._cancel_active_action()
-                if not self._pose_at_action_target(self._client.get_pose(), target_world_xy, target_yaw):
-                    raise RecoverableMotionError("提前结束 Action 后位姿超出到达容差，按实际位置重新决策。")
+                # Hermes 创建新 Action 会替换旧任务；保留 ID，供替换或停止时收尾。
                 self._report_action_progress(
                     f"Hermes Action #{action_id} {action_label} 按位姿确认到达，"
-                    f"已主动结束并确认终态：{arrived}"
+                    f"保留任务等待下一动作替换：{arrived}"
                 )
-            self._active_action_id = None
-            self._action_pending = False
+            else:
+                self._active_action_id = None
+                self._action_pending = False
         except BaseException as exc:
             detail = str(exc) or type(exc).__name__
             abort_error: Optional[RuntimeError] = None
@@ -494,7 +594,8 @@ class HermesAdapter:
             if isinstance(exc, HermesActionError):
                 raise RecoverableMotionError(str(exc)) from exc
             raise
-        self._report_motion_plan(None, ())
+        if not self._action_pending:
+            self._report_motion_plan(None, ())
         completion_detail = ""
         if action_name == self._move_to_action:
             final_pose = self._client.get_pose()
@@ -522,8 +623,9 @@ class HermesAdapter:
                     "Hermes MoveToAction 已结束，但底盘未产生有效平移："
                     f"{translated_m:.3f} m"
                 )
+        outcome = "到位交接" if self._action_pending else "完成"
         self._report_action_progress(
-            f"Hermes Action #{action_id} {action_label} 完成，"
+            f"Hermes Action #{action_id} {action_label} {outcome}，"
             f"耗时 {time.monotonic() - started_s:.1f}s"
             f"{completion_detail}。"
         )
@@ -573,6 +675,17 @@ class HermesAdapter:
     ) -> None:
         """每次轮询判断到位与停滞，仅终端输出按进度间隔节流。"""
         self._raise_continuous_frame_error()
+        events = []
+        if requires_translation:
+            # 控制线程是唯一事件读取者，关闭可视化仍执行同样的受阻判断。
+            try:
+                events = self._client.get_robot_events()
+            except RuntimeError as exc:
+                if self._on_chassis_status is not None:
+                    self._on_chassis_status("events", {"read_error": str(exc)})
+                raise
+            if self._on_chassis_status is not None:
+                self._on_chassis_status("events", {"events": events})
         pose = self._client.get_pose()
         now = time.monotonic()
         if requires_translation and known_space_map is not None:
@@ -599,8 +712,10 @@ class HermesAdapter:
             state, status, pose, now, target_world_xy, target_yaw,
             requires_translation,
         )
+        if requires_translation:
+            self._check_path_blocked(action_id, state, events, pose, now)
         still_s = now - state.last_motion_s
-        if still_s >= self.config.action_stall_timeout_s:
+        if not requires_translation and still_s >= self.config.action_stall_timeout_s:
             raise _ActionStalledError(
                 f"Hermes Action {action_id} 已连续 {still_s:.1f} 秒"
                 "没有产生足够位姿变化"
@@ -634,6 +749,42 @@ class HermesAdapter:
         )
         state.last_sample_s = now
 
+    def _check_path_blocked(self, action_id, state, events, pose, now):
+        """只对新的受阻事件计时；离开受阻起点至少 40 cm 才认为恢复平移。"""
+        for event in events:
+            if event["type"] != "PATH_OCCUPIED":
+                continue
+            stamp = int(event["timestamp"])
+            if stamp <= state.event_after_ms:
+                continue
+            state.event_after_ms = stamp
+            if state.blocked_since_s is None:
+                state.blocked_since_s = now
+                state.blocked_pose = pose
+                self._report_action_progress(
+                    f"Hermes Action #{action_id} PATH_OCCUPIED：开始受阻等待，"
+                    f"event_timestamp_ms={stamp}，上限 {self.config.action_stall_timeout_s:.1f}s"
+                )
+        if state.blocked_since_s is None:
+            return
+        moved_m = math.hypot(pose.x_m - state.blocked_pose.x_m,
+                             pose.y_m - state.blocked_pose.y_m)
+        if moved_m >= max(0.40, self.config.action_stall_translation_m):
+            # 水位推进至恢复时刻，迟到的旧事件不能重新启动受阻等待。
+            state.event_after_ms = self._client.get_system_timestamp_ms()
+            state.blocked_since_s = None
+            state.blocked_pose = None
+            self._report_action_progress(
+                f"Hermes Action #{action_id} 受阻后恢复平移 {moved_m:.2f}m，清除受阻计时"
+            )
+            return
+        blocked_s = now - state.blocked_since_s
+        if blocked_s >= self.config.action_stall_timeout_s:
+            raise MotionBlockedError(
+                f"Hermes Action {action_id} 收到 PATH_OCCUPIED 后持续 {blocked_s:.1f}s "
+                "未恢复有效平移，取消本次移动"
+            )
+
     def _pose_at_action_target(
         self, pose: Pose2D, target_xy: Optional[Tuple[float, float]], target_yaw: Optional[float],
     ) -> bool:
@@ -648,7 +799,7 @@ class HermesAdapter:
         self, state: _ActionMonitorState, status: int, pose: Pose2D, now: float,
         target_xy: Optional[Tuple[float, float]], target_yaw: Optional[float], requires_translation: bool,
     ) -> None:
-        """目标容差内连续稳定 0.6s 才提前收尾，避免路过目标或尚未起步时误报到达。"""
+        """目标容差内稳定达到配置时长后收尾；实际确认精度受轮询间隔限制。"""
         if (
             status != 1
             or (requires_translation and state.last_motion_s <= state.started_s)
@@ -671,7 +822,7 @@ class HermesAdapter:
                 error = f"位置误差 {math.hypot(pose.x_m - target_xy[0], pose.y_m - target_xy[1]):.3f} m"
             else:
                 error = f"角度误差 {math.degrees(abs(_angle_difference(target_yaw, pose.yaw_rad))):.2f}°"
-            raise _ActionArrivedError(f"{error}，稳定 {now - state.arrival_since_s:.1f}s")
+            raise _ActionArrivedError(f"{error}，稳定 {now - state.arrival_since_s:.3f}s，阈值 {self.config.action_arrival_hold_s:.3f}s")
 
     def _check_known_space_path(
         self,
@@ -757,6 +908,7 @@ def _build_navigation_frame(
     camera_extrinsics: CameraExtrinsics,
     navigation_map: Optional[ObstacleMap] = None,
     visibility_map: Optional[ObstacleMap] = None,
+    *, timings=None,
 ) -> NavigationFrame:
     """把两类设备数据冻结为 core 只读的同一地图坐标帧。"""
     if capture is None:
@@ -769,12 +921,16 @@ def _build_navigation_frame(
             navigation_clearance_m=HERMES_OBSTACLE_INFLATION_RADIUS_M,
             visibility_map=visibility_map,
         )
+    with measure_stage(timings, "frame.convert_depth"):
+        depth = _convert_depth(capture.depth_m)
+    with measure_stage(timings, "frame.convert_rgb"):
+        rgb = _convert_rgb(capture.rgb)
     return NavigationFrame(
         timestamp_s=timestamp_s,
         pose=pose,
         obstacle_map=obstacle_map,
-        depth=_convert_depth(capture.depth_m),
-        rgb=_convert_rgb(capture.rgb),
+        depth=depth,
+        rgb=rgb,
         camera_intrinsics=capture.camera_intrinsics,
         camera_extrinsics_in_robot=camera_extrinsics,
         navigation_map=navigation_map,

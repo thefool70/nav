@@ -1,7 +1,7 @@
 """语义感知策略与异步视觉队列：固定快照的 FIFO 分析。
 
 网络线程只产出结果，不操作底盘，也不修改搜索状态。图片与元数据写入独立运行
-目录，预采样只覆盖尚未选取的运动帧；已入队任务不覆盖、不因 Frontier 失效而丢弃。
+目录；只接收前沿扫描画面，已入队任务不因 Frontier 失效而丢弃。
 
 运行层在每个周期按以下顺序与本模块交互：
 
@@ -19,18 +19,18 @@ import tempfile
 import threading
 import traceback
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Mapping, Optional, Tuple
 
-from ..core.frontier import FrameFrontierCache
+from ..core.frontier import FrameFrontierCache, extract_frame_frontiers
 from ..core.models import (
     FrontierCandidate,
     FrontierScoreRequest,
     NavigationFrame,
     ObjectLocalization,
     ObservationView,
-    Pose2D,
     SearchMode,
     SemanticAnalysis,
     TargetClue,
@@ -42,7 +42,6 @@ from ..core.observation_coverage import frontier_observation_points
 from ..core.timing import TimingSpans, measure_stage
 from ..adapters.frontier_overlay import (
     buffer_scan_image,
-    has_frontier_direction_in_view,
     visible_frontier_candidates,
 )
 from .object_localizer import ObjectLocalizer, ObjectLocalizerConfig
@@ -56,11 +55,6 @@ from .snapshot_store import (
     view_trace,
     write_snapshot,
 )
-
-PREFETCH_TRANSLATION_M = 0.75
-PREFETCH_TURN_RAD = math.radians(30.0)
-PREFETCH_MAX_YAW_SPEED_RAD_S = math.radians(25.0)
-
 
 @dataclass(frozen=True)
 class CycleIntake:
@@ -77,6 +71,14 @@ class _CompletedAnalysis:
     views: Tuple[Tuple[str, ObservationView], ...]
     candidates: Tuple[FrontierCandidate, ...]
     region_ids: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ScanView:
+    """已固定的扫描覆盖和后台编码结果；分析成功前都只算待检查。"""
+
+    coverage: ObservationView
+    prepared: Future
 
 
 class SemanticPerception:
@@ -107,7 +109,8 @@ class SemanticPerception:
         )
         self._on_event = on_event
         self._condition = threading.Condition()
-        self._enqueue_lock = threading.Lock()
+        # 编码与落盘串行执行，扫描批次按提交顺序进入模型队列。
+        self._snapshot_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic-snapshot")
         self._closed = False
         self._worker_error: Optional[Exception] = None
         self._goal: Optional[TargetSearchGoal] = None
@@ -123,24 +126,18 @@ class SemanticPerception:
         self._submitted_keys = set()
         self._scored_targets = set()
         self._scan_views = []
-        self._scan_candidates = {}
+        # flush 后、写盘完成前仍保留覆盖，避免核心误判队列耗尽或重复扫描。
+        self._scan_submissions: Dict[Future, Tuple[ObservationView, ...]] = {}
         self._submitted = 0
         self._finished = 0
         self._failed = 0
         self._writing = 0
         self._active_job: Optional[int] = None
         self._background_paused = False
-        self._prefetch_enabled = False
-        self._pending_frame: Optional[Tuple[NavigationFrame, CaptureContext]] = None
-        self._capture_busy = False
-        self._last_prefetch_pose: Optional[Pose2D] = None
-        self._previous_motion_frame: Optional[NavigationFrame] = None
         self._capture_context = None
         self._obstacle_frame_id: str = ""
         self._worker = threading.Thread(target=self._run_worker, args=(self._worker_loop,), name="semantic-fifo", daemon=True)
-        self._capture_worker = threading.Thread(target=self._run_worker, args=(self._capture_loop,), name="semantic-capture", daemon=True)
         self._worker.start()
-        self._capture_worker.start()
         print(f"异步视觉队列：{self.directory}（固定快照，FIFO）", flush=True)
 
     # ------------------------------------------------------------------
@@ -205,8 +202,6 @@ class SemanticPerception:
         with self._condition:
             if paused != self._background_paused:
                 self._background_paused = bool(paused)
-                if paused:
-                    self._prefetch_enabled = False
                 self._condition.notify_all()
 
     def bind_frame(self, frame: NavigationFrame, context: CaptureContext) -> None:
@@ -220,16 +215,16 @@ class SemanticPerception:
 
     def flush_scan(self) -> None:
         """扫描结束或被目标处理打断时保留已采集的部分批次。"""
-        if not self._scan_views:
-            return
-        views = tuple(self._scan_views)
         with self._condition:
-            candidates = tuple(
-                item for key, item in self._scan_candidates.items() if key not in self._scored_targets
-            )
-        self._enqueue(views, candidates, "scan")
-        self._scan_views.clear()
-        self._scan_candidates.clear()
+            self._raise_worker_error()
+            if self._closed or not self._scan_views:
+                return
+            views = tuple(self._scan_views)
+            # 所有编码任务都已提交到同一个串行线程，本任务执行时结果必已就绪。
+            submitted = self._snapshot_worker.submit(self._write_scan, views)
+            self._scan_submissions[submitted] = tuple(view.coverage for view in views)
+            self._scan_views.clear()
+            submitted.add_done_callback(self._scan_work_done)
 
     def set_goal(self, goal: TargetSearchGoal) -> None:
         """登记本次运行的搜索目标；同一队列不能混用不同目标。"""
@@ -247,15 +242,17 @@ class SemanticPerception:
     def pending_counts(self) -> Tuple[int, int, Tuple[ObservationView, ...]]:
         """返回（在途与待处理任务数、分析失败批数、待分析覆盖）供核心写入状态。"""
         with self._condition:
+            self._raise_worker_error()
             pending = (
                 len(self._jobs) + len(self._completed) + self._writing
-                + int(self._active_job is not None) + int(self._capture_busy)
+                + int(self._active_job is not None)
                 + int(bool(self._scan_views)) + len(self._clues)
-                + int(self._pending_frame is not None)
+                + len(self._scan_submissions)
             )
             failed = self._failed
             pending_views = tuple(view for views in self._pending_coverage.values() for view in views)
             pending_views += tuple(item.coverage for item in self._scan_views)
+            pending_views += tuple(view for views in self._scan_submissions.values() for view in views)
         return pending, failed, pending_views
 
     def capture_scan_view(
@@ -266,20 +263,21 @@ class SemanticPerception:
         timings: Optional[TimingSpans] = None,
         frontier_cache: Optional[FrameFrontierCache] = None,
     ) -> str:
-        """采集本轮扫描的一个方向；返回 'submitted' 或 'buffered'；正式采集失败向上传播。"""
+        """固定画面和覆盖后即返回；编码与写盘在后台完成，失败传回主线程。"""
         if scan_context.index == 0:
             # 扫描被打断后重建计划时，先提交上一轮已拍到的部分画面。
             with measure_stage(timings, "snapshot.flush_previous"):
                 self.flush_scan()
-        captured, candidates, _ = self._capture(
+        candidates, coverage = self._prepare_capture(
             frame, context=self._capture_context,
             timings=timings, frontier_cache=frontier_cache,
         )
-        self._scan_views.append(captured)
-        self._scan_candidates.update({
-            _target_key(captured.map_frame_id, item.world_xy, item.candidate_id): item
-            for item in candidates
-        })
+        with self._condition:
+            self._raise_worker_error()
+            # NavigationFrame 的 RGB-D 和地图是不可变元组；保留这帧即可固定拍摄输入。
+            prepared = self._snapshot_worker.submit(self._encode_scan, frame, candidates, coverage)
+            self._scan_views.append(_ScanView(coverage, prepared))
+            prepared.add_done_callback(self._scan_work_done)
         if scan_context.index + 1 >= scan_context.count:
             with measure_stage(timings, "snapshot.submit"):
                 self.flush_scan()
@@ -321,18 +319,6 @@ class SemanticPerception:
         }
         return self._object_localizer.locate(observation_frame, goal, context=context)
 
-    def observe_motion_frame(self, frame: NavigationFrame) -> None:
-        """运动期间按预采样开关接收一帧；由运行层在动作入口显式打开。"""
-        with self._condition:
-            if not self._closed and not self._background_paused and self._prefetch_enabled:
-                self._pending_frame = (frame, self._capture_context)
-                self._condition.notify_all()
-
-    def set_motion_prefetch_enabled(self, enabled: bool) -> None:
-        """由动作入口单独控制 VLM 预采样；只在指定的平移动作期间接收帧。"""
-        with self._condition:
-            self._prefetch_enabled = bool(enabled) and not self._background_paused
-
     def diagnostics(self) -> Mapping[str, Any]:
         with self._condition:
             return {
@@ -354,25 +340,30 @@ class SemanticPerception:
             self._raise_worker_error()
 
     def close(self) -> None:
-        """停止接收与排队任务，有限等待后台线程退出；未消费的磁盘快照保留。"""
+        """停止分析，收尾已提交的扫描写盘；模型线程仍只有限等待。"""
         with self._condition:
             if self._closed:
                 return
             self._closed = True
             remaining = len(self._jobs) + int(self._active_job is not None)
+            submitted_before_close = self._submitted
             stopped_jobs = tuple(job_id for job_id, _ in self._jobs)
             if self._active_job is not None:
                 stopped_jobs += (self._active_job,)
             self._jobs.clear()
-            self._pending_frame = None
             self._condition.notify_all()
-        self._emit({"event": "stopped", "job_ids": stopped_jobs})
         if self._object_localizer is not None:
             self._object_localizer.close()
-        self._capture_worker.join(timeout=1.0)
+        self._snapshot_worker.shutdown(wait=True)
+        # 关闭时仍完成已提交扫描的保存，但不再交给模型；记录这些新增磁盘任务。
+        stopped_jobs += tuple(range(submitted_before_close + 1, self._submitted + 1))
+        remaining += self._submitted - submitted_before_close
+        self._emit({"event": "stopped", "job_ids": stopped_jobs})
         self._worker.join(timeout=1.0)
+        self._scan_views.clear()
         if remaining:
             print(f"视觉队列因退出停止，{remaining} 批任务未消费；快照保留在 {self.directory}", flush=True)
+        self._raise_worker_error()
 
     def __enter__(self):
         return self
@@ -384,93 +375,73 @@ class SemanticPerception:
     # 内部：采集与队列
     # ------------------------------------------------------------------
 
-    def _capture(
-        self, frame: NavigationFrame,
-        *, context: CaptureContext, timings: Optional[TimingSpans] = None,
-        frontier_cache: Optional[FrameFrontierCache] = None,
-    ):
-        """拍摄当前帧：预览候选、生成拼图与覆盖，并编码深度。"""
+    def _prepare_capture(self, frame, *, context, timings=None, frontier_cache=None):
+        """计算主线程推进扫描所需的候选与待检查覆盖，不编码图片。"""
+        if frontier_cache is None:
+            frontier_cache = FrameFrontierCache(frame)
         with measure_stage(timings, "snapshot.frontier_preview"):
             candidates = preview_capture_candidates(
                 frame, context, timings=timings, frontier_cache=frontier_cache,
             )
         with measure_stage(timings, "snapshot.observation_points"):
-            # 此处只筛选待评分的移动候选；扫描覆盖使用 context 中冻结的观察点。
+            # 观察完整边界，不能因为某处不适合移动过去就放弃拍摄。
+            frontiers = extract_frame_frontiers(
+                frame, context.tried_points, cache=frontier_cache, timings=timings,
+            )
             points = frontier_observation_points(
-                frame, (cell for candidate in candidates for cell in candidate.frontier_cells),
+                frame, frontiers.boundary_cells,
             )
             visible_points = {_xy_key(point) for point in points}
             candidates = tuple(
                 item for item in candidates
                 if item.deferred_order is None and _xy_key(item.world_xy) in visible_points
             )
+        with measure_stage(timings, "snapshot.coverage"):
+            coverage = capture_semantic_view(frame, context.observation_points + points)
+        return candidates, coverage
+
+    def _encode_capture(self, frame, candidates, coverage, *, timings=None):
+        """只读取拍摄时的固定帧，完成图像打包、候选投影和深度压缩。"""
         with measure_stage(timings, "snapshot.image_projection"):
             image = buffer_scan_image(frame, candidates)
-            has_direction = has_frontier_direction_in_view(image, candidates)
             candidates = visible_frontier_candidates({1: image}, candidates)
-        with measure_stage(timings, "snapshot.coverage"):
-            coverage = capture_semantic_view(frame, context.observation_points or points)
         with measure_stage(timings, "snapshot.depth_encode"):
             depth_gzip = encode_depth(frame.depth, image.width_px, image.height_px)
-        return CapturedView(image, coverage, frame.obstacle_map.frame_id, depth_gzip), candidates, has_direction
+        return CapturedView(image, coverage, frame.obstacle_map.frame_id, depth_gzip), candidates
 
-    def _capture_loop(self) -> None:
-        """消费最新运动帧并生成快照；图像处理在条件锁外进行，避免阻塞主线程提交。"""
-        while True:
-            with self._condition:
-                self._condition.wait_for(
-                    lambda: self._closed or self._worker_error is not None or (not self._background_paused and self._pending_frame is not None)
-                )
-                if self._closed or self._worker_error is not None:
-                    return
-                frame, context = self._pending_frame
-                self._pending_frame = None
-                self._capture_busy = True
-            try:
-                if self._use_motion_frame(frame):
-                    captured, candidates, has_direction = self._capture(frame, context=context)
-                    with self._condition:
-                        candidates = tuple(
-                            item for item in candidates
-                            if _target_key(captured.map_frame_id, item.world_xy, item.candidate_id)
-                            not in self._scored_targets
-                        )
-                    if has_direction:
-                        # 新拍摄位置仍要检查目标；已有评分的方向不重复请求评分。
-                        self._enqueue((captured,), candidates, "motion")
-                        self._last_prefetch_pose = frame.pose
-            except OSError as exc:
-                self._emit({"event": "prefetch_skipped", "reason": str(exc), "timestamp_s": frame.timestamp_s})
-            finally:
-                with self._condition:
-                    self._capture_busy = False
-                    self._condition.notify_all()
+    def _encode_scan(self, frame, candidates, coverage):
+        timings = []
+        captured = self._encode_capture(frame, candidates, coverage, timings=timings)
+        self._emit({"event": "scan_prepared", "timestamp_s": frame.timestamp_s, "spans": timings})
+        return captured
 
-    def _use_motion_frame(self, frame: NavigationFrame) -> bool:
-        """跳过快速转向帧，并按距上次成功预采样的位姿变化控制采样间隔。"""
-        previous = self._previous_motion_frame
-        self._previous_motion_frame = frame
-        if previous is not None:
-            dt = frame.timestamp_s - previous.timestamp_s
-            if dt <= 0.0 or _turn_distance(frame.pose.yaw_rad, previous.pose.yaw_rad) / dt > PREFETCH_MAX_YAW_SPEED_RAD_S:
-                return False
-        last = self._last_prefetch_pose
-        return last is None or (
-            math.hypot(frame.pose.x_m - last.x_m, frame.pose.y_m - last.y_m) >= PREFETCH_TRANSLATION_M
-            or _turn_distance(frame.pose.yaw_rad, last.yaw_rad) >= PREFETCH_TURN_RAD
-        )
+    def _write_scan(self, views):
+        """整轮编码完成后汇总候选，按原有批次格式落盘并提交模型分析。"""
+        captured_views, candidates = [], {}
+        for view in views:
+            captured, visible_candidates = view.prepared.result()
+            captured_views.append(captured)
+            candidates.update({
+                _target_key(captured.map_frame_id, item.world_xy, item.candidate_id): item
+                for item in visible_candidates
+            })
+        self._enqueue_snapshot(tuple(captured_views), tuple(candidates.values()), "scan")
 
-    def _enqueue(self, views, candidates, source: str) -> None:
-        # 两个生产者按提交顺序写入并入队，磁盘速度不能改变 FIFO 顺序。
-        with self._enqueue_lock:
-            self._enqueue_snapshot(views, candidates, source)
+    def _scan_work_done(self, future):
+        """扫描后台失败是正式采集失败；移交主线程，不当作跳过或检测成功。"""
+        error = future.exception()
+        with self._condition:
+            self._scan_submissions.pop(future, None)
+            if error is not None and self._worker_error is None:
+                self._worker_error = error
+            self._condition.notify_all()
 
     def _enqueue_snapshot(self, views, candidates, source) -> None:
         # 相同拍摄帧只入队一次；无候选的检测批次同样保留。
-        """先冻结快照到磁盘，再发布 FIFO 任务；调用方持有提交锁以保证顺序。"""
+        """快照线程先写磁盘，再发布 FIFO 任务；不持有条件锁进行文件读写。"""
         key = tuple((view.map_frame_id, view.coverage.timestamp_s) for view in views)
         with self._condition:
-            if self._closed or key in self._submitted_keys:
+            if key in self._submitted_keys:
                 return
             candidates = tuple(
                 item for item in candidates
@@ -583,10 +554,6 @@ def _target_key(map_id, point, region_id):
 
 def _vantage_key(map_id, pose):
     return map_id, round(pose.x_m / 0.5), round(pose.y_m / 0.5), round(pose.yaw_rad / math.radians(15.0))
-
-
-def _turn_distance(first, second):
-    return abs((first - second + math.pi) % (2.0 * math.pi) - math.pi)
 
 
 __all__ = [

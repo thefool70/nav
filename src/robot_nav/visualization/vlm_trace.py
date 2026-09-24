@@ -134,7 +134,7 @@ class VlmTraceHistory:
             self.jobs.setdefault(item["job_id"], {}).update(ranked_cycle=self.cycle_index)
         parts = [f"C{self.cycle_index} / frame {frame_index}: {result.debug.stage}"]
         if result.debug.details.get("semantic_background_paused"):
-            parts.append("Ordinary VLM queue paused; motion prefetch disabled.")
+            parts.append("Ordinary VLM queue paused.")
         if received:
             parts.append("Received: " + ", ".join(f"J{item['job_id']}" for item in received))
         if sources:

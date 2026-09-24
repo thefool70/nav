@@ -31,16 +31,15 @@ def validate_environment(args) -> None:
         raise ValueError("真机导航必须显式提供 --enable-motion")
 
 
-def create_chassis(args, *, on_motion_frame=None, on_sample_frame=None,
-                   on_motion_plan=None, on_action_progress=print):
+def create_chassis(args, *, on_motion_frame=None,
+                   on_motion_plan=None, on_action_progress=print, on_chassis_status=None):
     """将环境参数与公共回调接到具体 Adapter；采样时机由设备实现决定。"""
     if args.adapter == "habitat":
         return HabitatChassisAdapter(
             HabitatConfig(scene_path=args.scene, seed=args.seed,
                           gpu_device_id=args.gpu_device_id,
                           max_unknown_path_m=args.max_unknown_path_m),
-            # 仿真逐步执行时提供帧，同一次回调完成预采样与显示。
-            on_motion_frame=on_sample_frame,
+            on_motion_frame=on_motion_frame,
             on_motion_plan=on_motion_plan,
         )
     if args.adapter != "hermes":
@@ -66,10 +65,11 @@ def create_chassis(args, *, on_motion_frame=None, on_sample_frame=None,
     )
     return HermesAdapter(
         config, on_motion_frame=on_motion_frame,
-        # 真机预采样由独立采集线程提供，不占用 Action 状态轮询。
-        on_continuous_frame=on_sample_frame,
+        # 真机连续帧仅供可视化，不生成模型任务。
+        on_continuous_frame=on_motion_frame,
         camera_factory=camera_factory(args),
         on_action_progress=on_action_progress, on_motion_plan=on_motion_plan,
+        on_chassis_status=on_chassis_status,
     )
 
 
@@ -127,11 +127,22 @@ def _move_hermes_forward_on_start(chassis: HermesAdapter, distance_m: float) -> 
 
 
 def _hermes_extrinsics_from_args(args: argparse.Namespace) -> CameraExtrinsics:
-    """读取 Hermes 标定文件，并用显式命令行参数逐项覆盖。"""
+    """启动时读取固定外参；六项配置齐全时不再读取旧标定文件。"""
+    if args.base_only:
+        return CameraExtrinsics()
+    complete = all(value is not None for value in (
+        args.camera_height_m, args.camera_forward_m, args.camera_left_m,
+        args.camera_yaw_deg, args.camera_pitch_down_deg, args.camera_roll_deg,
+    ))
+    if args.camera_source == "remote" and not complete:
+        raise RuntimeError(
+            "远程相机需要固定外参：先运行 "
+            "python hardware/hermes/fetch_camera_extrinsics.py --config config.json"
+        )
     calibration_path = Path(args.camera_calibration)
     calibrated = (
         load_camera_extrinsics(calibration_path)
-        if calibration_path.is_file()
+        if not complete and calibration_path.is_file()
         else CameraExtrinsics()
     )
     return CameraExtrinsics(

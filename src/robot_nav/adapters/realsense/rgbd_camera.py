@@ -61,8 +61,9 @@ class RgbdCamera:
             raise
 
 
-    def capture(self) -> RgbdCapture:
+    def capture(self, *, after_s: float = 0.0) -> RgbdCapture:
         """等待并返回一帧对齐 RGB-D；原始深度 0 保持为 0.0 无效值。"""
+        # 本地 SDK 每次等待 frameset；调用发生在 after_s 指定的动作结束边界之后。
         pipeline = self._require_open()
         timeout_ms = max(1, int(round(self.config.wait_timeout_s * 1000.0)))
         try:

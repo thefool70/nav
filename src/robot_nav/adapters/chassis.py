@@ -32,12 +32,16 @@ class MotionStalledError(RuntimeError):
     """移动已停止但当前位置仍可用，算法应从下一帧继续探索。"""
 
 
+class MotionBlockedError(RecoverableMotionError):
+    """确认路径受阻后持续未恢复平移，动作已取消并确认结束。"""
+
+
 class ChassisInterface(Protocol):
     """底盘最小接口：读取一帧感知，发送相对位姿控制命令。
 
     厂商原始协议、单位换算与坐标转换由具体实现负责，不在此猜测。当前调用
-    模式是同步的：发送函数返回后，下一次 ``read_frame`` 必须能反映本次命令
-    已完成或已明确失败。
+    发送函数返回表示已到位或已明确失败；Hermes 到位后可保留旧 Action，
+    由下一个运动命令替换。无下一动作时调用 stop，退出时由 close 收尾。
     """
 
     def read_frame(self) -> NavigationFrame:
@@ -46,6 +50,10 @@ class ChassisInterface(Protocol):
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
         """同步执行命令；可恢复的不可达或停滞使用对应显式异常。"""
+        ...
+
+    def stop(self) -> None:
+        """结束到位后可能残留的运动任务，并确认停止。"""
         ...
 
 

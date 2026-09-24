@@ -101,6 +101,7 @@ class HermesObservedMap:
             occupancy,
             source.resolution_m,
             self._inflation_radius_m,
+            visible_cells,
         )
         # 膨胀可以参考邻近的历史障碍，但结果只写回本帧更新区域。
         # 不能让视野内新障碍把视野外的未知格或历史自由格一并刷新。
@@ -167,7 +168,7 @@ class HermesObservedMap:
         resolution = self._require_resolution()
         cosine = math.cos(anchor.yaw_rad)
         sine = math.sin(anchor.yaw_rad)
-        occupancy = [[None for _ in row] for row in obstacle_map.occupancy]
+        occupancy = [[None] * len(row) for row in obstacle_map.occupancy]
         for (key_row, key_col), value in values.items():
             local_x = key_col * resolution
             local_y = key_row * resolution
@@ -324,17 +325,26 @@ def _inflate_obstacles(
     occupancy: list,
     resolution_m: float,
     radius_m: float,
+    update_cells: Set[Cell],
 ) -> None:
-    """把已见障碍周围一个底盘半径内的格子标为不可通行。"""
+    """只搜索能影响本帧更新区域的历史障碍；调用方仅取回 update_cells 的结果。"""
+    if not update_cells:
+        return
+    height, width = len(occupancy), len(occupancy[0])
+    margin = int(math.ceil(radius_m / resolution_m))
+    # 包围框向外扩一圈膨胀半径，不能漏掉视场外但会影响视场内净空的障碍。
+    first_row = max(0, min(row for row, col in update_cells) - margin)
+    last_row = min(height, max(row for row, col in update_cells) + margin + 1)
+    first_col = max(0, min(col for row, col in update_cells) - margin)
+    last_col = min(width, max(col for row, col in update_cells) + margin + 1)
+    # 先收齐原始障碍，再写膨胀结果，避免把本次新写的格子继续膨胀。
     occupied_cells = [
-        (row_index, col_index)
-        for row_index, row in enumerate(occupancy)
-        for col_index, value in enumerate(row)
-        if _is_occupied(value)
+        (row, col)
+        for row in range(first_row, last_row)
+        for col in range(first_col, last_col)
+        if _is_occupied(occupancy[row][col])
     ]
     offsets = _inflation_offsets(resolution_m, radius_m)
-    height = len(occupancy)
-    width = len(occupancy[0]) if height else 0
     for row, col in occupied_cells:
         for row_offset, col_offset in offsets:
             near_row = row + row_offset

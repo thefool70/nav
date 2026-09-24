@@ -6,7 +6,7 @@
 1. 读取一帧底盘数据。
 2. 向感知模块取回已完成的分析结果（新增覆盖与目标线索）。
 3. 推进搜索核心一次决策，得到显式请求的动作或外部能力请求。
-4. 按请求向感知模块补充一次结果（扫描拍摄、Frontier 评分、物体定位）。
+4. 按请求补充扫描画面或物体定位；需要 Frontier 评分时直接查询缓存。
 5. 记录决策与计时，再同步执行动作，把执行结果交回核心解释。
 6. 总循环记录执行后的结果，判断退出条件。
 
@@ -25,6 +25,7 @@ from .adapters.chassis import (
     ChassisInterface,
     KnownSpaceChassisInterface,
     MotionPathUnknownError,
+    MotionBlockedError,
     MotionStalledError,
     RecoverableMotionError,
 )
@@ -119,7 +120,7 @@ def run_navigation(
             NavigationStatus.NEEDS_FRONTIER_SCORES,
             NavigationStatus.NEEDS_OBJECT_LOCALIZATION,
         }:
-            # 一次周期只消费一组外部感知输入，状态机请求下一组输入时读取下一帧。
+            # 扫描后的缓存评分已在本周期处理；其他未满足的感知请求交给下一帧。
             continue
         if state.phase is SearchPhase.FAILED or result.status is not NavigationStatus.OK:
             return 1
@@ -156,6 +157,8 @@ def run_navigation_cycle(
     with measure_stage(timings, "cycle.navigate"):
         decision = navigate(frame, goal, working_state, timings=timings, frontier_cache=frontier_cache)
     # 核心只提出感知请求；运行层取得结果后，仍由核心决定下一步。
+    if decision.status is NavigationStatus.NEEDS_OBJECT_LOCALIZATION:
+        chassis.stop()  # 历史定位可能等待模型，不让上一动作在此期间继续运行。
     with measure_stage(timings, "cycle.supply_perception"):
         decision = _supply_perception(frame, goal, decision, perception,
             timings=timings, frontier_cache=frontier_cache,
@@ -167,7 +170,7 @@ def run_navigation_cycle(
     report_cycle_decision(frame, decision, started, timings,
                           on_cycle=on_cycle, on_timing=on_timing)
     # 先记录将要执行的决策，再同步运动；可恢复失败在返回前交给核心解释。
-    return _execute_action(chassis, decision, perception, frame)
+    return _execute_action(chassis, decision, frame)
 
 
 def _prepare_state(
@@ -196,7 +199,7 @@ def _supply_perception(
     timings: Optional[TimingSpans] = None,
     frontier_cache: Optional[FrameFrontierCache] = None,
 ) -> NavigationResult:
-    """按核心返回的显式请求，向感知模块补充一次结果并重新推进核心。"""
+    """补充一次采集或定位；扫描结束后可在同一帧内查询评分缓存并完成选点。"""
     if perception is None or decision.status in (
         NavigationStatus.INVALID_INPUT,
         NavigationStatus.MISSING_DATA,
@@ -214,6 +217,13 @@ def _supply_perception(
             timings=timings, frontier_cache=frontier_cache,
         )
 
+    if decision.status is NavigationStatus.NEEDS_SCAN_CAPTURE:
+        _sync_perception(frame, decision.state, perception)
+        decision = _capture_scan_direction(frame, goal, decision, perception,
+            timings=timings, frontier_cache=frontier_cache,
+        )
+
+    # 扫描最后一帧可能接着请求评分；只读已有缓存，无需为此重新采图或等待模型。
     if decision.status is NavigationStatus.NEEDS_FRONTIER_SCORES:
         request = decision.frontier_score_request
         if request is None:
@@ -224,27 +234,20 @@ def _supply_perception(
             timings=timings, frontier_cache=frontier_cache,
         )
 
-    if decision.status is NavigationStatus.NEEDS_SCAN_CAPTURE:
-        _sync_perception(frame, decision.state, perception)
-        return _capture_scan_direction(frame, goal, decision, perception,
-            timings=timings, frontier_cache=frontier_cache,
-        )
     return decision
 
 
 def _execute_action(
     chassis: ChassisInterface,
     decision: NavigationResult,
-    perception: Optional[SemanticPerception],
     frame: NavigationFrame,
 ) -> NavigationResult:
-    """同步执行动作并交回执行结果；期间按动作类型决定是否允许运动预采样。"""
+    """同步执行动作并交回执行结果，由核心处理可恢复失败。"""
     action = decision.action
     if decision.status is not NavigationStatus.OK or action is None:
+        chassis.stop()
         return decision
 
-    if perception is not None:
-        perception.set_motion_prefetch_enabled(_prefetch_allowed(action))
     try:
         _send(chassis, action, frame)
     except (MotionStalledError, MotionPathUnknownError, RecoverableMotionError) as exc:
@@ -253,6 +256,8 @@ def _execute_action(
                 rejected_path_world_xy=exc.path_world_xy,
                 unknown_length_m=exc.unknown_length_m, limit_m=exc.limit_m,
                 total_path_length_m=exc.total_path_length_m)
+        elif isinstance(exc, MotionBlockedError):
+            execution = ActionExecutionResult(ActionOutcome.PATH_BLOCKED, str(exc))
         else:
             execution = ActionExecutionResult(
                 ActionOutcome.STALLED if isinstance(exc, MotionStalledError)
@@ -261,14 +266,11 @@ def _execute_action(
         if recovered is None:
             raise
         return recovered
-    finally:
-        if perception is not None:
-            perception.set_motion_prefetch_enabled(False)
     return apply_execution_result(decision, ActionExecutionResult(ActionOutcome.SUCCEEDED))
 
 
 def _sync_perception(frame, state, perception):
-    """向采样线程发布冻结上下文，退出扫描时提交部分批次。"""
+    """更新扫描使用的冻结上下文，退出扫描时提交部分批次。"""
     if state.phase is not SearchPhase.SCANNING or target_handling_active(state):
         perception.flush_scan()
     perception.bind_frame(frame, capture_context(frame, state))
@@ -324,15 +326,6 @@ def _merge_perception_diagnostics(
     """把观测器诊断并入日志详情；仅用于解释与记录，不参与决策。"""
     details: Mapping[str, Any] = perception.diagnostics()
     return replace(decision, debug=replace(decision.debug, details={**decision.debug.details, **details}))
-
-
-def _prefetch_allowed(action: NavigationAction) -> bool:
-    """只在探索与返回的平移动作期间做视觉预采样，目标接近不预采样。"""
-    if action.action is not ActionKind.MOVE_TO_POSE:
-        return False
-    if action.purpose in (ActionPurpose.APPROACH, ActionPurpose.FALLBACK, ActionPurpose.REVISIT):
-        return False
-    return action.destination is not None
 
 
 def _send(chassis: ChassisInterface, action: NavigationAction, frame: NavigationFrame) -> None:

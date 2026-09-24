@@ -22,6 +22,7 @@ class CaptureContext:
     regions: Tuple[FrontierRegion, ...] = ()
     next_region_id: int = 0
     observation_points: Tuple[Tuple[float, float], ...] = ()
+    observed_views: Tuple[ObservationView, ...] = ()
 
 
 def capture_context(frame: NavigationFrame, state: SearchState) -> CaptureContext:
@@ -29,7 +30,8 @@ def capture_context(frame: NavigationFrame, state: SearchState) -> CaptureContex
     return CaptureContext(frame.obstacle_map.frame_id,
                           tried_candidate_points(state.observation_history),
                           state.blocked_frontier_regions, state.frontier_regions,
-                          state.next_frontier_region_id, state.scan_observation_points)
+                          state.next_frontier_region_id, state.scan_observation_points,
+                          state.observed_views)
 
 
 def preview_capture_candidates(

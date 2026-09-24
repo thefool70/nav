@@ -94,6 +94,10 @@ class HabitatChassisAdapter:
         """沿 navmesh 逐步移动到相对目标，再转到命令指定朝向。"""
         self._send_relative_pose(command)
 
+    def stop(self) -> None:
+        """仿真逐步执行在发送返回时已停止，没有后台运动任务。"""
+        pass
+
     def send_relative_pose_in_known_space(
         self, command: RelativePoseCommand, obstacle_map: ObstacleMap,
         *, reference_pose: Pose2D,

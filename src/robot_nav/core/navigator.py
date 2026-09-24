@@ -127,6 +127,7 @@ def apply_execution_result(decision: NavigationResult, execution: ActionExecutio
         return decision
     recovered = _recover_motion(decision, execution.reason,
         stalled=execution.outcome is ActionOutcome.STALLED,
+        path_blocked=execution.outcome is ActionOutcome.PATH_BLOCKED,
         rejected_path_world_xy=execution.rejected_path_world_xy)
     if recovered is not None and execution.outcome is ActionOutcome.PATH_UNKNOWN:
         from dataclasses import replace
@@ -144,6 +145,7 @@ def _recover_motion(
     reason: str,
     *,
     stalled: bool,
+    path_blocked: bool = False,
     rejected_path_world_xy: tuple = (),
 ) -> Optional[NavigationResult]:
     """按失败动作的显式类型与方向语义分派恢复处理。"""
@@ -190,7 +192,7 @@ def _recover_motion(
         )
 
     blocked_regions = state.blocked_frontier_regions
-    if rejected_path_world_xy:
+    if rejected_path_world_xy or path_blocked:
         from .models import BlockedFrontierRegion
 
         region = next((region for region in state.frontier_regions
@@ -209,6 +211,7 @@ def _recover_motion(
         state, reason,
         candidate_id=str(candidate_id), node_id=node_id,
         blocked_regions=blocked_regions,
+        block_region=bool(rejected_path_world_xy) or path_blocked,
         rejected_path_world_xy=rejected_path_world_xy,
     )
 

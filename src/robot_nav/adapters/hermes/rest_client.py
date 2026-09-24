@@ -65,12 +65,14 @@ class HermesRobotHealth:
 class HermesRestClient:
     """通过 Robot Agent HTTP API 读取 SLAM 数据并管理运动 Action。"""
 
-    def __init__(self, base_url: str, request_timeout_s: float) -> None:
+    def __init__(self, base_url: str, request_timeout_s: float, *,
+                 on_status: Optional[Callable[[str, Mapping[str, Any]], None]] = None) -> None:
         _validate_base_url(base_url)
         if not _is_positive_finite(request_timeout_s):
             raise ValueError("request_timeout_s 必须为正有限数")
         self.base_url = base_url.rstrip("/")
         self.request_timeout_s = float(request_timeout_s)
+        self._on_status = on_status
         # 底盘位于局域网，不能让系统的 HTTP_PROXY 接管 192.168.11.1。
         self._opener: OpenerDirector = build_opener(ProxyHandler({}))
 
@@ -136,11 +138,35 @@ class HermesRestClient:
             ),
             "机器人健康状态",
         )
+        if self._on_status is not None:
+            # 原始错误列表与固件扩展字段只供记录，不改变健康检查规则。
+            self._on_status("health", payload)
         return HermesRobotHealth(
             has_warning=_boolean_field(payload, "hasWarning"),
             has_error=_boolean_field(payload, "hasError"),
             has_fatal=_boolean_field(payload, "hasFatal"),
         )
+
+    def get_robot_events(self) -> list:
+        """读取平台事件原始批次，保留底盘启动毫秒时间戳及未知事件字段。"""
+        payload = self._request_json("GET", "/api/platform/v1/events")
+        if not isinstance(payload, list):
+            raise RuntimeError("Hermes 机器人事件不是数组")
+        for event in payload:
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                raise RuntimeError("Hermes 事件缺少 type 字符串")
+            if event["type"] == "PATH_OCCUPIED":
+                stamp = event.get("timestamp")
+                if not isinstance(stamp, str) or not stamp.isdigit():
+                    raise RuntimeError("Hermes PATH_OCCUPIED 缺少毫秒时间戳字符串")
+        return payload
+
+    def get_system_timestamp_ms(self) -> int:
+        """底盘启动毫秒数，用于排除动作开始前及恢复移动前的历史事件。"""
+        payload = self._request_json("GET", "/api/platform/v1/timestamp")
+        if not isinstance(payload, str) or not payload.isdigit():
+            raise RuntimeError("Hermes 系统时间戳不是毫秒数字字符串")
+        return int(payload)
 
     def get_action_names(self) -> Tuple[str, ...]:
         """读取本机固件实际支持的运动 Action 名称。"""
@@ -202,7 +228,7 @@ class HermesRestClient:
         action_id: int,
         timeout_s: float,
         poll_interval_s: float,
-        on_poll: Optional[Callable[[int, str], None]] = None,
+        on_poll: Optional[Callable[[int, str], Optional[float]]] = None,
         require_success: bool = True,
     ) -> None:
         """等待 Action 结束；主动取消后可关闭成功要求，以确认已进入终态。"""
@@ -222,6 +248,9 @@ class HermesRestClient:
                 "Action 状态",
             )
             state = _require_mapping(payload.get("state"), "Action state")
+            if self._on_status is not None:
+                # 在终态判断前记录，覆盖正常完成、失败及主动取消后的反馈。
+                self._on_status("action", payload)
             status = state.get("status")
             if isinstance(status, bool) or not isinstance(status, int):
                 raise RuntimeError("Hermes Action state 缺少整数 status")
@@ -249,9 +278,10 @@ class HermesRestClient:
                 raise HermesActionError(
                     f"Hermes Action {action_id} 超过 {timeout_s:.1f} 秒未结束"
                 )
-            if on_poll is not None:
-                on_poll(status, stage)
-            time.sleep(min(float(poll_interval_s), deadline - now))
+            # 临近到位时由监控器缩短下次查询间隔，常规监控仍按配置频率执行。
+            next_poll_s = on_poll(status, stage) if on_poll is not None else None
+            interval_s = poll_interval_s if next_poll_s is None else min(poll_interval_s, next_poll_s)
+            time.sleep(max(0.0, min(interval_s, deadline - time.monotonic())))
 
     def get_current_action(self) -> Mapping[str, Any]:
         """无当前任务时固件返回 404；通信失败不能当作空闲。"""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from ..core.models import (
@@ -72,26 +73,12 @@ def buffer_scan_image(
 
 
 def pack_rgb_image(image: RgbImage) -> VlmInputImage:
-    """把内部 RGB 序列复制为可记录、可编码的连续字节。"""
-    rows = image
-    height = len(rows)
-    width = len(rows[0]) if height else 0
-    if width < 1 or any(len(row) != width for row in rows):
-        raise ValueError("RGB 必须是非空矩形图像")
-
-    packed = bytearray(width * height * 3)
-    offset = 0
-    for row in rows:
-        for pixel in row:
-            if len(pixel) != 3:
-                raise ValueError("RGB 像素必须包含三个通道")
-            for channel in pixel:
-                packed[offset] = _rgb_channel(channel)
-                offset += 1
+    """按行打包已由 Adapter 规范化的 RGB，避免逐通道 Python 调用与赋值。"""
+    pixels = chain.from_iterable(image)
     return VlmInputImage(
-        width_px=width,
-        height_px=height,
-        rgb_bytes=bytes(packed),
+        width_px=len(image[0]),
+        height_px=len(image),
+        rgb_bytes=bytes(chain.from_iterable(pixels)),
     )
 
 
@@ -107,13 +94,6 @@ def visible_frontier_candidates(
     """只保留至少一张固定图像中有地面投影及深度支持的候选。"""
     ordered = tuple(sorted(images.items()))
     return tuple(candidate for candidate in candidates if _ground_projection_choices(candidate, ordered))
-
-
-def has_frontier_direction_in_view(
-    image: BufferedScanImage, candidates: Sequence[FrontierCandidate],
-) -> bool:
-    """运动采样沿用可见水平方位触发；地面锚点失败不能取消该帧的目标检测。"""
-    return any(_best_scan_frame(candidate, ((1, image),)) is not None for candidate in candidates)
 
 
 def build_semantic_analysis_sheet(
@@ -233,34 +213,6 @@ def _compose_sheet(
             sum(row_heights[:tile_row]) + tile_row * TILE_GAP_PX,
         )
     return VlmInputImage(sheet_width, sheet_height, bytes(sheet))
-
-
-def _best_scan_frame(
-    candidate: FrontierCandidate,
-    frames: Sequence[Tuple[int, BufferedScanImage]],
-) -> Optional[Tuple[int, float]]:
-    """选择候选水平方位最靠近画面中心的扫描帧。"""
-    choices = []
-    for frame_index, frame in frames:
-        delta_x = candidate.world_xy[0] - frame.pose.x_m
-        delta_y = candidate.world_xy[1] - frame.pose.y_m
-        world_heading = math.atan2(delta_y, delta_x)
-        camera_heading = frame.pose.yaw_rad + frame.camera_yaw_rad
-        relative_heading = _wrap_angle(world_heading - camera_heading)
-        if abs(relative_heading) < math.pi / 2.0:
-            source_x = (
-                frame.intrinsics.cx
-                - frame.intrinsics.fx * math.tan(relative_heading)
-            )
-            if 0.0 <= source_x < frame.width_px:
-                choices.append(
-                    (abs(relative_heading), frame_index, source_x)
-                )
-    if choices:
-        _, frame_index, source_x = min(choices)
-        return frame_index, source_x
-
-    return None
 
 
 def _resize_rgb(
@@ -452,22 +404,6 @@ def _copy_tile(
         ]
 
 
-def _rgb_channel(value: object) -> int:
-    if isinstance(value, bool):
-        raise ValueError("RGB 通道必须是 0 到 255 的整数")
-    try:
-        channel = int(value)
-    except (TypeError, ValueError):
-        raise ValueError("RGB 通道必须是 0 到 255 的整数") from None
-    if channel != value or not 0 <= channel <= 255:
-        raise ValueError("RGB 通道必须是 0 到 255 的整数")
-    return channel
-
-
-def _wrap_angle(value: float) -> float:
-    return (value + math.pi) % (2.0 * math.pi) - math.pi
-
-
 _DIGITS = {
     "V": ("101", "101", "101", "101", "010"),
     "F": ("111", "100", "110", "100", "100"),
@@ -489,7 +425,6 @@ __all__ = [
     "FrontierImageMarker",
     "buffer_scan_image",
     "build_semantic_analysis_sheet",
-    "has_frontier_direction_in_view",
     "pack_rgb_image",
     "visible_frontier_candidates",
 ]

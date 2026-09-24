@@ -119,7 +119,9 @@ def extract_frontiers(
         )
         candidate_groups = tuple(
             component
-            for component in _merge_frontier_fragments(frontier_cells, grid, resolution, ignored_unknown)
+            for component in _merge_frontier_fragments(
+                frontier_cells, grid, resolution, ignored_unknown, free_cells,
+            )
             if _frontier_span_m(component, resolution) >= minimum_span
         )
 
@@ -313,13 +315,12 @@ def _small_unknown_holes(
 
 def _merge_frontier_fragments(
     cells: Set[Cell], grid: GridValues, resolution: float,
-    ignored_unknown: Set[Cell],
+    ignored_unknown: Set[Cell], free: Set[Cell],
 ) -> Tuple[Set[Cell], ...]:
-    """合并未知侧朝向相近、自由区短路径不超过 0.30 m 的断段，不穿越障碍。"""
+    """复用本帧自由格，合并未知侧朝向相近且自由区短路径不超过 0.30 m 的断段。"""
     components = _connected_components(cells)
     owners = {cell: index for index, part in enumerate(components) for cell in part}
     normals = tuple(_unknown_side_normal(part, grid, ignored_unknown) for part in components)
-    free = _free_cells(grid)
     steps = int(FRONTIER_FRAGMENT_GAP_M / resolution)
     links = set()
     for index, part in enumerate(components):
@@ -387,7 +388,9 @@ def _normalize_grid(obstacle_map: ObstacleMap) -> GridValues:
     rows = tuple(tuple(row) for row in obstacle_map.occupancy)
     if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
         raise ValueError("occupancy must be a non-empty rectangular grid")
-    if any(value is not None and not math.isfinite(value) for row in rows for value in row):
+    # 扩图后大量行全为未知；先用元组计数跳过，避免逐格执行 Python 判断。
+    if any(value is not None and not math.isfinite(value)
+           for row in rows if row.count(None) != len(row) for value in row):
         raise ValueError("occupancy values must be finite numbers or None")
     return rows
 
@@ -397,6 +400,7 @@ def _free_cells(grid: GridValues) -> Set[Cell]:
     return {
         (row, col)
         for row, values in enumerate(grid)
+        if values.count(None) != len(values)
         for col, value in enumerate(values)
         if value is not None and value <= 0.5
     }
