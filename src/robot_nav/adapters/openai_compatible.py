@@ -311,7 +311,7 @@ def _chat_completions_payload(
     image_url: str,
 ) -> Mapping[str, Any]:
     """构造 Chat Completions 多模态请求。"""
-    return {
+    payload = {
         "model": config.model.strip(),
         "messages": [
             {
@@ -326,6 +326,11 @@ def _chat_completions_payload(
             }
         ],
     }
+    # SiliconFlow Qwen 关闭推理并约束 JSON 输出；字段结构仍由响应解析器校验。
+    if config.model.strip().lower() in {"qwen/qwen3.5-4b", "qwen/qwen3.8-27b"}:
+        payload["enable_thinking"] = False
+        payload["response_format"] = {"type": "json_object"}
+    return payload
 
 
 def _responses_payload(

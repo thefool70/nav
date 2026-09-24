@@ -10,6 +10,8 @@ import json
 import math
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+from json_repair import repair_json
+
 from .models import (
     SemanticAnalysis,
     SearchMode,
@@ -177,15 +179,12 @@ def _target_json(target_text: str) -> str:
 
 
 def _extract_json_mapping(text: str, result_name: str) -> Mapping[str, Any]:
-    """从可能带少量额外文本的回答中读取第一个 JSON 对象。"""
+    """正常 JSON 直接解析，语法损坏时修复；业务字段由调用方继续校验。"""
     raw = str(text).strip()
-    start = raw.find("{")
-    if start < 0:
-        raise ValueError(f"{result_name}回答中没有 JSON 对象")
     try:
-        payload, _ = json.JSONDecoder().raw_decode(raw[start:])
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{result_name}回答不是有效 JSON") from exc
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = repair_json(raw, return_objects=True, skip_json_loads=True)
     if not isinstance(payload, Mapping):
         raise ValueError(f"{result_name}回答必须是 JSON 对象")
     return payload
