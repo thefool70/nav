@@ -83,7 +83,7 @@
   启动点 0.50m 区域只初始化一次，扩图不补读该圆内的视场外新格。原点平移时
   按首次格网锚点投回当前数组；frame_id、分辨率或 yaw 变化才清空并重新初始化。
   该规则控制算法使用的 FOV 缓存，不改变 Hermes 内部 SLAM 与避障地图。
-  `adapters/hermes/adapter.py::_read_frame_locked` 还将同次读取的完整未膨胀图保留为
+  `adapters/hermes/adapter.py::_capture_frame` 还将同次读取的完整未膨胀图保留为
   `navigation_map`，供物体障碍定位和停靠；`navigation_clearance_m=0.36` 只在
   停靠规划时排除障碍邻域。完整图不得回写到 `HermesObservedMap` 的视场外缓存。
   `HermesObservedMap.update` 返回 `(obstacle_map, visibility_map)`；后者在膨胀前冻结，
@@ -303,9 +303,8 @@
   `snapshot_store.read_snapshot` 还原为元组。锚点按同一世界坐标匹配，不依赖队列重命名的
   candidate ID。拼图选择已通过深度检查的视角；没有可靠锚点或页脚容量不足
   就省略该候选评分，不能恢复旧的画面边缘兜底。
-- `has_frontier_direction_in_view` 只决定运动帧采样触发；可见方位没有可靠地面
-  锚点时仍提交画面检测目标，不能因评分不可用而删除这次检测。入队候选只含
-  有锚点者，避免为未请求的评分占用在途缓存键。
+- 视觉任务只来自前沿扫描，不再对运动帧选帧入队；相机持续采集和运动可视化不生成模型任务。
+  扫描画面没有可靠地面锚点时仍用于目标检测，入队候选只含有锚点者。
 - 已确认 `semantic-5zgxc5zj` 的前 16 个完成任务均为 `candidates=[]`、
   `frontier_projections=[]`、`frontier_scores={}`。对应
   `slamtec-l515-20260906-182020-217885.jsonl` 前 33 个决策的 70 条候选记录均无

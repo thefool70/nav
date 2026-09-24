@@ -5,15 +5,15 @@
 `NavigationFrame`，核心算法不包含思岚或 RealSense 分支。
 
 ```text
-Hermes 位姿 + 激光地图 ───────────────┐
-D435i RGB-D + 标定参数 ─► 有效地图处理 ─┼─► NavigationFrame ─► core
-D435i RGB ─► VLM 视觉队列 ─────────────┘
+本地 USB：RGB-D + 安装外参 + REST 位姿 ─┐
+随车 IPC：RGB-D + 同步底盘位姿 + 固定外参 ┼─► HermesAdapter ─► NavigationFrame ─► core
+Hermes 激光地图 ──────────────────────┘
 
 core 相对位姿 ─► 地图系目标 ─► Hermes MoveTo / Rotate Action
 ```
 
 Adapter、REST 客户端和外参读取都在 `src/robot_nav/adapters/hermes/`，包名与
-CLI 子命令均为 `hermes`。默认在本机采集 USB 图像和 IMU；
+CLI 子命令均为 `hermes`。默认在本机采集 USB RGB-D；
 相机连接随车笔记本时使用文末的远程采集方式。本机直连前关闭占用 D435i 的服务。旧 L515 安装外参不能用于这台相机。
 
 导航参数统一在根目录 `config.json`，命令行可以临时覆盖；规则见
@@ -86,7 +86,7 @@ hardware/hermes/run.sh \
 
 ## 相机安装外参
 
-项目不再提供自动标定程序。导航仍读取
+项目不再提供自动标定程序。本地 USB 模式读取
 `data/hermes_d435i/extrinsics.json`，也可用 `--camera-calibration` 指定已有外参文件。
 安装位置改变后，应通过外部测量或标定更新外参，不能沿用旧安装参数。
 
@@ -95,11 +95,25 @@ hardware/hermes/run.sh \
 `--camera-pitch-down-deg` 和 `--camera-roll-deg` 提供或覆盖。
 已有外参文件与历史标定数据不受程序移除影响。
 
-## 运行物体搜索
-
-先执行 `opencode auth login`，然后运行：
+远程模式使用 `config.json` 的 `camera_height_m`、`camera_forward_m`、`camera_left_m`、
+`camera_yaw_deg`、`camera_pitch_down_deg`、`camera_roll_deg` 六项固定外参。
+启动随车发布器及 SSH 隧道后，在开发机获取一次：
 
 ```bash
+python hardware/hermes/fetch_camera_extrinsics.py --config config.json
+```
+
+脚本从一包有效数据计算 `inverse(T_map_base) @ T_map_camera`，只更新这六个配置值。
+它不重新标定、不控制底盘；以后导航启动时读取配置，运行中不再计算安装外参。
+安装位置或发布器标定改变后重新获取。远程模式要求六项齐全；本地 USB 配齐六项时
+也直接使用它们，不再读取外参文件。单套配置应对应同一套相机安装。
+
+## 运行物体搜索
+
+先在当前终端加载独立保存的 SiliconFlow 凭据，然后运行：
+
+```bash
+source data/credentials/siliconflow.env
 hardware/hermes/run.sh \
   python -m robot_nav hermes \
   --target "门口" \
@@ -119,6 +133,10 @@ hardware/hermes/run.sh \
 模型环境解释器，`--object-class` 可提供简短 YOLO 类别，`--object-device` 默认
 为 `cuda`；`--object-yolo-model` 与 `--object-sam-checkpoint` 可指定权重。
 
+导航状态机、Frontier、地图处理与快照编码在 CPU 上执行；`--object-device`
+只控制本地视觉模型，不改变导航计算的设备。VLM 通过远程接口调用。
+`--debug-random-score` 不启动 YOLO/SAM2，不能用该模式评估 GPU 推理性能。
+
 ## 运行场景搜索
 
 ```bash
@@ -130,13 +148,19 @@ hardware/hermes/run.sh \
   --max-cycles 100
 ```
 
-场景模式不加载 YOLO-World 或 SAM2。扫描和部分运动画面进入 FIFO 队列，VLM
+场景模式不加载 YOLO-World 或 SAM2。前沿扫描画面进入 FIFO 队列，VLM
 在同一次请求中检查目的场景与评分 Frontier。缺少分数时按几何分继续探索；
 旧图检测到目标场景后返回拍摄位置并对齐朝向，到位即结束。未选方向暂存，新候选耗尽后
 逐个返回父节点，遇到有效方向再按原顺序恢复；返回父节点本身不额外扫描。
 
-默认 VLM 是 OpenCode Go 的 `qwen3.7-plus`，使用英文提示词并关闭 thinking。
-`ROBOT_NAV_VLM_API_KEY` 可以显式覆盖 OpenCode 本地凭据。
+当前 VLM 配置为 SiliconFlow 的 `Qwen/Qwen3.8-27B`，请求地址为
+`https://api.siliconflow.cn/v1/chat/completions`，格式为 `chat_completions`。
+使用英文提示词，当前模型请求显式设置 `enable_thinking=false`，并通过
+`response_format={"type":"json_object"}` 约束 JSON 输出。响应先正常解析 JSON，
+语法损坏时使用 `json_repair` 修复，不补造缺失的业务字段。返回后仍校验目标画面编号
+和评分字段；格式错误不当作“没有目标”。凭据文件导出 `ROBOT_NAV_VLM_API_KEY`，
+需在每个新终端中手动 `source`；该文件不纳入 Git，也不会被程序自动加载。
+这是云端服务，无需在随车笔记本启动本地 VLM 进程。
 
 ## 调试运动链路
 
@@ -158,7 +182,7 @@ hardware/hermes/run.sh \
 启动前移规划失败或停滞且已确认动作结束时，从实际位置开始搜索；扫描转向的
 可恢复失败也从实际朝向重新规划观察。
 
-后续探索一次下发选定的最终 Frontier，等待 Hermes 动作结束后，仅补查局部可见
+后续探索一次下发选定的最终 Frontier，等待 Hermes 到位后，仅补查局部可见
 且尚未检查的 Frontier 方向，再选择下一目标；两种模式没有待查方向时仍采集
 当前画面检查目标。新候选耗尽后，沿当前分支逐个返回；每到一个节点，有有效方向就继续探索，
 没有则再退一层。日志分别为 `backtrack.return` 和 `backtrack.resume`，
@@ -181,6 +205,8 @@ Hermes 原始栅格值在 Adapter 中转换为：
 2. 启动位置周围 0.50 m 仅初始化一次；之后也只有进入当前 FOV 才更新。
 3. 视场外保留上次记录的占用值，不跟随底盘新地图刷新；从未公开的区域保持未知。
 4. 障碍仍按 0.36 m 半径膨胀，膨胀结果也只写回本次允许更新的区域。
+   计算时只搜索更新区域包围框及其外扩膨胀半径内的历史障碍，避免每帧遍历全图；
+   视场外的邻近障碍仍参与净空计算。
 
 因此，机器人转开后，即使 Hermes 改变了背后的障碍格，探索图仍保留旧值；
 再次转回并覆盖该格时才刷新。地图扩展、原点平移时按世界位置保留缓存；坐标系、
@@ -207,12 +233,14 @@ Adapter 把相对平移转换成地图坐标后交给 `MoveToAction`，再用 `R
 时间；位姿到达与停滞判断在每次 Action 轮询执行，轮询间隔默认 0.2 秒。
 
 若 Action 仍为 `working`，但位置误差已不超过 0.30 m（平移）或角度误差已不超过
-5°（转向），且连续 0.001 秒内位姿变化小于 2 cm、1°，Adapter 主动结束该 Action。
-平移还必须已经产生有效进展，防止尚未起步就被当作到达。取消后确认 Action
-进入终态，并重新检查实际位姿，再开始下一步；终止或确认失败仍停止程序。
-日志会显示“按位姿确认到达，已主动结束并确认终态”。固件先报告完成时直接沿用
-正常完成流程。0.001 秒为配置的稳定门槛，实际至少等待后续轮询样本；
-轮询、网络与取消确认耗时另计。
+5°（转向），且连续达到 `action_arrival_hold_s`（当前 0.001 秒）的位姿变化小于
+2 cm、1°，Adapter 返回到位结果，保留旧任务，由下一 Action 直接替换。
+首次进入容差后，按剩余稳定时长尽早复查，不再固定多等一个 0.2 秒轮询间隔；
+实际时长包含接口请求，0.001 秒不是实时性保证。平移仍须已经产生有效进展。
+日志区分“到位交接”和固件报告的“完成”，并记录新旧 Action 的替换关系。
+下一目标仍在下一周期计算，因此这不等于提前规划或连续速度控制。
+没有下一动作、进入物体定位、执行异常或退出时，取消残留任务并确认终态。
+任务替换语义依据 [SLAMTEC SDK2.0 接口说明](https://wiki.slamtec.com/display/SD/SDK2.0%2BCommon%2BInterface%2BGuide)。
 
 Frontier、返回父节点与返回目标线索的相对命令使用决策帧位姿还原世界目标，发送前的最新位姿
 只用于剩余距离和反馈。日志分别记录 `reference_pose` 与 `start_pose`，避免
@@ -251,26 +279,68 @@ D435i 筛选后的算法地图，
 启动前移和扫描转向不启用它。
 
 - 单个 Action 默认总超时 120 秒。
-- `MoveToAction` 连续 1 秒平移不足 2 cm 时结束本次动作；原地转向不重置该计时。
+- `MoveToAction` 只在收到当前动作的新 `PATH_OCCUPIED` 后开始受阻计时。
+  等待上限沿用 `action_stall_timeout_s`（当前根配置 1 秒），从接收事件时起算，
+  不从机器人首次停住起算。离开受阻起点至少 `max(0.40 m, action_stall_translation_m)`
+  才清除计时，原地转向或厘米级抖动不算恢复。重复事件不延长等待，空事件不解除受阻。
 - `RotateToAction` 以 1° 为有效进展，进入目标朝向 5° 内并达到上述稳定门槛即可主动收尾。
 - Frontier 明确规划失败时淘汰当前方向并继续其他候选。
 - Frontier 路径未知长度超过上限时，记录累计长度、上限、首个未知格和被拒绝路径，取消并屏蔽整个区域。
-- 探索移动停滞时记录 `STALLED`，检查实际位置并在重新选点时避开本次停滞目标。
+- Frontier 持续受阻超时，取消并确认结束后屏蔽整个区域，本次运行不再尝试；
+  返回父节点、目标接近和启动前移走各自的失败恢复，不屏蔽 Frontier。
 - 物体模式停靠命令成功后直接完成，不再复检或测距；实际运动失败时每条线索最多尝试三次停靠。
 - 网络、相机、地图或健康状态异常仍会停止程序。
 
-普通 VLM 推理在后台进行，不阻塞 Action 监控；1 秒静止门槛仍只依据底盘动作
-的实际进展。Action 创建和后续读取均在异常收尾范围内，Adapter 退出也会取消
+普通 VLM 推理在后台进行，不阻塞 Action 监控。平移不再因短时无位移直接取消；
+没有受阻事件时仍保留整体 Action 超时。Action 创建和后续读取均在异常收尾范围内，Adapter 退出也会取消
 尚未结束的动作；取消或终态确认失败时停止程序。
 
 ## Rerun 与日志
 
-Rerun 默认开启，使用 `--no-rerun` 关闭。主要图形含义：
+当前配置默认开启 Rerun。常规导航与延迟对照使用 `--no-rerun`，需要可视化排错时
+通过 `--rerun` 按需开启，允许开启时有更高延迟。
+`logging.rerun_viewer` 选择 `web` 或 `native`，可用 `--rerun-viewer` 临时覆盖。
+随车配置为 `native`：在笔记本桌面终端运行时自动启动 Rerun App，
+通过本机 9878 端口传输实时数据，无需浏览器。纯 SSH 终端没有桌面显示环境时，
+请改用 `--rerun-viewer web`。两种方式都保存 RRD。关闭 Rerun 会同时关闭界面与 RRD
+录制，但保留 JSONL 决策与计时日志；终端 Frontier 调试输出
+由 `--debug-frontier` 单独控制。比较延迟时应保持这些开关一致。
+
+远程相机由常驻订阅线程持续接收完整 RGB-D/位姿包，只保留最新包；地图由另一
+线程独立请求并转换，每轮完成后等待 `motion_frame_interval_s` 再更新。导航与
+可视化读取这些快照，仅观察图更新和组帧串行执行。本地 USB 仍使用 SDK 同步
+取帧。模型仅分析前沿扫描选帧；相机持续接收和运动可视化不生成模型任务。
+动作返回后，远程组帧要求相机包在本机的接收时刻晚于动作结束，必要时只等待
+下一包；此条件不证明源端曝光发生于动作结束后。RGB-D 与位姿始终取自同一个包，
+地图独立更新，不保证与图像同时采集。地图更新失败会停止运行；最近一次成功更新
+超过 `request_timeout_s + motion_frame_interval_s` 也会拒绝继续使用。
+
+主要图形含义：
 
 - 绿色：Frontier；黄色：本轮选中点；橙色：算法命令。
 - 红色：实际提交给 Hermes 的地图目标。
 - 紫色：Hermes 返回的剩余规划路径。
 - 蓝色：机器人实际轨迹。
+
+`Chassis` 面板记录 Hermes 原始健康、Action 与平台事件反馈，随 RRD 保存和回放。
+`health` 包含健康标志、`baseError` 错误列表及固件附加字段；开启 Rerun 时，
+现有后台帧采集线程每轮额外读取一次健康信息，周期受 REST、相机采集和
+`motion_frame_interval_s` 共同影响。诊断读取失败显示 `read_error`，不沿用旧的正常状态。
+运动前的健康检查仍按原规则执行，读取失败或 error/fatal 仍会停止导航。
+`action` 复用运动轮询响应，保留任务编号、stage、state.status、result 和 reason，
+包括正常结束、失败与取消确认。它表示最后一次任务反馈，不保证此刻仍有活跃任务。
+`events` 在平移 Action 监控中读取并记录 `GET /api/platform/v1/events` 的每批事件，包括空数组和重复事件；
+可视化不按类型过滤、不去重，以便核对固件的实际返回语义。事件接口读取失败显示
+`read_error` 并取消动作、停止运行，不再把作为判断依据的读取失败当作普通诊断故障。
+`PATH_OCCUPIED` 表示路径受阻，`ROBOT_BLOCKED` 表示长时间受困（文档默认 3 分钟），
+另有 `CURRENT_POSE_OCCUPIED`、`BUMPER_TRIGGERED` 等事件，具体以设备返回为准。
+事件 `timestamp` 为底盘启动以来的毫秒数，不是 Unix 时间，不能直接与本机时间相减。
+各类响应带本机 `received_at`，未采集的项不显示；面板显示最近批次，完整历史通过
+RRD 时间轴回看。空批次不代表阻挡解除，历史事件也不代表当前仍受阻。
+事件监控不依赖 Rerun，空闲或转向期间不轮询事件；健康的后台诊断请求仅在开启
+Rerun 时执行。每次平移开始前通过 `/api/platform/v1/timestamp` 取得底盘时间水位，
+只处理更新的 `PATH_OCCUPIED`；恢复平移时推进水位，排除重复及迟到的旧事件。
+受阻起点、恢复和取消写入 Action 日志，区域屏蔽原因写入周期结果。
 
 World 隐藏候选的浮动标签；下方 `Live` 显示实时位姿和当前阶段，`Frontiers` 表格
 显示编号与暂存顺序，编号链接到对应点。VLM 和状态页显示当前分析与导航结果；
@@ -294,14 +364,31 @@ World 在占用图上按任务显示拍摄点，聚合邻近任务，完整视�
 
 - `cycle_start`：开始下一轮取帧，可与上一 Action 完成时刻比较循环间隔。
 - `cycle_timing`：从本轮入口到执行动作前的总耗时与 `spans`；不含底盘运动。
-  `frame.*` 区分取帧锁等待、相机采集、位姿/地图请求、地图转换、观察图更新和组帧；
+  `frame.*` 区分组帧锁等待、相机快照读取、位姿请求、地图快照读取、观察图更新和组帧；
   `frontier.*` 区分栅格准备、可达距离、边界与孔洞过滤、聚类、代表点生成、区域匹配、
   评分排序及选点提交。`semantic.*` 记录主线程感知/评分调用，后台 VLM 耗时仍看队列事件。
 - `callback_timing`：分别记录决策日志写入、可视化与终端调试回调的耗时。
 
+`frame.convert_rgb`、`frame.convert_depth` 是 `frame.build` 的子阶段。
+Action 创建后输出“下发计时”：`motion.ready_check` 为健康与定位许可检查，
+`motion.start_pose` 为发送前位姿，`motion.event_watermark` 为受阻事件水位，
+`motion.create_action` 为创建请求，`motion.monitor_pose` 为监控初始位姿。
+这些诊断不参与控制；比较动作衔接时，将“到位交接”或“完成”作为上一任务交回控制的时刻。
+
+`frame.build_lock_wait` 记录等待观察图更新锁的时间；`frame.map_snapshot` 只记录
+取得地图快照的时间，附带 `map_age_s`（本机距上次地图更新完成的秒数，不是执行
+耗时）。地图请求与转换已移到后台，不再计入主循环。旧的 `frame.schedule_wait`
+不再输出。所有本轮取帧阶段均包含在 `cycle.read_frame` 内。
+采集锁保护相机读取和历史观察图更新；固定快照后的 RGB-D 转换（`frame.build`）
+在锁外进行。前台和后台仍可能在采集、地图更新阶段互相等待。
+
 每个 span 带 `started_monotonic_s`、`ended_monotonic_s`、`duration_s` 和 `completed`。
-`snapshot.*` 进一步拆分主线程观测中的前沿预览、观察点、图像投影、覆盖计算、深度
-编码和整轮提交；提交包含队列锁等待、RGB 压缩、文件写入及队列事件回调。
+主线程的 `snapshot.*` 记录前沿预览、观察点、覆盖计算和整轮写盘任务提交；
+`snapshot.submit` 不再包含后台文件写入。扫描图像打包、投影与深度压缩移到
+串行快照线程，其阶段计时保存在 `semantic_queue` 的 `scan_prepared` 事件中，
+通过 `timestamp_s` 关联拍摄帧。该事件仅记录编码完成，实际写盘并发布模型任务
+仍以 `queued` 事件为准。`scan_prepared` 仅写 JSONL，不刷新 Rerun；
+编码完成和入队都不表示模型已经分析。
 `frontier.cache_hit` 表示复用了本周期同帧、同排除集的提取结果；前沿计时也包含
 快照预览中的调用。命中缓存时不会出现该次提取的准备、BFS、聚类等子阶段。
 同名阶段多次调用会逐条保留；`cycle.*` 包含内部的 `frame.*`、`frontier.*` 等子阶段，
@@ -322,8 +409,7 @@ Action 进度中的 `unknown_path=当前长度/允许上限` 使用米；取消�
 等待不占 `--max-cycles` 额度；中断、决策上限或设备故障仍会结束运行。
 
 运行中的 Rerun 回调或 JSONL 写入失败会停用对应记录功能并提示，不终止导航。
-语义快照是待检测输入：正式扫描快照写入失败仍会停止，运动提前采样失败只跳过
-该次采样并记录原因；二者不能按普通日志故障处理。
+语义快照是待检测输入：正式扫描快照写入失败仍会停止，不能按普通日志故障处理。
 
 Rerun 开启时，还会从启动开始持续写入 `data/run_logs/rerun-*.rrd`，保存图像、
 深度、完整地图、界面状态和默认布局，终端打印完整路径。
@@ -335,10 +421,49 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB），WebSocket 服务缓�
 补回旧帧。正常退出时 SDK 刷新并关闭录制；强制杀进程或断电可能丢失最后
 尚未写出的数据。磁盘文件会随运行持续增长。
 
+## 在随车笔记本运行导航
+
+随车部署目录为 `/home/hri/nav`，使用独立环境 `/home/hri/nav/.venv`（Python 3.11）。
+代码与开发机共用同一实现；发布器仍使用原来的环境，不安装到导航环境中。
+该 venv 基于随车已有 Conda Python 创建，因此需保留
+`/home/hri/miniconda3/envs/robot-nav` 的基础解释器。
+
+随车目录的 `config.json` 使用 `camera_source=remote`、
+`camera_endpoint=ipc:///tmp/rgbd_pose.ipc` 和 `base_url=http://192.168.11.1:1448`，
+默认 `no_rerun=true`。这里 `remote` 表示读取发布器协议，不要求跨机器。
+固定安装外参沿用开发机配置，YOLO、SAM2 和 CLIP 权重保存在随车目录。
+无需开发机相机或底盘转发；发布器按原方式启动，勿重复启动。
+
+随车笔记本通过 Wi-Fi 访问云端模型，有线连接用于底盘。底盘 DHCP 提供的
+`192.168.11.1` 不接受 DNS 查询，因此有线连接 `Wired connection 1` 已设置
+`ipv4.ignore-auto-dns=yes` 和 `ipv6.ignore-auto-dns=yes`，域名由 Wi-Fi DNS 解析。
+若重新创建有线连接后出现 `Temporary failure in name resolution`，检查
+`resolvectl status`，避免再次将底盘地址用作 DNS；无需修改模型或密钥。
+
+登录随车笔记本后：
+
+```bash
+cd /home/hri/nav
+source .venv/bin/activate
+python -m robot_nav hermes --preflight-only
+```
+
+确认现场可运动后，复现随机评分导航（会执行配置中的启动前移）：
+
+```bash
+python -m robot_nav hermes --target chair --debug-random-score --enable-motion --max-cycles 100
+```
+
+正式搜索去掉 `--debug-random-score`，并先执行
+`source data/credentials/siliconflow.env`。本次配置的 SiliconFlow 凭据已独立保存，
+后续部署代码时不要将凭据纳入代码包。日志保存在随车
+`/home/hri/nav/data/run_logs/`。依赖安装与文件迁移不代表模型推理或导航验收通过。
+
 ## 随车笔记本转发
 
-随车端只做 D435i 采集、深度对齐和 ZMQ 发布，开发机运行导航、地图处理、
-本地模型与动作监控。底盘仍经 SSH 转发；两条通道共用 `HermesAdapter`。
+随车端完成 D435i 采集、深度对齐、底盘位姿时间插值和相机位姿计算，并将它们
+打包发布。开发机运行导航、地图处理、本地模型与动作监控；地图和实时控制
+仍通过 SSH 转发后的 REST 访问 Hermes，两条通道共用 `HermesAdapter`。
 
 开发机安装远程相机可选依赖（不需要为远程采集安装 RealSense SDK）：
 
@@ -346,17 +471,20 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB），WebSocket 服务缓�
 python -m pip install -e '.[remote-camera]'
 ```
 
-随车端使用原有 `/home/hri/camera/realsense_publisher.py`，本项目不维护或修改
-发布器副本。随车环境需要 `pyrealsense2`、`numpy`、`pyzmq`、`msgpack`。
-在随车笔记本启动原发布器（默认 IPC 地址）：
+随车端使用 `/home/hri/data_publisher/rgbd_pose_publisher.py`，接口文档为同目录下的
+`README_rgbd_pose_protocol.md`。本项目不维护发布器副本。随车环境使用
+`pyrealsense2`、`numpy`、`pyzmq`、`msgpack`、`scipy`，开发机不需要 RealSense SDK 或 scipy。
+在随车笔记本启动发布器：
 
 ```bash
-python3 /home/hri/camera/realsense_publisher.py
+cd /home/hri/data_publisher
+python rgbd_pose_publisher.py
 ```
 
-如果随车端有本仓库，也可运行 `bash hardware/hermes/run_camera.sh`，脚本仅调用上述原文件。
-两种启动方式选其一；多相机时添加 `--serial <SERIAL>`。导航要求保持默认深度到彩色
-对齐，不能使用 `--no-align`。原消息没有对齐状态字段，接收端无法自动判断是否关闭了对齐。
+如果随车端有本仓库，也可运行 `bash hardware/hermes/run_camera.sh`，脚本仅调用上述文件。
+两种启动方式选其一。新发布器不解析命令行参数，序列号通过其 `CAMERA_SERIAL`
+配置；导航要求保持 `ALIGN_DEPTH_TO_COLOR=True`。协议未携带对齐开关，接收端
+不能仅凭图像尺寸确认对齐。发布器的 `ROBOT_IP` 应与底盘转发指向同一台 Hermes。
 
 开发机另开终端建立 SSH 转发并保持运行：
 
@@ -367,11 +495,14 @@ bash hardware/hermes/tunnel.sh
 默认随车主机 `hri@10.113.45.27`，底盘 `192.168.11.1:1448`。
 可用 `ROBOT_NAV_ONBOARD_HOST`、`ROBOT_NAV_HERMES_HOST` 覆盖。
 相机使用 SSH Unix 套接字转发：开发机 `/tmp/robot-nav-camera.sock` →
-随车端 `/tmp/ngd_frames.ipc`；底盘仍以 TCP 转发到 `11448`。
+随车端 `/tmp/rgbd_pose.ipc`；底盘仍以 TCP 转发到 `11448`。
 可用 `ROBOT_NAV_LOCAL_CAMERA_SOCKET`、`ROBOT_NAV_REMOTE_CAMERA_SOCKET` 改两端路径；
 修改本地路径时同步修改导航的 `--camera-endpoint`。SSH 服务端须允许 StreamLocal 转发。
 隧道不自动覆盖已有本地 socket；退出后若残留该文件，确认旧隧道已关闭再移除它后重建。
 SSH 交互认证或使用现有密钥，仓库不保存密码。
+更换发布器后须退出旧隧道并重新建立；自定义 `config.json` 的 `camera.camera_topic`
+也需改成 `rgbd.pose`。
+首次使用或安装标定变化后，先按“相机安装外参”一节获取并保存固定外参，再运行导航。
 
 ```bash
 python -m robot_nav hermes --camera-source remote \
@@ -383,23 +514,46 @@ python -m robot_nav hermes --camera-source remote \
   --target "chair" --enable-motion
 ```
 
-`--camera-url` 和旧 HTTP 服务已移除。远程方式无需在开发机运行 USB 转发脚本。
-远程导航使用已有有效安装外参，不要求发布器提供 IMU。
+远程方式无需在开发机运行 USB 转发脚本，也不要求发布 IMU。
 
-原协议依次为 topic、msgpack 元数据、RGB8、本机字节序 uint16 深度；
-随车 x86 主机为小端，接收端按小端读取。深度乘 `depth_scale_m`
-变成米，采用彩色内参。占位的 tracking/pose/map 字段不参与导航，位姿与地图只来自 Hermes。
-默认 640×480、30 FPS 的 RGB-D 原始载荷约 46 MB/s；PUB 持续采集，但导航按需订阅。
-每次读取创建独立订阅，避免导航暂停期间积压消息；断流超时失败，不返回缓存画面。
-发布器重启后下一次读取重新建立订阅，正在进行的读取仍可能超时并结束导航。
+接收端只接受 `rgbd_pose` v2：四段依次为 `rgbd.pose`、msgpack 元数据、RGB8、
+小端 uint16 深度。深度乘 `depth_scale_m` 转为米；深度已对齐到彩色图，使用
+`color_intr`。v2 的 `depth_intr` 描述对齐后的深度图，原始深度内参另存于
+`depth_intr_raw`。接收端要求 `depth_aligned_to=color`、`depth_frame=color_optical`
+且深度宽高与彩色图一致；一次性外参脚本要求 `T_map_camera_frame=color_optical`。
+随车协议 README 若仍写 v1，以当前发布器源码中的 v2 字段为准。
 
-帧时间戳采用开发机接收时的单调时钟。`--camera-timeout-s` 默认 3 秒，仅限制
-连接和等待消息的时间，不证明传感器到接收端的绝对帧龄。Global Time 对齐到随车主机，
-不能替代两台主机的时钟同步；未同步时不能用 Unix 时间相减验收网络延迟。
-相机和底盘位姿仍顺序读取，不是硬件同步。`receiver.py` 是独立诊断脚本，
-随车端继续使用默认 `ipc:///tmp/ngd_frames.ipc`，开发机使用
-`--endpoint ipc:///tmp/robot-nav-camera.sock`。其中丢帧和延迟统计不能直接当作
-导航验收结论。上述链路仍需实际运行验收。
+| 发布数据 | 导航使用方式 |
+| --- | --- |
+| `T_map_base` | 提取 x、y、yaw，作为该帧的底盘 `pose`，不再另查 REST 替换 |
+| `T_map_camera` | 仅一次性获取外参脚本使用，导航接收器不读取 |
+| `timestamp_ns` | 转为 `NavigationFrame.timestamp_s`，保留 RGB 采集时刻的 Unix 秒数 |
+| `frame_id` | 发布帧序号，不作为地图坐标系名称 |
+
+FOV、图像投影和物体定位继续使用“同步底盘二维位姿 + 固定安装外参”，
+保持当前底盘近似水平、地面 `z=0` 的算法假设。
+
+接收端校验版本、图像编码、同步有效标记与变换矩阵。无效同步位姿直接报错，
+不拼接“旧图像 + 最新 REST 位姿”。地图和动作执行反馈仍单独读取 REST；
+地图不在同步包内，也不保证与图像同一采集时刻。
+
+默认 640×480、30 FPS 的 RGB-D 原始载荷约 46 MB/s；常驻订阅会持续使用链路
+带宽。接收线程独占 socket，完整消息解码后原子替换最新包，不排队保存历史帧；
+ZMQ 接收高水位为 1。断流超时后报错，不无限沿用最后一帧，也不静默重试。
+
+`--camera-timeout-s` 默认 3 秒，用于首次等帧、动作后等新包及接收断流判断。
+快照读取同时检查本机接收龄。接收龄和源端图像时间是两回事：网络缓冲、发布器
+延迟可能让刚收到的包也已经滞后；本机检查不证明传感器到接收端的绝对帧龄。
+源端 Unix 时间不与开发机单调时间相减，两机未同步时也不能直接相减估计网络延迟。
+
+发布器用 REST 请求/响应的墙钟中点估计底盘采样时刻，再对 RGB 时刻插值。
+默认要求前后位姿间隔各不超过 100 ms、各自 RTT 不超过 40 ms，等待后侧位姿
+最多 120 ms；无法同步时默认丢帧。因此接收超时也可能由底盘位姿请求或同步失败
+造成，应查看发布器的 `skip_reasons`。这属于软件时间对齐；深度与 RGB 的时间差
+只在 `camera_debug` 中记录，深度空间对齐不表示二者硬件同一时刻曝光。
+
+导航日志与历史快照沿用原有结构，保存算法使用的拍摄位姿、时间和固定外参。
+发布器同步诊断在随车端查看。验收时先做只读预检，再检查图像投影、历史定位和运动后的新帧。
 
 ## 底盘操作面板
 
@@ -442,14 +596,14 @@ GUI 入口与操作编排在 `chassis_gui.py`，页面在 `chassis_gui.html`，�
 | `--base-url` | Robot Agent 地址，默认 `http://192.168.11.1:1448` |
 | `--search-mode` | `object` 或 `scene`，默认 `object` |
 | `--action-timeout-s` | 单 Action 总超时，默认 120 秒 |
-| `--action-stall-timeout-s` | 连续静止门槛，默认 1 秒 |
+| `--action-stall-timeout-s` | 平移确认受阻后的等待上限；转向无进展上限，当前根配置 1 秒 |
 | `--max-unknown-path-m` | 当前剩余路径允许的累计未知长度，默认 1.5 m；超过才取消，0 表示不允许正长度未知段 |
 | `--min-localization-quality` | 定位模式最低质量，默认 1 |
 | `--camera-source` | `local`（默认）或 `remote`，不改变导航实现 |
-| `--camera-endpoint` / `--camera-topic` | ZMQ 地址和主题，默认 `ipc:///tmp/robot-nav-camera.sock` / `ngd.frame` |
+| `--camera-endpoint` / `--camera-topic` | ZMQ 地址和主题，默认 `ipc:///tmp/robot-nav-camera.sock` / `rgbd.pose` |
 | `--camera-timeout-s` | 等待新消息的上限，默认 3 秒 |
 | `--camera-serial` | 本地 USB 模式的 D435i 序列号；远程模式在服务端指定 |
-| `--camera-calibration` | 完整相机外参 JSON，默认 `data/hermes_d435i/extrinsics.json` |
+| `--camera-calibration` | 本地 USB 的外参文件；六项固定外参配齐时不再读取，远程使用六项配置 |
 | `--debug-frontier` | 打印本轮 Frontier 评分明细 |
 | `--rerun-save` | 指定 RRD 录制路径，默认自动创建 |
 | `--no-rerun` | 关闭 Rerun 界面及录制 |

@@ -70,10 +70,10 @@ ChassisInterface ──► NavigationFrame
 
 | 模式 | 发现目标 | VLM 的作用 | 后续行为 |
 | --- | --- | --- | --- |
-| 物体搜索 | 后台检查扫描和移动中采集的固定画面 | 联合检测与评分；接近时可用本地模型提供目标框 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
-| 场景搜索 | 后台检查扫描和移动中采集的固定画面 | 同一次请求判断场景与评分 Frontier | 返回拍摄位置并对齐朝向，搜索完成 |
+| 物体搜索 | 后台检查前沿扫描采集的固定画面 | 联合检测与评分；接近时可用本地模型提供目标框 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
+| 场景搜索 | 后台检查前沿扫描采集的固定画面 | 同一次请求判断场景与评分 Frontier | 返回拍摄位置并对齐朝向，搜索完成 |
 
-两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，动作结束后
+两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，到位后
 再观察和选择下一目标。新出现的 Frontier 优先探索，未选方向暂存；新候选耗尽
 后，沿当前分支逐个返回父节点，直到到达仍有有效探索方向的节点，再继续寻找。
 启动与后续扫描共用同一规则，只观察局部可见且尚未检查的 Frontier 方向。
@@ -85,7 +85,7 @@ ChassisInterface ──► NavigationFrame
 
 命令行默认使用异步 FIFO 视觉队列。每轮扫描收齐后，将全部画面拼成一张图，
 在同一次请求中提取目标线索并评分 Frontier。扫描转向不额外提交单图，探索和分支回退的
-平移动作途中保留提前采样。缺少语义分时按几何分继续走，评分只在下一次决策生效。
+模型任务只来自前沿扫描，平移动作途中不再选帧入队。缺少语义分时按几何分继续走，评分只在下一次决策生效。
 后台检测到目标后按模型顺序处理线索。场景模式返回拍摄位置并对齐朝向后完成，
 不进行到场视觉复查。物体模式先在历史 RGB-D 上定位，YOLO 或 VLM 任一路
 检出即可使用；优先用 SAM2 掩码，分割失败时直接用检测框内深度。无法用深度定位时，
@@ -95,13 +95,17 @@ ChassisInterface ──► NavigationFrame
 历史定位失败时留在当前位置，继续下一条线索，并处理已采集但尚未分析的画面。
 全部历史线索都无法定位时，才保底返回首条线索的拍摄位姿并停止，不再重采或继续探索。
 实际运动失败时可换点，每条已定位线索最多尝试三次停靠；均失败且历史队列耗尽后恢复探索。
-当前线索定位和接近期间暂停普通队列与运动采样，迟到结果暂存；需要更多历史线索时
+当前线索定位和接近期间暂停普通队列，迟到结果暂存；需要更多历史线索时
 只恢复已有队列的分析，不为此新增运动。
 有效探索方向耗尽后先等待队列，模型失败不冒充“已经检查”。
 
 Hermes 与 Habitat 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
 未知区的累计长度超过 1.5 m 才取消动作，在本次运行中持续禁止向整个连通 Frontier 区域探索移动并转向其他候选，
 避免在同一片边界内换点反复取消。
+
+Hermes 平移收到新的路径受阻事件后等待恢复；超过配置时长仍未恢复有效平移，
+取消并确认停止。Frontier 探索因此结束时，本次运行屏蔽选中的整个区域；
+短暂等待后恢复移动则继续原任务。具体门槛与事件采集见 Hermes 文档。
 
 两种环境只在 `environment.py` 中创建各自 Adapter；感知、日志、回调和导航循环
 统一在 `launch.py` 装配。只读预检独立运行，启动前移仅用于真机。
@@ -141,6 +145,7 @@ python -m pip install -e '.[visualization]'
 项目根目录的 `config.json` 集中保存导航的常用参数，按 navigation、habitat、
 hermes、camera、perception、logging 分组。默认读取当前目录下的该文件；
 切换工作目录时通过 `--config /绝对路径/config.json` 指定，配置文件必须完整。
+每组的 `_comments` 保存参数中文说明，加载时忽略；文件保持标准 JSON 格式。
 命令行显式参数优先于文件，配置中的相对文件路径以配置文件所在目录为基准，
 命令行相对路径仍以当前工作目录为基准。
 
@@ -152,15 +157,21 @@ python -m robot_nav hermes --config config.json --target "chair" --enable-motion
 
 随车笔记本方式将 `hermes.base_url` 改为 `http://127.0.0.1:11448`，
 `camera.camera_source` 改为 `remote`；相机 IPC 地址已在 camera 组中。
+远程主题为 `rgbd.pose`，接收随车发布器打包的 RGB-D 与同步底盘位姿。
 仓库默认仍保持本地 USB 与底盘直连，不因加载配置自动改变连接方式。
 
 `navigation.target` 的 null 表示本次需要指定目标；`perception.object_python` 的 null
 表示自动查找已有 robot-nav 模型环境。`hermes.startup_forward_m` 默认 1 米，设为 0
-可跳过真机启动前移。外参文件仍独立，`camera.camera_calibration` 只保存其路径。
+可跳过真机启动前移。固定外参保存在 camera 组已有的六个高度、偏移和角度字段中；
+远程方式先用 `hardware/hermes/fetch_camera_extrinsics.py` 获取一次，导航启动时读取。
+本地 USB 未配置齐六项时仍可用 `camera.camera_calibration` 指定外参文件。
 密钥继续通过环境变量或已有凭据读取。
 `navigation.max_unknown_path_m` 是两种环境共用的未知路径长度上限（默认 1.5 米），
 从原来的 `hermes.max_unknown_path_m` 移到此处；自定义配置文件也需同步移动该字段。
 `--enable-motion`、`--preflight-only`、`--base-only` 只接受命令行设置，不能写入配置。
+
+`logging.rerun_viewer` 选择网页 `web` 或桌面 App `native`；可用
+`--rerun-viewer native` 临时覆盖，录制方式不变。
 
 配置布尔值可临时覆盖：`--rerun` / `--no-rerun`、`--debug-random-score` /
 `--no-debug-random-score`、`--debug-frontier` / `--no-debug-frontier`。
@@ -199,14 +210,16 @@ python -m robot_nav hermes --preflight-only
   启动区域仅初始化一次。物体障碍定位和停靠使用完整导航图，选点时保留 0.36 m 净空。
   观测方向和覆盖使用同一 FOV 缓存的未膨胀视觉图，避免把导航净空带误判为遮挡。
   该视觉图中的封闭小未知孔洞不产生探索与补查候选，地图本身仍保留未知状态。
-  实际位姿到达并稳定后主动结束 Action，确认终态后继续。
+  实际位姿到达并稳定后交回决策，下一 Action 直接替换旧任务；无下一动作及退出时取消收尾。
   本地直连与经随车笔记本转发共用同一套地图处理、运动监控与导航实现；
-  转发只传输相机数据与底盘网络通信，算法、地图处理和动作控制仍在开发机。
+  随车发布器完成 RGB-D 与底盘位姿的时间对齐；相机安装外参启动时从配置读取。
+  算法、地图处理和动作控制仍在开发机。地图和实时运动反馈继续读取 Hermes REST。
 - Rerun：显示 RGB、深度、地图、Frontier、机器人轨迹、算法目标、底盘目标和
   规划路径，同时持续写入 `data/run_logs/rerun-*.rrd`。`--rerun-save <PATH>`
   可指定新文件路径；`--no-rerun` 同时关闭界面和录制。
   `VLM summary` 简要关联任务、请求与导航使用；`VLM full` 保留完整会话信息。
   World 将占用图、机器人和任务标记放在一起，同次扫描只画一个点，邻近任务合并显示。
+  扫描期间显示本轮全部计划朝向，并用箭头突出当前待执行方向；扫描计划结束后清除。
   右侧直接展示当前推理的 RGB 与评分；`Observations` 中点击 J 查看整组、V 查看
   单图评分卡，原图通过 raw 链接查看。完整点位保留在 `World history`。
 - 导航 JSONL 日志（Hermes / Habitat）：记录每周期决策、候选评分和 Action 反馈，供事后复盘。
@@ -240,7 +253,7 @@ python -m robot_nav hermes --preflight-only
 | `src/robot_nav/core/path_validation.py` | 测量实际规划路径在算法未知区内的累计长度 |
 | `src/robot_nav/core/object_grounding.py` | RGB-D 定位与图像方向上的障碍位置假设 |
 | `src/robot_nav/core/object_standoff.py` | 在目标周围搜索满足净空与连通条件的停靠点 |
-| `src/robot_nav/perception/semantic_queue.py` | 取帧、FIFO 联合分析、提前采样与迟到结果接收 |
+| `src/robot_nav/perception/semantic_queue.py` | 扫描快照、FIFO 联合分析与迟到结果接收 |
 | `src/robot_nav/perception/analyzer.py` | 语义分析的模型边界协议 |
 | `src/robot_nav/perception/snapshot_store.py` | 语义快照的写入与读取 |
 | `src/robot_nav/adapters/habitat/` | Habitat Adapter |
