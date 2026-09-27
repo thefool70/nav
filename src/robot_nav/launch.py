@@ -23,6 +23,7 @@ from .adapters.openai_compatible import (
 )
 from .perception.analyzer import SemanticAnalyzer
 from .adapters.random_observer import RandomScoreTargetObserver
+from .adapters.ollama_warmup import warmup_local_qwen
 from .perception.object_localizer import ObjectLocalizerConfig
 from .core.models import SearchMode
 from .perception import SemanticPerception
@@ -154,7 +155,8 @@ def _build_analyzer(
             "移动和重新选点，无法识别或到达语义目标。"
         )
         return RandomScoreTargetObserver()
-    # 同一次导航共用会话标识，普通队列与物体定位请求均沿用它。
+    warmup_local_qwen(args.vlm_endpoint, args.vlm_model, args.vlm_api_format)
+    # 同一次导航共用会话标识。
     session_id = uuid4().hex
     print(f"VLM 配置：{args.vlm_model}，会话 {session_id}", flush=True)
     return OpenAICompatibleTargetObserver(

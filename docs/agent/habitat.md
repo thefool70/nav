@@ -286,6 +286,11 @@
   `OpenAICompatibleTargetObserver` 拒绝非 stop 的 chat completions 结束原因；
   本地 `qwen3.5:4b` 使用 JSON Schema、零温度、关闭思考、输出上限 128 token。
   Ollama 0.34.4 实测不能依赖 Schema 的 minimum/maximum 保证数值范围，解析器校验必须保留。
+  随车模型服务使用 `OLLAMA_KEEP_ALIVE=5m`，不再使用服务 `ExecStartPost` 预热。
+  `launch.py::_build_analyzer` 在随机模式分支之后调用 `adapters/ollama_warmup.py`，
+  仅对本机 `qwen3.5:4b` 预热视觉输入，请求显式 `keep_alive=5m`；无保活心跳。
+  预热发生在设备创建之前，失败即终止启动。GPU 发现期间 `/api/version` 可能超时，
+  预热函数在有界等待中处理该超时。其他客户端请求可覆盖 Ollama 的卸载计时。
 
 - `SemanticPerception.begin_cycle` 接收结果：检测有效才登记覆盖，评分失败仍可保留目标线索。
   `_pending_coverage` 在结果被主循环接收前一直保留；失败后移除，不冒充已检查。

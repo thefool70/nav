@@ -160,7 +160,54 @@ hardware/hermes/run.sh \
 语法损坏时使用 `json_repair` 修复，不补造缺失的业务字段。返回后仍校验目标框或场景判断
 和评分字段；格式错误不当作“没有目标”。凭据文件导出 `ROBOT_NAV_VLM_API_KEY`，
 需在每个新终端中手动 `source`；该文件不纳入 Git，也不会被程序自动加载。
-这是云端服务，无需在随车笔记本启动本地 VLM 进程。
+这是默认云端配置；随车本地服务见下节。
+
+### 随车本地 Qwen3.5-4B
+
+随车笔记本为 RTX 4070 Laptop（8 GB 显存）、16 GB 内存。Ollama 安装在
+`/home/hri/.local/opt/ollama`，模型保存在 `/home/hri/.local/share/ollama/models`。
+`qwen3.5:4b` 使用 Q4_K_M 量化并包含视觉能力，下载大小约 3.4 GB。
+用户服务 `nav-vlm.service` 随 hri 登录启动，只监听 `127.0.0.1:11434`，
+禁用 Ollama 云端功能；上下文为 4096 token，单模型、单请求，设置
+`OLLAMA_KEEP_ALIVE=5m`，连续 5 分钟无请求后自动卸载模型并释放其显存。
+服务配置位于 `/home/hri/.config/systemd/user/nav-vlm.service`；服务启动不加载模型。
+
+导航选择本机 `qwen3.5:4b` 的 `/v1/chat/completions` 接口时，`launch.py` 在创建
+设备和执行启动动作之前调用 `adapters/ollama_warmup.py`，用 640×480 固定黑图
+完成视觉预热；它不读取相机，也不产生导航线索。预热失败会终止本次启动。
+随机评分、只读预检和云端模型不触发预热。
+后续模型请求续期，导航退出或异常结束后无需额外清理；不发送保活心跳，长时间
+没有模型请求时，即使导航进程仍在运行也会卸载，下次请求重新加载。
+服务可保持待命；停止服务可立即释放模型资源。其他客户端显式指定的
+`keep_alive` 可以覆盖服务默认值，应避免自行设置永久驻留。
+
+登录随车笔记本后管理服务：
+
+```bash
+systemctl --user status nav-vlm.service
+systemctl --user restart nav-vlm.service
+journalctl --user -u nav-vlm.service -n 50 --no-pager
+```
+
+在随车导航目录中，使用命令行覆盖默认云端配置：
+
+```bash
+cd /home/hri/nav
+ROBOT_NAV_VLM_API_KEY=ollama .venv/bin/python -m robot_nav hermes \
+  --vlm-endpoint http://127.0.0.1:11434/v1/chat/completions \
+  --vlm-model qwen3.5:4b --vlm-api-format chat_completions \
+  --search-mode scene --target "洗手间" --enable-motion
+```
+
+`ollama` 是本机接口忽略的占位凭据，用于满足当前启动入口的非空检查；此命令
+只为本次进程设置，不加载或转发云端密钥。该模型请求使用 `reasoning_effort=none`
+关闭思考、`temperature=0` 和 JSON Schema 输出约束，输出上限为
+`min(vlm_max_output_tokens, 128)`。Schema 限制字段结构，程序仍独立校验分数范围、
+框范围与顺序；格式合法不代表目标识别正确。保留原图分辨率及标准 `bbox_2d` 字段。停止服务可用
+`systemctl --user stop nav-vlm.service`。
+
+服务安装与模型下载不代表视觉推理或导航验收通过。物体搜索还会加载 YOLO/SAM2，
+需要根据真实单图的输入长度和整套流程的峰值显存评估上下文及资源分配。
 
 ## 调试运动链路
 
