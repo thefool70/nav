@@ -40,10 +40,8 @@ from ..core.scan_behavior import capture_semantic_view
 from ..core.perception_flow import CaptureContext, preview_capture_candidates
 from ..core.observation_coverage import frontier_observation_points
 from ..core.timing import TimingSpans, measure_stage
-from ..adapters.frontier_overlay import (
-    buffer_scan_image,
-    visible_frontier_candidates,
-)
+from ..adapters.scan_image import buffer_scan_image
+from ..adapters.perception import VlmInputImage
 from .object_localizer import ObjectLocalizer, ObjectLocalizerConfig
 from ..adapters.snapshot_depth import encode_depth
 from .analyzer import SemanticAnalyzer
@@ -73,14 +71,6 @@ class _CompletedAnalysis:
     region_ids: Tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class _ScanView:
-    """已固定的扫描覆盖和后台编码结果；分析成功前都只算待检查。"""
-
-    coverage: ObservationView
-    prepared: Future
-
-
 class SemanticPerception:
     """扫描队列、场景判断、方向打分与物体定位的统一入口。
 
@@ -104,12 +94,12 @@ class SemanticPerception:
         self.directory = directory.resolve()
         self._analyzer = analyzer
         self._object_localizer = (
-            ObjectLocalizer(analyzer, object_config, self.directory / "object-localization", on_event=self._emit)
+            ObjectLocalizer(object_config, self.directory / "object-localization", on_event=self._emit)
             if object_config is not None else None
         )
         self._on_event = on_event
         self._condition = threading.Condition()
-        # 编码与落盘串行执行，扫描批次按提交顺序进入模型队列。
+        # 编码与落盘串行执行，扫描图片按提交顺序进入模型队列。
         self._snapshot_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic-snapshot")
         self._closed = False
         self._worker_error: Optional[Exception] = None
@@ -124,9 +114,7 @@ class SemanticPerception:
         self._received_jobs = []
         self._cycle_score_sources = []
         self._submitted_keys = set()
-        self._scored_targets = set()
-        self._scan_views = []
-        # flush 后、写盘完成前仍保留覆盖，避免核心误判队列耗尽或重复扫描。
+        # 编码与写盘完成前保留覆盖，避免核心误判队列耗尽或重复扫描。
         self._scan_submissions: Dict[Future, Tuple[ObservationView, ...]] = {}
         self._submitted = 0
         self._finished = 0
@@ -163,17 +151,17 @@ class SemanticPerception:
         new_clues: list[TargetClue] = []
         for item in completed:
             for candidate, region_id in zip(item.candidates, item.region_ids):
-                value = item.result.frontier_scores.get(candidate.candidate_id)
+                value = item.result.image_score
                 if value is not None and item.views:
                     key = _target_key(item.views[0][0], candidate.world_xy, region_id)
-                    self._scores[key] = (value, item.job_id, item.result.interaction_id)
-            if item.result.target_view_ids is not None:
+                    self._scores.setdefault(key, (value, item.job_id, item.result.interaction_id))
+            if item.result.found is not None:
                 for map_id, view in item.views:
                     if map_id == frame.obstacle_map.frame_id and view.timestamp_s not in timestamps:
                         views.append(view)
                         timestamps.add(view.timestamp_s)
             job_clues = []
-            for view_id in item.result.target_view_ids or ():
+            for view_id in ((1,) if item.result.found else ()):
                 index = view_id - 1
                 if 0 <= index < len(item.views):
                     map_id, view = item.views[index]
@@ -186,14 +174,14 @@ class SemanticPerception:
                         self._clue_vantages.add(key)
                         clue = TargetClue(
                             f"semantic:{item.job_id}:{index + 1}", view.pose, view.timestamp_s, map_id,
-                            job_id=item.job_id, view_id=index + 1,
+                            job_id=item.job_id, view_id=index + 1, bbox_norm=item.result.bbox_norm,
                         )
                         self._clues.append(clue)
                         new_clues.append(clue)
                         job_clues.append(clue.clue_id)
             self._received_jobs.append({
                 "job_id": item.job_id, "interaction_id": item.result.interaction_id,
-                "clue_ids": tuple(job_clues), "target_view_ids": item.result.target_view_ids,
+                "clue_ids": tuple(job_clues), "found": item.result.found,
             })
         return CycleIntake(observed_views=tuple(views), clues=tuple(new_clues))
 
@@ -213,19 +201,6 @@ class SemanticPerception:
     def has_target_clues(self) -> bool:
         return bool(self._clues)
 
-    def flush_scan(self) -> None:
-        """扫描结束或被目标处理打断时保留已采集的部分批次。"""
-        with self._condition:
-            self._raise_worker_error()
-            if self._closed or not self._scan_views:
-                return
-            views = tuple(self._scan_views)
-            # 所有编码任务都已提交到同一个串行线程，本任务执行时结果必已就绪。
-            submitted = self._snapshot_worker.submit(self._write_scan, views)
-            self._scan_submissions[submitted] = tuple(view.coverage for view in views)
-            self._scan_views.clear()
-            submitted.add_done_callback(self._scan_work_done)
-
     def set_goal(self, goal: TargetSearchGoal) -> None:
         """登记本次运行的搜索目标；同一队列不能混用不同目标。"""
         with self._condition:
@@ -234,7 +209,7 @@ class SemanticPerception:
             self._goal = goal
 
     def take_target_clue(self, *, busy: bool) -> Optional[TargetClue]:
-        """批次按 FIFO，批内按模型列表顺序；已有目标处理期间不消费下一条。"""
+        """单图线索按拍摄 FIFO 消费；已有目标处理期间不消费下一条。"""
         if busy:
             return None
         return self._clues.popleft() if self._clues else None
@@ -246,28 +221,22 @@ class SemanticPerception:
             pending = (
                 len(self._jobs) + len(self._completed) + self._writing
                 + int(self._active_job is not None)
-                + int(bool(self._scan_views)) + len(self._clues)
+                + len(self._clues)
                 + len(self._scan_submissions)
             )
             failed = self._failed
             pending_views = tuple(view for views in self._pending_coverage.values() for view in views)
-            pending_views += tuple(item.coverage for item in self._scan_views)
             pending_views += tuple(view for views in self._scan_submissions.values() for view in views)
         return pending, failed, pending_views
 
     def capture_scan_view(
         self,
         frame: NavigationFrame,
-        scan_context,
         *,
         timings: Optional[TimingSpans] = None,
         frontier_cache: Optional[FrameFrontierCache] = None,
     ) -> str:
         """固定画面和覆盖后即返回；编码与写盘在后台完成，失败传回主线程。"""
-        if scan_context.index == 0:
-            # 扫描被打断后重建计划时，先提交上一轮已拍到的部分画面。
-            with measure_stage(timings, "snapshot.flush_previous"):
-                self.flush_scan()
         candidates, coverage = self._prepare_capture(
             frame, context=self._capture_context,
             timings=timings, frontier_cache=frontier_cache,
@@ -275,14 +244,10 @@ class SemanticPerception:
         with self._condition:
             self._raise_worker_error()
             # NavigationFrame 的 RGB-D 和地图是不可变元组；保留这帧即可固定拍摄输入。
-            prepared = self._snapshot_worker.submit(self._encode_scan, frame, candidates, coverage)
-            self._scan_views.append(_ScanView(coverage, prepared))
-            prepared.add_done_callback(self._scan_work_done)
-        if scan_context.index + 1 >= scan_context.count:
-            with measure_stage(timings, "snapshot.submit"):
-                self.flush_scan()
-            return "submitted"
-        return "buffered"
+            submitted = self._snapshot_worker.submit(self._write_scan, frame, candidates, coverage)
+            self._scan_submissions[submitted] = (coverage,)
+            submitted.add_done_callback(self._scan_work_done)
+        return "submitted"
 
     def score_frontiers(self, request: FrontierScoreRequest) -> Mapping[str, float]:
         """只查相同世界目标的已完成评分；候选有效性由核心的新地图筛选保证。"""
@@ -317,7 +282,7 @@ class SemanticPerception:
             "localization_map": "full_navigation" if frame.navigation_map is not None else "exploration",
             "map_timestamp_s": frame.timestamp_s,
         }
-        return self._object_localizer.locate(observation_frame, goal, context=context)
+        return self._object_localizer.locate(observation_frame, goal, bbox_norm=clue.bbox_norm, context=context)
 
     def diagnostics(self) -> Mapping[str, Any]:
         with self._condition:
@@ -360,7 +325,6 @@ class SemanticPerception:
         remaining += self._submitted - submitted_before_close
         self._emit({"event": "stopped", "job_ids": stopped_jobs})
         self._worker.join(timeout=1.0)
-        self._scan_views.clear()
         if remaining:
             print(f"视觉队列因退出停止，{remaining} 批任务未消费；快照保留在 {self.directory}", flush=True)
         self._raise_worker_error()
@@ -398,34 +362,24 @@ class SemanticPerception:
             )
         with measure_stage(timings, "snapshot.coverage"):
             coverage = capture_semantic_view(frame, context.observation_points + points)
-        return candidates, coverage
+        # 图片分数赋给同一相机视锥内、地图视线可见的候选；不再要求地面像素深度匹配。
+        in_view = {_xy_key(point) for point in coverage.map_visible_world_xy}
+        return tuple(item for item in candidates if _xy_key(item.world_xy) in in_view), coverage
 
     def _encode_capture(self, frame, candidates, coverage, *, timings=None):
-        """只读取拍摄时的固定帧，完成图像打包、候选投影和深度压缩。"""
-        with measure_stage(timings, "snapshot.image_projection"):
-            image = buffer_scan_image(frame, candidates)
-            candidates = visible_frontier_candidates({1: image}, candidates)
+        """只读取拍摄时的固定帧，完成原图打包和深度压缩。"""
+        with measure_stage(timings, "snapshot.image_pack"):
+            image = buffer_scan_image(frame)
         with measure_stage(timings, "snapshot.depth_encode"):
             depth_gzip = encode_depth(frame.depth, image.width_px, image.height_px)
         return CapturedView(image, coverage, frame.obstacle_map.frame_id, depth_gzip), candidates
 
-    def _encode_scan(self, frame, candidates, coverage):
+    def _write_scan(self, frame, candidates, coverage):
+        """逐帧编码、保存并入队；第一张图可在下一次转向期间开始推理。"""
         timings = []
-        captured = self._encode_capture(frame, candidates, coverage, timings=timings)
+        captured, candidates = self._encode_capture(frame, candidates, coverage, timings=timings)
         self._emit({"event": "scan_prepared", "timestamp_s": frame.timestamp_s, "spans": timings})
-        return captured
-
-    def _write_scan(self, views):
-        """整轮编码完成后汇总候选，按原有批次格式落盘并提交模型分析。"""
-        captured_views, candidates = [], {}
-        for view in views:
-            captured, visible_candidates = view.prepared.result()
-            captured_views.append(captured)
-            candidates.update({
-                _target_key(captured.map_frame_id, item.world_xy, item.candidate_id): item
-                for item in visible_candidates
-            })
-        self._enqueue_snapshot(tuple(captured_views), tuple(candidates.values()), "scan")
+        self._enqueue_snapshot((captured,), candidates, "scan")
 
     def _scan_work_done(self, future):
         """扫描后台失败是正式采集失败；移交主线程，不当作跳过或检测成功。"""
@@ -437,16 +391,12 @@ class SemanticPerception:
             self._condition.notify_all()
 
     def _enqueue_snapshot(self, views, candidates, source) -> None:
-        # 相同拍摄帧只入队一次；无候选的检测批次同样保留。
+        # 相同拍摄帧只入队一次；无候选的检测图片同样保留。
         """快照线程先写磁盘，再发布 FIFO 任务；不持有条件锁进行文件读写。"""
         key = tuple((view.map_frame_id, view.coverage.timestamp_s) for view in views)
         with self._condition:
             if key in self._submitted_keys:
                 return
-            candidates = tuple(
-                item for item in candidates
-                if _target_key(views[0].map_frame_id, item.world_xy, item.candidate_id) not in self._scored_targets
-            )
             self._submitted += 1
             job_id = self._submitted
             self._writing += 1
@@ -472,13 +422,10 @@ class SemanticPerception:
             if not self._closed:
                 self._jobs.append((job_id, folder))
                 self._pending_coverage[job_id] = tuple(view.coverage for view in views)
-                self._scored_targets.update(
-                    _target_key(views[0].map_frame_id, item.world_xy, item.candidate_id) for item in candidates
-                )
                 self._condition.notify_all()
 
     def _worker_loop(self) -> None:
-        """逐批读取固定快照、调用分析器并发布结果；主线程在下一周期接收。"""
+        """逐张读取固定快照、调用分析器并发布结果；主线程在下一周期接收。"""
         while True:
             with self._condition:
                 self._condition.wait_for(
@@ -495,12 +442,20 @@ class SemanticPerception:
             except (OSError, ValueError) as exc:
                 job_result = SemanticAnalysis(None, detection_error=f"快照读取失败：{exc}")
             else:
-                job_result = self._analyzer.analyze_views(images, candidates, goal, trace_context={
-                    "job_id": job_id, "source": source, "snapshot": str(folder),
-                    "views": view_trace(views),
-                    "region_ids": {item.candidate_id: region_id for item, region_id in zip(candidates, region_ids)},
-                })
-            depth_retention = retain_clue_depth(folder, len(views), job_result.target_view_ids)
+                image = images[1]
+                job_result = self._analyzer.analyze_view(
+                    VlmInputImage(image.width_px, image.height_px, image.rgb_bytes), goal,
+                    trace_context={
+                        "job_id": job_id, "source": source, "snapshot": str(folder),
+                        "views": view_trace(views),
+                        # 仅供日志与可视化关联，不画在模型输入上。
+                        "markers": tuple({"label": f"F{index}", "candidate_id": item.candidate_id,
+                                          "region_id": region_id, "world_xy": item.world_xy, "view_id": 1}
+                                         for index, (item, region_id) in enumerate(zip(candidates, region_ids), 1)),
+                    },
+                )
+            target_views = None if job_result.found is None else (1,) if job_result.found else ()
+            depth_retention = retain_clue_depth(folder, len(views), target_views)
             if depth_retention.get("errors"):
                 self._emit({"event": "depth_retention_failed", "job_id": job_id,
                             "errors": depth_retention["errors"]})
@@ -514,11 +469,8 @@ class SemanticPerception:
             with self._condition:
                 self._active_job = None
                 self._finished += 1
-                if job_result.target_view_ids is None:
+                if job_result.found is None:
                     self._failed += 1
-                for candidate, region_id in zip(candidates, region_ids):
-                    if candidate.candidate_id not in job_result.frontier_scores and views:
-                        self._scored_targets.discard(_target_key(views[0][0], candidate.world_xy, region_id))
                 if not self._closed:
                     self._completed.append(_CompletedAnalysis(job_id, job_result, views, candidates, region_ids))
                 self._condition.notify_all()

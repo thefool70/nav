@@ -24,8 +24,7 @@ from ..core.models import (
     TargetClue,
     TargetSearchGoal,
 )
-from ..core.frontier_projection import FrontierImageProjection
-from ..adapters.frontier_overlay import BufferedScanImage
+from ..adapters.scan_image import BufferedScanImage
 from ..adapters.snapshot_depth import (
     decode_depth,
 )
@@ -67,7 +66,6 @@ def write_snapshot(folder: Path, views, candidates, goal, source: str, job_id: i
             "width_px": image.width_px, "height_px": image.height_px,
             "intrinsics": asdict(image.intrinsics), "camera_yaw_rad": image.camera_yaw_rad,
             "camera_extrinsics_in_robot": asdict(image.camera_extrinsics_in_robot),
-            "frontier_projections": [asdict(projection) for projection in image.frontier_projections],
             "depth": {"captured": view.depth_gzip is not None, "encoding": "gzip-float64-le-v1", "unit": "m"},
         })
     for index, candidate in enumerate(candidates, 1):
@@ -96,10 +94,6 @@ def read_snapshot(folder: Path):
             item["width_px"], item["height_px"], rgb, coverage.pose,
             CameraIntrinsics(**item["intrinsics"]), item["camera_yaw_rad"],
             CameraExtrinsics(**item["camera_extrinsics_in_robot"]),
-            tuple(FrontierImageProjection(
-                tuple(projection["world_xy"]), tuple(projection["pixel_xy"]),
-                projection["camera_depth_m"], projection["observed_depth_m"],
-            ) for projection in item["frontier_projections"]),
         )
         views.append((item["map_frame_id"], coverage))
     for item in metadata["candidates"]:

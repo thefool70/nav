@@ -122,7 +122,7 @@ hardware/hermes/run.sh \
 ```
 
 物体模式与 Habitat 共用后台 VLM 队列，联合检测目标与评分 Frontier。
-收到线索后先用历史 RGB-D 做 YOLO/VLM 检测、SAM2 分割与定位，直接前往目标
+收到线索后复用扫描 VLM 框，结合历史 RGB-D、YOLO 检测和 SAM2 分割定位，直接前往目标
 附近的可达停靠点，YOLO 或 VLM 任一路检出即可使用。深度定位失败时，有框沿
 框中心方向、无框沿拍摄时光轴，在完整导航图中查询首个障碍作为位置假设。
 历史线索失败时原地继续
@@ -134,7 +134,7 @@ hardware/hermes/run.sh \
 为 `cuda`；`--object-yolo-model` 与 `--object-sam-checkpoint` 可指定权重。
 
 导航状态机、Frontier、地图处理与快照编码在 CPU 上执行；`--object-device`
-只控制本地视觉模型，不改变导航计算的设备。VLM 通过远程接口调用。
+只控制本地视觉模型，不改变导航计算的设备。VLM 通过配置的本地或远程接口调用。
 `--debug-random-score` 不启动 YOLO/SAM2，不能用该模式评估 GPU 推理性能。
 
 ## 运行场景搜索
@@ -148,7 +148,7 @@ hardware/hermes/run.sh \
   --max-cycles 100
 ```
 
-场景模式不加载 YOLO-World 或 SAM2。前沿扫描画面进入 FIFO 队列，VLM
+场景模式不加载 YOLO-World 或 SAM2。前沿扫描画面逐张进入 FIFO 队列，VLM
 在同一次请求中检查目的场景与评分 Frontier。缺少分数时按几何分继续探索；
 旧图检测到目标场景后返回拍摄位置并对齐朝向，到位即结束。未选方向暂存，新候选耗尽后
 逐个返回父节点，遇到有效方向再按原顺序恢复；返回父节点本身不额外扫描。
@@ -157,7 +157,7 @@ hardware/hermes/run.sh \
 `https://api.siliconflow.cn/v1/chat/completions`，格式为 `chat_completions`。
 使用英文提示词，当前模型请求显式设置 `enable_thinking=false`，并通过
 `response_format={"type":"json_object"}` 约束 JSON 输出。响应先正常解析 JSON，
-语法损坏时使用 `json_repair` 修复，不补造缺失的业务字段。返回后仍校验目标画面编号
+语法损坏时使用 `json_repair` 修复，不补造缺失的业务字段。返回后仍校验目标框或场景判断
 和评分字段；格式错误不当作“没有目标”。凭据文件导出 `ROBOT_NAV_VLM_API_KEY`，
 需在每个新终端中手动 `source`；该文件不纳入 Git，也不会被程序自动加载。
 这是云端服务，无需在随车笔记本启动本地 VLM 进程。
@@ -380,8 +380,8 @@ Action 创建后输出“下发计时”：`motion.ready_check` 为健康与定�
 在锁外进行。前台和后台仍可能在采集、地图更新阶段互相等待。
 
 每个 span 带 `started_monotonic_s`、`ended_monotonic_s`、`duration_s` 和 `completed`。
-主线程的 `snapshot.*` 记录前沿预览、观察点、覆盖计算和整轮写盘任务提交；
-`snapshot.submit` 不再包含后台文件写入。扫描图像打包、投影与深度压缩移到
+主线程的 `snapshot.*` 记录前沿预览、观察点、覆盖计算和单图写盘任务提交；
+`snapshot.submit` 不再包含后台文件写入。扫描图像打包与深度压缩移到
 串行快照线程，其阶段计时保存在 `semantic_queue` 的 `scan_prepared` 事件中，
 通过 `timestamp_s` 关联拍摄帧。该事件仅记录编码完成，实际写盘并发布模型任务
 仍以 `queued` 事件为准。`scan_prepared` 仅写 JSONL，不刷新 Rerun；

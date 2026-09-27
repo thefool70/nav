@@ -253,25 +253,20 @@
   `_post_json` 使用默认 urllib opener，会继承启动进程的 HTTP(S) 代理设置；
   排查 OpenCode Go 链路时核对该进程的代理环境，不用当前工具进程环境替代历史证据。
   不输出凭据值，也不要把连接失败当作“未检测到目标”。
-- `VlmInteraction.context` 与 `SemanticAnalyzer.analyze_views(trace_context=...)`
+- `VlmInteraction.context` 与 `SemanticAnalyzer.analyze_view(trace_context=...)`
   只增加记录来源，不参与提示词或 HTTP payload；不能为了显示关联关系串用
-  `_scan_images` 或共享可变的当前任务 ID。场景返回不另发视觉请求；物体定位请求通过 job/view 编号关联历史画面。
+  `_scan_images` 或共享可变的当前任务 ID。场景返回不另发视觉请求；物体定位通过 job/view 编号关联历史画面并复用扫描框。
 - `SemanticPerception._scores` 每项保存 `(score, job_id, interaction_id)`，保留 J/R 来源；
   `semantic_received_jobs` 是该周期接收结果，`semantic_score_sources` 是传给
   排序的有效缓存输入。两者不是同一件事，返回有效分数不等于已用于导航。
-- `perception/semantic_queue.py::SemanticPerception` 是 CLI 的默认感知实现。
-  扫描线程冻结画面；运动回调只提交最新原始帧，由独立采样线程处理；单个分析
-  线程按 FIFO 调用 `OpenAICompatibleTargetObserver.analyze_views`，不使用
-  `_scan_images`。设备只由 Adapter 读取，核心状态只由核心函数更新。
-- `data/run_logs/semantic-*/job-*` 保存 `view-N.rgb.gz`、`snapshot.json` 和
-  `result.json`。快照中的 `snapshot:批次:序号` 与 `source_region_id` 分别是
-  请求内候选 ID 和原区域 ID；分数缓存必须同时匹配地图 frame、原区域 ID、
-  世界目标坐标，不能只按新分配的预览 ID 套用。预览不提交核心区域编号。
-- `CapturedView.depth_gzip` 在 `_capture` 时复制并压缩同帧对齐深度；不保留
-  原始帧引用。`snapshot_store.write_snapshot` 先写 `view-N.depth.pending.f64.gz`，VLM 返回后
-  `snapshot_store.retain_clue_depth` 仅把命中 V 编号重命名为 `view-N.depth.f64.gz`，删除其余
-  临时深度。检测列表为 `[]` 时全删临时深度，为 `None` 时保留待判定数据。
-  队列退出或分析未完成时不清理这些临时文件，也不自动恢复任务。
+- `perception/semantic_queue.py::SemanticPerception` 为默认感知实现。每张扫描图立即提交
+  串行快照线程，写盘后由单个模型线程按 FIFO 调用 `analyze_view`。没有运动选帧和整轮合批。
+- `data/run_logs/semantic-*/job-*` 每个新任务仅有一张 `view-1.rgb.gz`，并保存
+  `snapshot.json` 和 `result.json`。分数缓存匹配地图 frame、原区域 ID 和世界目标坐标。
+  图片分数赋给视场内且地图视线可见的候选，首次有效分数保留；无候选图片仍请求目标检测。
+- `snapshot_store.write_snapshot` 写同帧 `view-1.depth.pending.f64.gz`；检测命中时
+  `retain_clue_depth` 改为 `view-1.depth.f64.gz`，明确未命中时删除，检测失败时保留。
+  退出不清理未分析的深度，不自动恢复任务。
 - 深度由 `adapters/snapshot_depth.py` 编解码；gzip 内为 `<8sII` 头
   （`RNDEPTH1`、宽、高）及按行排列的小端 float64 米制数据，None 编为零，
   非正或非有限值解码为 None。`snapshot_store.read_clue_frame` 仍能读取旧 `.depth.json.gz`。
@@ -281,52 +276,18 @@
   `missing_view_ids`；`pending_detection` 表示检测失败，`selection_failed` 的
   `errors` 与 `depth_retention_failed` 事件记录文件处理失败。文件失败不改写目标
   判断，深度也不发送给 VLM。旧快照不会补出历史深度。
-- 扫描中出现连续单图批次时，先检查 `snapshot.json.source`。`capture_scan_view`
-  正常只在 `context.index + 1 >= context.count` 时提交整轮，不按新 Frontier
-  提前拆批。被打断或重建计划时，`app.py::_sync_perception` / 下一轮开始处仍提交未送出的
-  部分画面；后续局部扫描本身可能只有一图，不能只凭图数判断是否重复请求。
-- `app.py::_execute_action` 用 `set_motion_prefetch_enabled` 开关运动采样，
-  `_prefetch_allowed` 按 `ActionKind` 与 `ActionPurpose` 选择探索及回退移动；
-  scan.turn、目标接近和目标返回不采样，finally 中关闭开关。
-  动作期间已接收的帧保留冻结的采集上下文，允许采样线程稍后完成处理。
-- `frontier_overlay.py::build_semantic_analysis_sheet` 保留所有输入图像，包含
-  没有 Frontier 的视角；V/F 编号在图外，F 用单像素引线连到图内 3×3 锚点。
-  评分失效不能删除未检测任务。RGB 最大宽度 320；V 蓝底白字用连续笔画抗锯齿，
-  不依赖系统字体。页眉 28px，页脚按标签分配 0–3 行、每行 30px；每排按最高
-  tile 对齐，间距 2px。无 F 时不得恢复固定 96px 空页脚。
-  `core/vision.py::parse_semantic_analysis_response` 分别校验线索列表和评分。
-- `core/frontier_projection.py::project_frontier_ground_points` 在采集时将候选
-  `world_xy` 按局部地面 z=0 投影；变换为 `grounding._camera_point_to_robot` 的
-  逆变换（撤销 yaw/pitch/roll）。中心有效、3×3 至少三点有效，中位值及中心
-  光轴深度误差 ≤0.15 m，近处遮挡会过滤。不要用欧氏距离比较深度。
-- `BufferedScanImage.frontier_projections` 与完整相机外参写入 `snapshot.json`；
-  `snapshot_store.read_snapshot` 还原为元组。锚点按同一世界坐标匹配，不依赖队列重命名的
-  candidate ID。拼图选择已通过深度检查的视角；没有可靠锚点或页脚容量不足
-  就省略该候选评分，不能恢复旧的画面边缘兜底。
-- 视觉任务只来自前沿扫描，不再对运动帧选帧入队；相机持续采集和运动可视化不生成模型任务。
-  扫描画面没有可靠地面锚点时仍用于目标检测，入队候选只含有锚点者。
-- 已确认 `semantic-5zgxc5zj` 的前 16 个完成任务均为 `candidates=[]`、
-  `frontier_projections=[]`、`frontier_scores={}`。对应
-  `slamtec-l515-20260906-182020-217885.jsonl` 前 33 个决策的 70 条候选记录均无
-  语义分；不能归因于界面将请求拆开。前两批 source=motion 说明采样前有可见
-  Frontier 方位，评分入口随后被地面投影/深度检查过滤。现有快照不记录淘汰
-  原因，尚不能区分投影出界、无效深度、地面不符或外参问题；不要直接断言阈值过严。
-- `build_frontier_score_sheet` 保留数字方向标注的旧拼图形式；默认 FIFO 联合
-  分析走 `build_semantic_analysis_sheet` 的地面锚点。排查时先确认实际请求 task。
-- Habitat `_build_navigation_frame` 显式填写 `CameraExtrinsics(height_m=sensor_height_m)`；
-  不得再使用默认零高度，否则地面锚点无法生成。采集分辨率没有提升。
-- Rerun 的 F 记录新增 `view_id`、`source_pixel_xy`，后者是缩放前 RGB 像素；
-  用快照 `camera_depth_m` / `observed_depth_m` 追查过滤，不能拿返回时的新深度核对。
-- 提示词 `_frontier_scoring_rules` 为联合分析和旧批量评分共用；0.5 表示缺少线索，
-  `target.view_ids=[]` 不自动压低评分，模型不计算导航距离/可达性。模型输出
-  `target.view_ids` 有序整数列表，不再输出 `target.found` / `target.view_id`。
-  `SemanticAnalysis.target_view_ids` 空元组是有效无线索，None 才是检测失败；
-  越界、布尔值、重复编号、非列表均判为检测失败，仍保留有效分数。
-  列表只包含检测匹配的画面；场景和队列物体模式到位后均不进行二次视觉确认。
-  Rerun 的 `Clue order` 是模型返回顺序，非新的世界候选编号。
+- `adapters/scan_image.py` 保留原始 RGB 分辨率和标定；模型输入无 V/F 标注。
+  不再使用地面 Frontier 投影过滤评分，扫描覆盖本身的深度支持检查仍保留。
+- `core/vision.py` 的物体输出为 `score` 和 `bbox_2d`（0～1000 坐标或 null），
+  场景输出为 `score` 和 `found`。解析后 `SemanticAnalysis.bbox_norm` 为 0～1；
+  `found=None` 表示检测失败，False 表示有效未命中；评分与检测独立校验。
+  无足够线索用 0.5，没看到目标不是方向反证。模型不计算路径距离或可达性。
+- `TargetClue.bbox_norm` 只属于该线索的历史 RGB-D，物体定位直接复用，不再次请求 VLM。
+  `OpenAICompatibleTargetObserver` 拒绝非 stop 的 chat completions 结束原因；
+
 - `SemanticPerception.begin_cycle` 接收结果：检测有效才登记覆盖，评分失败仍可保留目标线索。
   `_pending_coverage` 在结果被主循环接收前一直保留；失败后移除，不冒充已检查。
-  `pending_semantic_jobs` 还含采样、待接收结果、部分扫描和排队线索，不是 HTTP 数。
+  `pending_semantic_jobs` 还含快照写入、待接收结果和排队线索，不是 HTTP 数。
 - `TargetClue.pose` 是拍摄时机器人位姿，`job_id/view_id` 关联同帧 RGB-D。
   场景由 `core/scene_target.py::continue_scene_target` 返回并恢复朝向；位置误差 ≤0.25m、
   朝向误差 ≤5° 时返回 COMPLETE / target.revisit_complete。
@@ -346,13 +307,13 @@
   已有深度尺寸或单位错误仍使该快照失败。障碍射线由历史相机位姿发出，查询当前
   同坐标系地图；`frame.json` 的 `timestamp_s` 是拍摄时间，`map_timestamp_s`
   是当前导航帧采集时间，不能把地图理解成拍摄时保存的地图。
-  `SemanticPerception.begin_cycle` 按列表原顺序入队，物体按 job/view 保留每张不同快照；
+  `SemanticPerception.begin_cycle` 按 FIFO 入队，物体按 job/view 保留每张不同快照；
   场景仍按位姿去重且不重新排序，批次按 FIFO。`core/scene_target.py::discard_target_clue` 返回无命令状态，
   场景返回失败以 target.revisit_failed、物体线索失败以 object.clue_failed
   让下一周期优先取下一条，COMPLETE 与 STOPPED 不再取线索。
   `navigate` 的 active_target_clue 分支优先于普通视觉处理；`app.py` 跳过线索
   处理期间的普通目标观测，物体定位只响应 NEEDS_OBJECT_LOCALIZATION。
-- `perception/object_localizer.py` 的两个检测线程独立运行，首个有效框进入 SAM2；
+- `perception/object_localizer.py` 复用扫描 VLM 框并启动独立 YOLO 检测，VLM 框立即进入 SAM2；
   不要求 YOLO/VLM 同时成功，也不做框重叠否决。SAM2 失败或掩码无法测距时用框。
   `object_model_process.py` 为 YOLO、SAM2 分别维护常驻进程和单请求锁；旧 YOLO
   尚未返回时不积压新帧，VLM 路径仍可继续。每次本地请求有超时，退出时关闭进程。
@@ -388,14 +349,14 @@
   排查“无停靠点”先看这些字段。
 - `app.py::_sync_perception` 发布冻结的 `CaptureContext` 并同步暂停标志。
   有待查线索、active_target_clue、目标返回/接近/定位阶段或导航终态时暂停。
-  `_worker_loop` 与 `_capture_loop` 等待暂停解除，`observe_motion_frame` 不接收新帧。
+  `_worker_loop` 等待暂停解除；没有运动图像采样线程。
   `SemanticPerception.begin_cycle` 在暂停期间保留 `_completed` 与 `_pending_coverage`；
   接收后由 `core/perception_flow.py::receive_perception` 更新搜索状态。
   两条已有线索之间保持暂停；物体线索用完时原地恢复已采集队列，继续接收线索。
   `fallback_clue` 本身不使队列暂停，否则会在等待历史结果时自锁。
   已开始的请求/采样可以完成并保存结果；暂停不是取消已发送的 HTTP 请求。
   `semantic_background_paused` 进入周期诊断，Rerun 简表显示普通队列暂停提示。
-- 场景判断由联合分析完成；模型协议仅包含 `analyze_views` 与 `locate_object`，
+- 场景判断由联合分析完成；模型协议仅包含 `analyze_view`，
   没有同步观察器、到达后模型确认或检测触发的运动中断分支。
 - 分数只在下一次决策读取，不修改执行中的目标；默认 CLI 不使用本地 YOLO 中断。
   `_wait_for_semantics_or_finish` 必须等待任务与线索耗尽；失败检测计数单独报告。

@@ -157,10 +157,11 @@ class TargetConfirmation(Enum):
 
 @dataclass(frozen=True)
 class SemanticAnalysis:
-    """检测到目标的有序画面与评分；view_ids 空元组表示未检测到，None 表示检测失败。"""
+    """单张图片的目标判断、归一化目标框和方向分；found=None 表示检测失败。"""
 
-    target_view_ids: Optional[Tuple[int, ...]]
-    frontier_scores: Mapping[str, float] = field(default_factory=dict)
+    found: Optional[bool]
+    image_score: Optional[float] = None
+    bbox_norm: Optional[Tuple[float, float, float, float]] = None
     detection_error: str = ""
     scoring_error: str = ""
     interaction_id: Optional[int] = None
@@ -176,6 +177,8 @@ class TargetClue:
     map_frame_id: str
     job_id: Optional[int] = None
     view_id: Optional[int] = None
+    # 扫描时 VLM 对该快照给出的框；随线索消费，不在后续新图上复用。
+    bbox_norm: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass(frozen=True)
@@ -206,7 +209,8 @@ class ObjectApproachState:
 class ObservationView:
     """实际采集的水平视角；进入 observed_views 后才代表图像已完成语义检查。
 
-    map_visible_world_xy 是地图可见视锥，仅原地复用；visible_world_xy 进一步
+    map_visible_world_xy 是地图可见视锥，用于原地覆盖复用和单图候选关联；
+    visible_world_xy 进一步
     经过深度遮挡检查，用于跨位置复用。坐标单位米。
     """
 

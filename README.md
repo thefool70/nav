@@ -70,7 +70,7 @@ ChassisInterface ──► NavigationFrame
 
 | 模式 | 发现目标 | VLM 的作用 | 后续行为 |
 | --- | --- | --- | --- |
-| 物体搜索 | 后台检查前沿扫描采集的固定画面 | 联合检测与评分；接近时可用本地模型提供目标框 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
+| 物体搜索 | 后台检查前沿扫描采集的固定画面 | 单图评分与框选；历史定位复用该框 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
 | 场景搜索 | 后台检查前沿扫描采集的固定画面 | 同一次请求判断场景与评分 Frontier | 返回拍摄位置并对齐朝向，搜索完成 |
 
 两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，到位后
@@ -83,11 +83,12 @@ ChassisInterface ──► NavigationFrame
 地图已知与视觉已检查分别记录；两种模式没有待查方向时仍采集当前画面，不额外转向。
 返回节点未完成时保留实际位置，跳过该返回节点并重新检查有效方向，不直接结束搜索。
 
-命令行默认使用异步 FIFO 视觉队列。每轮扫描收齐后，将全部画面拼成一张图，
-在同一次请求中提取目标线索并评分 Frontier。扫描转向不额外提交单图，探索和分支回退的
-模型任务只来自前沿扫描，平移动作途中不再选帧入队。缺少语义分时按几何分继续走，评分只在下一次决策生效。
-后台检测到目标后按模型顺序处理线索。场景模式返回拍摄位置并对齐朝向后完成，
-不进行到场视觉复查。物体模式先在历史 RGB-D 上定位，YOLO 或 VLM 任一路
+命令行默认使用异步 FIFO 视觉队列。扫描每采集一张图片就提交分析，不等待整轮收齐。
+模型直接查看原图，返回图片评分和目标框（场景模式返回是否已进入场景），不标注前沿点。
+同图视场内、地图视线可见的候选共用图片评分。模型任务只来自前沿扫描，移动途中不额外选帧。
+缺少语义分时按几何分继续走，评分只在下一次决策生效。
+后台按 FIFO 处理目标线索。场景模式返回拍摄位置并对齐朝向后完成，不进行到场视觉复查。
+物体模式复用扫描目标框在历史 RGB-D 上定位，同时保留 YOLO 独立检测，任一路
 检出即可使用；优先用 SAM2 掩码，分割失败时直接用检测框内深度。无法用深度定位时，
 有框就沿框中心方向查询地图中的首个障碍，无框则沿相机光轴，将障碍表面作为目标位置假设。
 得到位置后，在目标周围搜索可达自由格，从当前位置一次前往停靠点并对准目标，
@@ -251,18 +252,18 @@ python -m robot_nav hermes --preflight-only
 | `src/robot_nav/runtime_reporting.py` | 周期日志回调与终端摘要 |
 | `src/robot_nav/core/navigation_io.py` | 动作构造与状态/边界校验的公共输入检查 |
 | `src/robot_nav/core/observation_coverage.py` | 局部 Frontier 观察点、RGB-D 覆盖记录和跨位置复用 |
-| `src/robot_nav/core/frontier_projection.py` | Frontier 地面点投影与对齐深度核对，供 VLM 图片标注 |
+| `src/robot_nav/adapters/scan_image.py` | 固定原始扫描图像与相机标定 |
 | `src/robot_nav/core/path_validation.py` | 测量实际规划路径在算法未知区内的累计长度 |
 | `src/robot_nav/core/object_grounding.py` | RGB-D 定位与图像方向上的障碍位置假设 |
 | `src/robot_nav/core/object_standoff.py` | 在目标周围搜索满足净空与连通条件的停靠点 |
-| `src/robot_nav/perception/semantic_queue.py` | 扫描快照、FIFO 联合分析与迟到结果接收 |
+| `src/robot_nav/perception/semantic_queue.py` | 扫描快照、FIFO 单图分析与迟到结果接收 |
 | `src/robot_nav/perception/analyzer.py` | 语义分析的模型边界协议 |
 | `src/robot_nav/perception/snapshot_store.py` | 语义快照的写入与读取 |
 | `src/robot_nav/adapters/habitat/` | Habitat Adapter |
 | `src/robot_nav/adapters/hermes/` | Hermes + D435i Adapter、REST 客户端与外参读取 |
 | `src/robot_nav/adapters/realsense/` | RealSense RGB-D 采集、D435i 配置 |
 | `src/robot_nav/adapters/openai_compatible.py` | VLM 请求与结构化结果解析 |
-| `src/robot_nav/perception/object_localizer.py` | 历史定位的 YOLO/VLM 组合、SAM2 分割与定位回退策略 |
+| `src/robot_nav/perception/object_localizer.py` | 历史 VLM 框复用与 YOLO 检测、SAM2 分割与定位回退策略 |
 | `src/robot_nav/adapters/object_detection_worker.py` | 在指定环境中常驻运行 YOLO 或 SAM2，记录阶段与调用栈 |
 | `src/robot_nav/adapters/sam2_segmenter.py` | SAM2 边界框到像素掩码的分割 |
 | `src/robot_nav/adapters/object_model_process.py` | 模型进程的请求、进度、超时与退出 |

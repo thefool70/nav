@@ -29,7 +29,6 @@ from .adapters.chassis import (
     MotionStalledError,
     RecoverableMotionError,
 )
-from .adapters.perception import ScanObservationContext
 from .core.actions import action_command
 from .core.perception_flow import capture_context, receive_perception, target_handling_active
 from .core.frontier import FrameFrontierCache
@@ -270,9 +269,7 @@ def _execute_action(
 
 
 def _sync_perception(frame, state, perception):
-    """更新扫描使用的冻结上下文，退出扫描时提交部分批次。"""
-    if state.phase is not SearchPhase.SCANNING or target_handling_active(state):
-        perception.flush_scan()
+    """更新采集上下文，并按目标处理状态暂停或恢复模型队列。"""
     perception.bind_frame(frame, capture_context(frame, state))
     perception.pause_for_target_handling(
         target_handling_active(state) or perception.has_target_clues(),
@@ -293,11 +290,10 @@ def _capture_scan_direction(
     from .core.scan_behavior import record_scanned_direction
 
     state = decision.state
-    context = _scan_context(state)
-    if context is None:
+    if not 0 <= state.next_scan_index < len(state.scan_headings_world_rad):
         return decision
     with measure_stage(timings, "observer.capture_scan"):
-        perception.capture_scan_view(frame, context,
+        perception.capture_scan_view(frame,
             timings=timings, frontier_cache=frontier_cache,
         )
     pending, failed, pending_views = perception.pending_counts()
@@ -305,14 +301,6 @@ def _capture_scan_direction(
     return record_scanned_direction(frame, goal, state, _current_scan_heading(state),
         timings=timings, frontier_cache=frontier_cache,
     )
-
-
-def _scan_context(state: SearchState) -> Optional[ScanObservationContext]:
-    """当前扫描方向在一轮扫描中的编号；不在扫描计划内时返回 None。"""
-    count = len(state.scan_headings_world_rad)
-    if count < 1 or not 0 <= state.next_scan_index < count:
-        return None
-    return ScanObservationContext(index=state.next_scan_index, count=count)
 
 
 def _current_scan_heading(state: SearchState) -> float:

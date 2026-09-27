@@ -67,7 +67,7 @@ def render_observation_card(title, nodes, colors, font):
 
 def score_lines(node):
     """使用图片中的 F 编号，明确区分语义分和拍摄时的综合分。"""
-    lines = []
+    lines = [f"Image score: {node['image_score']:.2f}"] if node.get("image_score") is not None else []
     for score in node["scores"].values():
         value = "pending" if node["state"] in ("queued", "running") else "missing"
         if score["value"] is not None:
@@ -76,4 +76,4 @@ def score_lines(node):
         if score.get("frontier_score") is not None:
             line += f" / total {score['frontier_score']:.2f}"
         lines.append(line)
-    return lines or ["No projected Frontier"]
+    return lines or ["No associated Frontier"]

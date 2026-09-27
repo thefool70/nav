@@ -9,7 +9,7 @@ import struct
 import threading
 import time
 import zlib
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from typing import (
     Any,
@@ -23,24 +23,12 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from ..core.models import (
-    FrontierCandidate,
-    NavigationFrame,
     SemanticAnalysis,
-    TargetObservation,
     TargetSearchGoal,
-    TargetVisibility,
 )
 from ..core.vision import (
     build_semantic_analysis_prompt,
     parse_semantic_analysis_response,
-    build_object_localization_prompt,
-    parse_target_grounding_response,
-    parse_target_visibility_response,
-)
-from .frontier_overlay import (
-    BufferedScanImage,
-    build_semantic_analysis_sheet,
-    pack_rgb_image,
 )
 from .perception import (
     VlmInputImage,
@@ -75,7 +63,7 @@ class OpenAICompatibleConfig:
 
 
 class OpenAICompatibleTargetObserver:
-    """为固定快照提供联合语义分析与历史物体框定位。"""
+    """为单张固定快照提供方向评分与目标框选或场景判断。"""
 
     def __init__(
         self,
@@ -85,84 +73,36 @@ class OpenAICompatibleTargetObserver:
         ] = None,
     ) -> None:
         _validate_config(config)
-        self._config = config
+        # 单图只输出一个分数与一个框，本地模型无需保留长回答额度。
+        self._config = (replace(config, max_output_tokens=min(config.max_output_tokens, 128))
+                        if config.model.strip().lower() == "qwen3.5:4b" else config)
         self._on_vlm_interaction = on_vlm_interaction
         self._interaction_index = 0
         self._interaction_lock = threading.Lock()
 
-    def analyze_views(
-        self,
-        images: Mapping[int, BufferedScanImage],
-        candidates: Tuple[FrontierCandidate, ...],
-        goal: TargetSearchGoal,
+    def analyze_view(
+        self, image: VlmInputImage, goal: TargetSearchGoal,
         *, trace_context: Optional[Mapping[str, Any]] = None,
     ) -> SemanticAnalysis:
-        """只读取本次快照，一次请求同时检查全部画面并评分可见 Frontier。"""
-        image, markers = build_semantic_analysis_sheet(images, candidates)
-        labels = tuple(marker.label for marker in markers)
-        prompt = build_semantic_analysis_prompt(goal.target_text, labels, tuple(images), goal.search_mode)
-        context = dict(trace_context or {})
-        regions = context.get("region_ids", {})
-        positions = {item.candidate_id: item.world_xy for item in candidates}
-        context["markers"] = tuple({
-            "label": marker.label, "candidate_id": marker.candidate_id,
-            "region_id": regions.get(marker.candidate_id, marker.candidate_id),
-            "world_xy": positions[marker.candidate_id],
-            "view_id": marker.view_id, "source_pixel_xy": marker.source_pixel_xy,
-        } for marker in markers)
-        interaction = self._begin_interaction("semantic_analysis", prompt, image, context=context)
+        """单张原图一次请求，同时给出方向分和目标框；快照关联不发送给模型。"""
+        prompt = build_semantic_analysis_prompt(goal.target_text, goal.search_mode)
+        interaction = self._begin_interaction("semantic_analysis", prompt, image, context=trace_context)
         assistant_text, response_json = "", ""
         try:
             payload, response_json = self._request_model(prompt, image)
             assistant_text = self._response_text(payload)
-            parsed = parse_semantic_analysis_response(assistant_text, labels, tuple(images))
+            parsed = parse_semantic_analysis_response(assistant_text, goal.search_mode)
         except (_ModelRequestError, OSError, ValueError) as exc:
             self._finish_interaction(interaction, assistant_text, response_json, error=_exception_text(exc))
-            return SemanticAnalysis(
-                None, detection_error=_failure_reason("联合分析失败", exc),
-                interaction_id=interaction.interaction_id,
-            )
-        result = replace(parsed, interaction_id=interaction.interaction_id, frontier_scores={
-            marker.candidate_id: parsed.frontier_scores[marker.label]
-            for marker in markers if marker.label in parsed.frontier_scores
-        })
+            return SemanticAnalysis(None, detection_error=_failure_reason("单图分析失败", exc),
+                                    interaction_id=interaction.interaction_id)
+        result = replace(parsed, interaction_id=interaction.interaction_id)
         self._finish_interaction(
             interaction, assistant_text, response_json,
-            parsed_result=json.dumps({
-                "target_view_ids": result.target_view_ids,
-                "frontier_scores": result.frontier_scores,
-            }, ensure_ascii=False),
+            parsed_result=json.dumps(asdict(result), ensure_ascii=False), bbox_norm=result.bbox_norm,
             error="; ".join(value for value in (result.detection_error, result.scoring_error) if value),
         )
         return result
-
-    def locate_object(
-        self, frame: NavigationFrame, goal: TargetSearchGoal, *, context=None,
-    ) -> TargetObservation:
-        """一帧一次请求，返回目标身份判断与框；不参与普通扫描的实时抢占。"""
-        if frame.rgb is None:
-            return _uncertain("物体定位缺少 RGB。")
-        image = pack_rgb_image(frame.rgb)
-        prompt = build_object_localization_prompt(goal.target_text)
-        interaction = self._begin_interaction(
-            "object_localization", prompt, image,
-            context={**_frame_trace_context(frame, "object_localization"), **(context or {})},
-        )
-        assistant_text, response_json = "", ""
-        try:
-            payload, response_json = self._request_model(prompt, image)
-            assistant_text = self._response_text(payload)
-            visibility = parse_target_visibility_response(assistant_text)
-            bbox = parse_target_grounding_response(assistant_text) if visibility is TargetVisibility.VISIBLE else None
-        except (_ModelRequestError, OSError, ValueError) as exc:
-            self._finish_interaction(interaction, assistant_text=assistant_text, response_json=response_json, error=_exception_text(exc))
-            return _uncertain(_failure_reason("物体定位请求失败", exc))
-        self._finish_interaction(
-            interaction, assistant_text=assistant_text, response_json=response_json,
-            parsed_result=json.dumps({"visibility": visibility.value, "bbox_norm": bbox}), bbox_norm=bbox,
-        )
-        return TargetObservation(visibility, bbox_norm=bbox, source="vlm")
-
 
     def _request_model(
         self,
@@ -295,16 +235,6 @@ class OpenAICompatibleTargetObserver:
         return response_payload
 
 
-def _frame_trace_context(frame: NavigationFrame, source: str) -> Mapping[str, Any]:
-    """仅用于记录来源，不发送给模型，也不参与目标判断。"""
-    return {"source": source, "views": ({
-        "view_id": 1, "timestamp_s": frame.timestamp_s,
-        "pose": {"x_m": frame.pose.x_m, "y_m": frame.pose.y_m, "yaw_rad": frame.pose.yaw_rad},
-        "heading_world_rad": frame.pose.yaw_rad + frame.camera_extrinsics_in_robot.yaw_rad,
-        "map_frame_id": frame.obstacle_map.frame_id,
-    },)}
-
-
 def _chat_completions_payload(
     config: OpenAICompatibleConfig,
     prompt: str,
@@ -330,6 +260,11 @@ def _chat_completions_payload(
     if config.model.strip().lower() in {"qwen/qwen3.5-4b", "qwen/qwen3.8-27b"}:
         payload["enable_thinking"] = False
         payload["response_format"] = {"type": "json_object"}
+    elif config.model.strip().lower() == "qwen3.5:4b":
+        # 随车 Ollama 使用 OpenAI 兼容参数关闭思考，避免生成额外推理文本。
+        payload["reasoning_effort"] = "none"
+        payload["response_format"] = {"type": "json_object"}
+        payload["max_tokens"] = config.max_output_tokens
     return payload
 
 
@@ -412,6 +347,8 @@ def _chat_completions_text(payload: Any) -> str:
     if not isinstance(choices, list) or not choices:
         raise ValueError("API 回应缺少 choices")
     first = choices[0]
+    if isinstance(first, Mapping) and first.get("finish_reason") != "stop":
+        raise ValueError(f"模型回答未正常结束：{first.get('finish_reason')}")
     if not isinstance(first, Mapping) or not isinstance(first.get("message"), Mapping):
         raise ValueError("API 回应缺少 message")
     content = first["message"].get("content")
@@ -540,13 +477,6 @@ def _failure_reason(stage: str, exc: Exception) -> str:
 
 def _exception_text(exc: Exception) -> str:
     return str(exc).strip() or exc.__class__.__name__
-
-
-def _uncertain(reason: str) -> TargetObservation:
-    return TargetObservation(
-        visibility=TargetVisibility.UNCERTAIN,
-        reason=reason,
-    )
 
 
 __all__ = [

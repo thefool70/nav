@@ -14,9 +14,8 @@ import time
 
 from ..core.models import ObjectLocalization, TargetConfirmation, TargetObservation, TargetVisibility
 from ..core.object_grounding import localize_obstacle_on_image_ray, localize_segmented_object
-from ..adapters.frontier_overlay import pack_rgb_image
+from ..adapters.scan_image import pack_rgb_image
 from ..adapters.object_model_process import ObjectModelProcess
-from .analyzer import SemanticAnalyzer
 from .snapshot_store import write_localization_input, write_localization_result
 
 
@@ -34,8 +33,7 @@ class ObjectLocalizerConfig:
 
 class ObjectLocalizer:
     """协调 YOLO/VLM 检测、SAM2 分割与历史 RGB-D 定位，并保存每次定位依据。"""
-    def __init__(self, analyzer: SemanticAnalyzer, config: ObjectLocalizerConfig, directory: Path, on_event=None):
-        self._analyzer = analyzer
+    def __init__(self, config: ObjectLocalizerConfig, directory: Path, on_event=None):
         self._config = config
         self._directory = directory
         self._on_event = on_event
@@ -44,8 +42,8 @@ class ObjectLocalizer:
         self._sam2 = ObjectModelProcess("sam2", config.python_executable, directory / "models", config.timeout_s)
         print(f"物体接近模型：{config.python_executable}（{config.device}，YOLO/SAM2 按需加载并复用）", flush=True)
 
-    def locate(self, frame, goal, *, context) -> ObjectLocalization:
-        """先完成的有效检测直接进入定位，另一检测的失败或迟到不否决它。"""
+    def locate(self, frame, goal, *, bbox_norm, context) -> ObjectLocalization:
+        """复用扫描框先做定位，失败后尝试独立 YOLO 检测；不再次请求 VLM。"""
         if frame.rgb is None:
             return ObjectLocalization(reason="定位所需的历史 RGB 缺失。")
         self._sequence += 1
@@ -88,15 +86,13 @@ class ObjectLocalizer:
                 source="yolo", reason=raw.get("error", ""),
             )
 
-        def detect_vlm():
-            return self._analyzer.locate_object(frame, goal, context={
-                **context, "localization_directory": str(folder),
-            })
-
-        # 两路并行、按完成顺序消费；任一路完成有效定位即可返回，不等另一检测否决。
-        for name, call in (("yolo", detect_yolo), ("vlm", detect_vlm)):
-            threading.Thread(target=_detect, args=(name, call, detections), daemon=True,
-                             name=f"object-{name}-detection").start()
+        # 复用扫描时对同一张历史 RGB 给出的 VLM 框，立即进入定位；YOLO 保留独立检测。
+        detections.put(TargetObservation(
+            TargetVisibility.VISIBLE if bbox_norm is not None else TargetVisibility.UNCERTAIN,
+            bbox_norm=bbox_norm, source="vlm",
+        ))
+        threading.Thread(target=_detect, args=("yolo", detect_yolo, detections), daemon=True,
+                         name="object-yolo-detection").start()
         reasons = []
         confirmation = TargetConfirmation.UNCERTAIN
         negative_count = 0

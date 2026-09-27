@@ -1,6 +1,6 @@
-"""视觉/VLM 语义感知与 Frontier 批量评分边界。
+"""视觉/VLM 单图分析的输入与日志事件。
 
-它不属于底盘 Adapter；具体模型、图像标注和请求方式由感知侧负责。
+它不属于底盘 Adapter；具体模型和请求方式由感知侧负责。
 导航流程统一使用异步视觉队列，因此本文件只保留队列实现所需的采集上下文与日志事件。
 """
 
@@ -8,14 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Tuple
-
-
-@dataclass(frozen=True)
-class ScanObservationContext:
-    """当前 RGB 在本轮多视角扫描中的位置。"""
-
-    index: int
-    count: int
 
 
 @dataclass(frozen=True)
@@ -52,7 +44,6 @@ class VlmInteraction:
 
 
 __all__ = [
-    "ScanObservationContext",
     "VlmInputImage",
     "VlmInteraction",
 ]

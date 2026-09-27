@@ -98,15 +98,9 @@ class SemanticWorldNodes:
                 self._render(node)
 
     def record_interaction(self, interaction):
-        """把模型请求及 F 标记关联到固定视角节点，响应到达时更新显示分数。"""
+        """把单图请求及本地前沿关联记录连接到固定视角节点，响应到达时更新显示分数。"""
         context = interaction.context
         job_id = context.get("job_id")
-        if interaction.task == "object_localization":
-            path = interaction_node_path(context, 1)
-            if path in self._nodes:
-                self._nodes[path]["localization_request_id"] = interaction.interaction_id
-                self._render(self._nodes[path])
-            return
         if interaction.task != "semantic_analysis" or job_id not in self._jobs:
             return
         for path in self._jobs[job_id]:
@@ -233,7 +227,7 @@ class SemanticWorldNodes:
 
     def _register(self, path, values):
         node = {"state": "queued", "scores": {}, "reason": "", "navigation": "pending",
-                "request_id": 0, "localization_request_id": 0, "progress": "", "target_position": "", "detector": "", **values,
+                "request_id": 0, "progress": "", "target_position": "", "detector": "", **values,
                 "path": path, "image_logged": False}
         if "point_xy" not in node:
             pose, heading = node["pose"], node["heading"]
@@ -246,16 +240,17 @@ class SemanticWorldNodes:
         """将检测和评分结果写入显示节点；检测失败与未检出目标使用不同状态。"""
         for path in self._jobs.get(job_id, ()):
             node = self._nodes[path]
-            scores = result.get("frontier_scores", {})
-            for candidate, value in node["scores"].items():
-                value["value"] = scores.get(candidate)
-            views = result.get("target_view_ids")
+            score = result.get("image_score")
+            node["image_score"] = score
+            for value in node["scores"].values():
+                value["value"] = score
+            found = result.get("found")
             if node["kind"] == "frontier":
-                node["state"] = "checked" if node["candidate_id"] in scores else "failed"
-                node["reason"] = result.get("scoring_error", "") or ("missing score" if node["state"] == "failed" else "")
+                node["state"] = "checked" if score is not None else "failed"
+                node["reason"] = result.get("scoring_error", "") or ("missing score" if score is None else "")
             else:
-                node["state"] = "failed" if views is None else "target" if node["view_id"] in views else "checked"
-                node["clue_order"] = views.index(node["view_id"]) + 1 if views and node["view_id"] in views else 0
+                node["state"] = "failed" if found is None else "target" if found else "checked"
+                node["clue_order"] = 1 if found else 0
                 node["reason"] = result.get("detection_error", "")
             self._render(node)
 
@@ -279,7 +274,7 @@ class SemanticWorldNodes:
             f"{item['region']}: VLM={missing if item['value'] is None else format(item['value'], '.2f')}"
             + (f", frontier={item['frontier_score']:.2f}" if item.get("frontier_score") is not None else "")
             for item in node["scores"].values()
-        ) or "no projected Frontier"
+        ) or "no associated Frontier"
         pose = node["pose"]
         self._log(node["path"], self._rr.Points2D(
             [node["point_xy"]], colors=[color], radii=0.075 if node["kind"] == "view" else 0.04,
@@ -289,7 +284,6 @@ class SemanticWorldNodes:
             capture=f"({pose['x_m']:.2f}, {pose['y_m']:.2f}) m / {math.degrees(pose['yaw_rad']):.1f} deg",
             capture_time_s=node["timestamp_s"], source=node["source"],
             scoring_request=f"R{node['request_id']}" if node["request_id"] else "none",
-            localization_request=f"R{node['localization_request_id']}" if node["localization_request_id"] else "none",
             progress=node["progress"], reason=node["reason"], target_position=node["target_position"],
             detector=node["detector"],
         ))

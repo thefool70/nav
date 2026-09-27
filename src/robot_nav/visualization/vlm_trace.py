@@ -39,11 +39,11 @@ def interaction_result(interaction: VlmInteraction) -> Mapping[str, Any]:
 
 
 def result_summary(result: Mapping[str, Any]) -> str:
-    if "target_view_ids" in result:
-        view_ids = result["target_view_ids"]
-        target = ("detected: " + " → ".join(f"V{view_id}" for view_id in view_ids)
-                  if view_ids else "no target clues" if view_ids is not None else "detection failed")
-        return f"{target}; {len(result.get('frontier_scores', {}))} scores"
+    if "found" in result:
+        found = result["found"]
+        target = "target detected" if found else "no target" if found is not None else "detection failed"
+        score = result.get("image_score")
+        return f"{target}; image score: {score if score is not None else 'missing'}"
     for name in ("confirmation", "scene", "visibility"):
         if name in result:
             return f"{name}: {result[name]}"
@@ -173,11 +173,10 @@ class VlmTraceHistory:
             if views:
                 lines.extend(["Observations links open RGB + scores for each job; V links open a single-view card.",
                               "World shows grouped jobs; World history keeps every V/F marker.", ""])
-                target_views = latest["result"].get("target_view_ids") or ()
-                lines.extend(["| V | Clue order | Capture (x, y) m | Timestamp s |", "| --- | --- | --- | --- |"])
+                lines.extend(["| V | Target | Capture (x, y) m | Timestamp s |", "| --- | --- | --- | --- |"])
                 for index, view in enumerate(views):
                     pose = view["pose"]
-                    order = target_views.index(view["view_id"]) + 1 if view["view_id"] in target_views else "-"
+                    order = "yes" if latest["result"].get("found") else "-"
                     path = interaction_node_path(latest["context"], view["view_id"])
                     lines.append(f"| [V{view['view_id']}](recording://{path}) | "
                                  f"{order} | ({pose['x_m']:.2f}, {pose['y_m']:.2f}) | {view['timestamp_s']:.3f} |")
@@ -186,7 +185,7 @@ class VlmTraceHistory:
             if markers:
                 lines.extend(["| F | V | Region at capture | Score |", "| --- | --- | --- | --- |"])
                 for index, marker in enumerate(markers):
-                    score = latest["result"].get("frontier_scores", {}).get(marker["candidate_id"])
+                    score = latest["result"].get("image_score")
                     score_text = "missing" if score is None else f"{score:.2f}"
                     path = frontier_node_path(job_id, marker['label']) if job_id is not None else "world/observations"
                     lines.append(f"| [{marker['label']}](recording://{path}) | "
