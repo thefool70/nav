@@ -15,20 +15,35 @@ def build_semantic_analysis_prompt(target_text: str, search_mode: SearchMode) ->
     """每张原图独立评分；物体框使用 Qwen 的 0–1000 相对坐标，不要求输出编号。"""
     target = json.dumps(target_text, ensure_ascii=False)
     scoring = (
-        f"Target: {target}. Score this view's promise of leading to the target, 0-1; "
-        "0.5 if unclear. Not seeing it is not negative evidence. Ignore travel distance. "
+        "score: 0-1 direction promise, not detection confidence. Default 0.5 when target "
+        "is absent; raise for supporting context, lower only for contrary context. Ignore distance. "
     )
     if search_mode is SearchMode.SCENE:
-        return scoring + (
+        return f"Target: {target}. " + scoring + (
             "Set found=true only if the camera is already inside the target scene; "
             "a sign or a view through its entrance is insufficient. "
-            'Return JSON only: {"score":0.5,"found":false}.'
+            'Return compact JSON only: {"score":0.5,"found":false}.'
         )
-    return scoring + (
-        "Locate one clearly visible target object. Use bbox_2d=[xmin,ymin,xmax,ymax] "
-        "with coordinates normalized to 0-1000; use null if absent. "
-        'Return JSON only: {"score":0.5,"bbox_2d":null}.'
+    return (
+        f'Target: {target}. Return JSON only: {{"score":0.5,"bbox_2d":null}}. '
+        "bbox_2d: one clearly identifiable target object's [xmin,ymin,xmax,ymax], normalized 0-1000; null if absent or uncertain. "
+        + scoring.rstrip()
     )
+
+
+def semantic_analysis_schema(search_mode: SearchMode) -> Mapping[str, Any]:
+    """Ollama 的输出结构约束；数值范围及框顺序仍由解析器校验。"""
+    properties = {"score": {"type": "number", "minimum": 0, "maximum": 1}}
+    if search_mode is SearchMode.SCENE:
+        properties["found"] = {"type": "boolean"}
+    else:
+        properties["bbox_2d"] = {"anyOf": [
+            {"type": "null"},
+            {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 1000},
+             "minItems": 4, "maxItems": 4},
+        ]}
+    return {"type": "object", "properties": properties,
+            "required": list(properties), "additionalProperties": False}
 
 
 def parse_semantic_analysis_response(text: str, search_mode: SearchMode) -> SemanticAnalysis:
@@ -73,4 +88,4 @@ def _extract_json_mapping(text: str) -> Mapping[str, Any]:
     return payload
 
 
-__all__ = ["build_semantic_analysis_prompt", "parse_semantic_analysis_response"]
+__all__ = ["build_semantic_analysis_prompt", "parse_semantic_analysis_response", "semantic_analysis_schema"]

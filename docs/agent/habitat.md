@@ -284,6 +284,8 @@
   无足够线索用 0.5，没看到目标不是方向反证。模型不计算路径距离或可达性。
 - `TargetClue.bbox_norm` 只属于该线索的历史 RGB-D，物体定位直接复用，不再次请求 VLM。
   `OpenAICompatibleTargetObserver` 拒绝非 stop 的 chat completions 结束原因；
+  本地 `qwen3.5:4b` 使用 JSON Schema、零温度、关闭思考、输出上限 128 token。
+  Ollama 0.34.4 实测不能依赖 Schema 的 minimum/maximum 保证数值范围，解析器校验必须保留。
 
 - `SemanticPerception.begin_cycle` 接收结果：检测有效才登记覆盖，评分失败仍可保留目标线索。
   `_pending_coverage` 在结果被主循环接收前一直保留；失败后移除，不冒充已检查。

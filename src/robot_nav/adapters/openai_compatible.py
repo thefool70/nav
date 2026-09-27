@@ -24,11 +24,13 @@ from urllib.request import Request, urlopen
 
 from ..core.models import (
     SemanticAnalysis,
+    SearchMode,
     TargetSearchGoal,
 )
 from ..core.vision import (
     build_semantic_analysis_prompt,
     parse_semantic_analysis_response,
+    semantic_analysis_schema,
 )
 from .perception import (
     VlmInputImage,
@@ -89,7 +91,7 @@ class OpenAICompatibleTargetObserver:
         interaction = self._begin_interaction("semantic_analysis", prompt, image, context=trace_context)
         assistant_text, response_json = "", ""
         try:
-            payload, response_json = self._request_model(prompt, image)
+            payload, response_json = self._request_model(prompt, image, goal.search_mode)
             assistant_text = self._response_text(payload)
             parsed = parse_semantic_analysis_response(assistant_text, goal.search_mode)
         except (_ModelRequestError, OSError, ValueError) as exc:
@@ -108,11 +110,12 @@ class OpenAICompatibleTargetObserver:
         self,
         prompt: str,
         image: VlmInputImage,
+        search_mode: SearchMode,
     ) -> Tuple[Any, str]:
         """发送带图请求，并保留未经提取的完整 JSON 回应。"""
         image_url = _packed_rgb_to_png_data_url(image)
         if self._config.api_format is OpenAIApiFormat.CHAT_COMPLETIONS:
-            payload = _chat_completions_payload(self._config, prompt, image_url)
+            payload = _chat_completions_payload(self._config, prompt, image_url, search_mode)
         elif self._config.api_format is OpenAIApiFormat.RESPONSES:
             payload = _responses_payload(self._config, prompt, image_url)
         else:
@@ -239,6 +242,7 @@ def _chat_completions_payload(
     config: OpenAICompatibleConfig,
     prompt: str,
     image_url: str,
+    search_mode: SearchMode,
 ) -> Mapping[str, Any]:
     """构造 Chat Completions 多模态请求。"""
     payload = {
@@ -263,7 +267,12 @@ def _chat_completions_payload(
     elif config.model.strip().lower() == "qwen3.5:4b":
         # 随车 Ollama 使用 OpenAI 兼容参数关闭思考，避免生成额外推理文本。
         payload["reasoning_effort"] = "none"
-        payload["response_format"] = {"type": "json_object"}
+        payload["temperature"] = 0
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "navigation_view", "strict": True,
+                            "schema": semantic_analysis_schema(search_mode)},
+        }
         payload["max_tokens"] = config.max_output_tokens
     return payload
 
