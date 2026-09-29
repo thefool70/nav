@@ -24,8 +24,8 @@ def warmup_local_qwen(endpoint_url: str, model: str, api_format: str) -> None:
                 + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
 
     png = (b"\x89PNG\r\n\x1a\n"
-           + chunk(b"IHDR", struct.pack(">IIBBBBB", 640, 480, 8, 2, 0, 0, 0))
-           + chunk(b"IDAT", zlib.compress(bytes(480 * (1 + 640 * 3))))
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", 848, 480, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(480 * (1 + 848 * 3))))
            + chunk(b"IEND", b""))
     endpoint = address._replace(path="", query="", fragment="").geturl()
     deadline = time.monotonic() + 30

@@ -7,9 +7,10 @@ from .rgbd_camera import RgbdCamera, RgbdCameraConfig
 
 @dataclass(frozen=True)
 class D435iConfig(RgbdCameraConfig):
-    """彩色和深度均为 640×480、30 FPS；可显式选择设备公布的其他 profile。"""
+    """彩色和原始深度均为 848×480、30 FPS；深度对齐到彩色图。"""
 
-    depth_width: int = 640
+    color_width: int = 848
+    depth_width: int = 848
     depth_height: int = 480
 
 
