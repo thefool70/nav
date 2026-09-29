@@ -198,8 +198,8 @@ def _add_navigation_arguments(
         action="store_true",
         help="关闭 Rerun 实时可视化及自动录制",
     )
-    parser.add_argument("--rerun-viewer", choices=("web", "native"),
-                        help="Rerun 查看方式：网页或桌面 App")
+    parser.add_argument("--rerun-viewer", choices=("web", "native", "record"),
+                        help="Rerun 输出：web 网页、native 桌面 App、record 仅录制 RRD")
     parser.add_argument(
         "--rerun-save",
         type=Path,

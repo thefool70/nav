@@ -132,7 +132,7 @@
   "logging": {
     "_comments": {
       "no_rerun": "true 同时关闭 Rerun 实时显示和录制；JSONL 日志仍保留。",
-      "rerun_viewer": "web 使用网页，native 启动桌面 App；仅开启 Rerun 时生效。",
+      "rerun_viewer": "web 使用网页，native 启动桌面 App，record 仅录制 RRD；仅开启 Rerun 时生效。",
       "rerun_save": "Rerun 录制路径；null 自动在 data/run_logs 下创建，不覆盖已有文件。",
       "run_log": "导航 JSONL 日志路径；null 自动在 data/run_logs 下创建。"
     },

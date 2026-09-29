@@ -95,7 +95,7 @@ RERUN_SERVER_MEMORY_LIMIT = "25%"
 
 
 class RerunVisualizer:
-    """把传感器、地图、轨迹和算法状态同时送往实时界面与 RRD 文件。"""
+    """录制传感器、地图、轨迹和算法状态，可同时开启实时界面。"""
 
     def __init__(
         self,
@@ -129,10 +129,8 @@ class RerunVisualizer:
         self._panel_font = load_panel_font()
         if self._panel_font is None:
             print_font_notice_once()
-        rr.init("robot-nav")
-        live_recording = rr.get_data_recording()
-        if live_recording is None:
-            raise RuntimeError("Rerun 未创建实时记录流")
+        if viewer not in ("web", "native", "record"):
+            raise ValueError(f"未知 Rerun 输出模式：{viewer}")
 
         if recording_path is None:
             timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
@@ -146,32 +144,37 @@ class RerunVisualizer:
         # 用不同 ID 建立独立文件流，避免保存文件时关闭实时服务。
         disk_recording = rr.new_recording("robot-nav", recording_id=uuid4())
         rr.save(recording_path, recording=disk_recording)
-        self._recordings = (disk_recording, live_recording)
+        self._recordings = (disk_recording,)
         print(f"Rerun 自动录制文件：{recording_path}", flush=True)
         # 先连接实时输出，再发送布局和图像，避免切换 sink 时与后台写入争用。
-        if viewer == "native":
-            print("正在启动 Rerun 桌面 App。", flush=True)
-            rr.spawn(port=9878, recording=live_recording)
+        if viewer == "record":
+            print("Rerun 仅录制，不启动实时界面或网络服务。", flush=True)
         else:
-            rr.serve_web(
-                open_browser=False,
-                web_port=9090,
-                ws_port=9877,
-                recording=live_recording,
-                server_memory_limit=RERUN_SERVER_MEMORY_LIMIT,
-            )
-            print(
-                "Rerun Web Viewer 地址："
-                "http://127.0.0.1:9090/?url=ws://127.0.0.1:9877",
-                flush=True,
-            )
+            live_recording = rr.new_recording("robot-nav", recording_id=uuid4())
+            self._recordings += (live_recording,)
+            if viewer == "native":
+                print("正在启动 Rerun 桌面 App。", flush=True)
+                rr.spawn(port=9878, recording=live_recording)
+            else:
+                rr.serve_web(
+                    open_browser=False,
+                    web_port=9090,
+                    ws_port=9877,
+                    recording=live_recording,
+                    server_memory_limit=RERUN_SERVER_MEMORY_LIMIT,
+                )
+                print(
+                    "Rerun Web Viewer 地址："
+                    "http://127.0.0.1:9090/?url=ws://127.0.0.1:9877",
+                    flush=True,
+                )
         _send_default_blueprint(
             rr,
             recordings=self._recordings,
             text_panels_as_images=self._panel_font is not None,
         )
         # 0.22.1 的 flush 位于记录流对象上；等待时会释放 GIL。
-        # 文件由 SDK 后台持续写入；SDK 的退出钩子负责刷新并关闭两个流。
+        # 文件由 SDK 后台持续写入；SDK 的退出钩子负责刷新并关闭记录流。
         for recording in self._recordings:
             recording.flush(blocking=True)
 
