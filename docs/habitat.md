@@ -58,7 +58,7 @@ conda 中同名库覆盖 D3D12 所需版本。
 `habitat.scene` 中设置；配置规则见 [统一运行配置](../README.md#统一运行配置)。
 
 
-没有 VLM 凭据时，先运行随机评分调试模式：
+只检查探索与运动流程时，可以运行随机评分调试模式：
 
 ```bash
 env HABITAT_RENDERER=gpu sim/habitat/run.sh \
@@ -73,11 +73,30 @@ env HABITAT_RENDERER=gpu sim/habitat/run.sh \
 该模式不调用模型，只能检查扫描、Frontier、路径规划、运动和重新选点，不能识别
 目标。相同场景和 `--seed` 会使用相同随机起点。
 
-正式语义搜索先执行 `opencode auth login`，再去掉
-`--debug-random-score`。也可以用 `ROBOT_NAV_VLM_API_KEY` 显式覆盖凭据。默认
-模型为 OpenCode Go 的 `qwen3.7-plus`，提示词使用英文并关闭 thinking。
-CLI 自动为本次导航设置稳定的 `x-opencode-session` 请求头。若旧进程出现
-`HTTP 400 / MissingSessionID`，更新代码并重启导航；请求失败原因会直接打印在终端。
+正式语义搜索去掉 `--debug-random-score`。默认模型为随车 Ollama 的
+`qwen3.5:4b`，无需云端密钥；在开发机运行仿真时，先按
+[本地模型说明](hermes.md#随车本地-qwen35-4b) 转发 11434 端口。
+提示词使用英文并关闭思考。显式切换云端模型时再配置对应接口、模型和
+`ROBOT_NAV_VLM_API_KEY`；请求失败原因会直接打印在终端。
+
+完整物体搜索示例（开发机另一个终端保持上述模型端口转发）：
+
+```bash
+cd /home/lzc/nav
+micromamba activate robot-nav-habitat
+env HABITAT_RENDERER=gpu sim/habitat/run.sh \
+  python -m robot_nav habitat \
+  --scene data/habitat/versioned_data/habitat_test_scenes/apartment_1.glb \
+  --target "沙发" --object-class sofa --seed 1 \
+  --object-python /home/lzc/micromamba/envs/robot-nav/bin/python \
+  --max-cycles 100 --rerun
+```
+
+YOLOE 在开发机 `robot-nav` 环境运行，Qwen 通过 SSH 隧道在随车端运行。
+完整物体测试需要开发机已有 `data/models/yoloe/yoloe-26s-seg.pt`、
+`data/models/yoloe/mobileclip2_b.ts`。
+先用固定 seed 重现流程，再换 seed 检查不同起点。仿真当前为 320×240 图像，
+用于检查算法流程；其耗时不能直接代表真机 848×480、30 FPS 的持续视频负载。
 
 场景搜索额外增加：
 
@@ -91,20 +110,22 @@ CLI 自动为本次导航设置稳定的 `x-opencode-session` 请求头。若旧
 中检查目标并评分 Frontier；没有语义分时按几何分继续探索。随机模式也经过同一
 队列，但分析只返回随机分和未发现目标。结果在下一次决策使用，后台检测到目标后
 按顺序处理线索。场景模式返回拍摄位姿即完成；物体模式先用历史 RGB-D 的
-YOLO/VLM 检测与 SAM2 分割定位；深度定位失败时沿框中心方向或无框时的光轴
+置信度融合认可的目标框与同帧 YOLOE 掩码定位；深度定位失败时沿框中心方向
 查询已公开地图的首个障碍作为位置假设。得到位置后搜索目标周围可达停靠点。历史线索
 失败时原地继续处理其他历史画面；全部都无法定位才保底返回并停止，以退出码
 `3` 表示未完成搜索。停靠命令执行成功后直接完成搜索，不再进行到达后的检测或测距。具体规则见
 [算法说明](algorithm.md#物体接近)。
 
-物体接近默认通过独立 Python 进程复用 `robot-nav` 环境中的模型；
+物体模式持续接收仿真传感器帧（包括动作期间），YOLOE 默认按 10 Hz 上限取最新帧检测，VLM 分析扫描图和视频候选。
+命中规则见 [置信度融合](algorithm.md#视频检测与置信度融合)，目标处理等待当前动作完成。
+模型通过独立 Python 进程复用 `robot-nav` 环境；
 `robot-nav-habitat` 继续负责仿真。可用 `--object-python <PATH>` 指定已有模型
-环境的解释器，`--object-class "chair"` 提供简短 YOLO 类别，`--object-device cuda`
-选择设备。两个模型分别常驻复用；终端显示当前加载或推理步骤与耗时。
-场景和随机评分模式不加载 YOLO/SAM2。
+环境的解释器，`--object-class "chair"` 提供简短英文 YOLOE 类别，`--object-device cuda`
+选择设备。YOLOE 启动预热，进程常驻复用；终端显示当前加载或推理步骤与耗时。
+场景和随机评分模式不加载 YOLOE。
 
-快照与结果保存在 `data/run_logs/semantic-*/job-*`，退出后保留，当前不会自动
-恢复上次队列。有效方向耗尽时先停止移动并等待队列；等待不占 `--max-cycles`
+RGB-D 快照保存在有界内存中，分析无目标或定位完成后释放；退出不恢复上次队列。
+JSONL 与启用时的 Rerun 保留诊断记录。有效方向耗尽时先停止移动并等待队列；等待不占 `--max-cycles`
 额度，达到决策上限仍会退出。
 
 ## Rerun
@@ -124,11 +145,8 @@ YOLO/VLM 检测与 SAM2 分割定位；深度定位失败时沿框中心方向�
 - `VLM full` 保留实际输入图、完整提示词、原始输出、HTTP JSON 和解析结果。
 - `VLM summary` 显示排队／运行／返回／导航接收状态、有序目标线索、分数和耗时。
 
-提供给 VLM 的 F 编号位于图片下方，通过细引线连接图内的 Frontier 地面锚点。
-锚点由拍摄时的位姿、相机标定与对齐深度生成，并随快照保存；简表显示所属 V，
-完整卡片记录原始像素坐标。无可靠投影的候选回退到几何分，画面仍参与目标检测。
-输入 RGB 仍使用当前 320 像素宽度上限。V 编号使用蓝底白字，页脚按 F 标签
-行数收缩；没有 F 时不预留页脚，图间距为 2 像素。
+VLM 每次只接收一张原始 RGB，不添加前沿点标注。图片评分关联同视场内的候选；
+可视化中的 J/V/F 编号用于复盘任务、画面与候选关系，不属于模型输入。
 
 World 占据主要空间，直接在占用图上显示机器人、路径和拍摄任务。同一次扫描只
 显示一个 J 点，0.45 m 内的任务合并显示，`+N` 表示另有 N 个邻近任务。点的位置
@@ -176,6 +194,7 @@ World 占据主要空间，直接在占用图上显示机器人、路径和拍�
 完整路径。`--rerun-save <PATH>` 可指定新文件，不覆盖已有文件；`--no-rerun`
 同时关闭界面和录制。录制包含图像、地图、状态及默认布局，可在 Rerun 0.22.1
 中打开回放。
+使用 `--rerun --rerun-viewer record` 可只写 RRD，不启动实时界面；录制仍有编码与写盘开销。
 
 Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB）；WebSocket 服务端缓存另有
 系统总内存 25% 的上限。内存淘汰旧数据不影响独立写入的 RRD，但界面不会自动

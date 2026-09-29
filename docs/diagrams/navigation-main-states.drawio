@@ -1,0 +1,170 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net" type="device" version="31.5.3">
+  <diagram id="algorithm-core" name="核心算法流程">
+    <mxGraphModel dx="1780" dy="1490" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1780" pageHeight="1490" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="band_main" value="" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=5;fillColor=#fafcff;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="145" width="1700" height="325" />
+        </mxCell>
+        <mxCell id="band_async" value="" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=5;fillColor=#fcfaff;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="510" width="1700" height="255" />
+        </mxCell>
+        <mxCell id="band_target" value="" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=5;fillColor=#fafdfa;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="845" width="1700" height="415" />
+        </mxCell>
+        <mxCell id="title" value="语义导航 · 核心算法" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=35;fontColor=#233b54;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="60" y="25" width="1400" height="55" />
+        </mxCell>
+        <mxCell id="subtitle" value="扫描图提供方向评分，限频 YOLOE 与 VLM 形成目标线索，当前动作完成后处理。" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=19;fontColor=#62758b;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="63" y="90" width="1630" height="35" />
+        </mxCell>
+        <mxCell id="h1" value="01  探索主线" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=21;fontColor=#385d88;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="65" y="157" width="600" height="36" />
+        </mxCell>
+        <mxCell id="h2" value="02  后台视觉推理" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=21;fontColor=#715395;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="65" y="525" width="360" height="36" />
+        </mxCell>
+        <mxCell id="h2sub" value="与扫描、移动并行" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=16;fontColor=#8c79a4;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="65" y="568" width="340" height="30" />
+        </mxCell>
+        <mxCell id="h3" value="03  目标处理" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=21;fontColor=#397558;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="65" y="859" width="600" height="36" />
+        </mxCell>
+        <mxCell id="plan" value="&lt;b style=&quot;font-size:23px&quot;&gt;更新地图 · 规划扫描&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;提取局部 Frontier 边界&lt;br&gt;结合已检查 / 待分析覆盖规划方向&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf4ff;strokeColor=#8aaad2;strokeWidth=1.5;fontColor=#294b74;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="90" y="260" width="280" height="125" />
+        </mxCell>
+        <mxCell id="capture" value="&lt;b style=&quot;font-size:23px&quot;&gt;逐方向转向 · 采图&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;朝向确认后固定单张 RGB-D&lt;br&gt;保留拍摄位姿与相机标定&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf4ff;strokeColor=#8aaad2;strokeWidth=1.5;fontColor=#294b74;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="460" y="260" width="280" height="125" />
+        </mxCell>
+        <mxCell id="select" value="&lt;b style=&quot;font-size:23px&quot;&gt;筛选候选 · 选点&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;可达候选的几何分 + 已有语义分&lt;br&gt;优先新方向，其余方向暂存&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf4ff;strokeColor=#8aaad2;strokeWidth=1.5;fontColor=#294b74;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1100" y="260" width="290" height="125" />
+        </mxCell>
+        <mxCell id="move" value="&lt;b style=&quot;font-size:23px&quot;&gt;移动到选定位置&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;执行运动并获取实际反馈&lt;br&gt;视频持续进入 YOLOE 队列&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf4ff;strokeColor=#8aaad2;strokeWidth=1.5;fontColor=#294b74;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1480" y="260" width="230" height="125" />
+        </mxCell>
+        <mxCell id="p1" value="" source="plan" target="capture" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#6988ac;fontColor=#6988ac;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="p2" value="本轮采集完成" source="capture" target="select" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#6988ac;fontColor=#6988ac;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="p3" value="" source="select" target="move" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#6988ac;fontColor=#6988ac;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="p4" value="移动完成，更新地图并开始下一轮扫描" source="move" target="plan" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#6988ac;fontColor=#6988ac;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1595" y="210" />
+              <mxPoint x="230" y="210" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="scan_note" value="无待查方向时，仍采当前画面检查目标。" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=15;fontColor=#62758b;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="415" width="640" height="32" />
+        </mxCell>
+        <mxCell id="back_note" value="无新方向：逐级回退父节点&lt;br&gt;按原顺序恢复暂存方向，再移动" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=14;fontColor=#62758b;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="800" y="403" width="370" height="55" />
+        </mxCell>
+        <mxCell id="queue" value="&lt;b style=&quot;font-size:23px&quot;&gt;扫描图 + 限频 YOLOE&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;扫描图与中等分视频候选入队&lt;br&gt;高分 YOLOE 直接形成线索&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#f2edfc;strokeColor=#b4a0d3;strokeWidth=1.5;fontColor=#654d8a;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="460" y="595" width="280" height="125" />
+        </mxCell>
+        <mxCell id="vlm" value="&lt;b style=&quot;font-size:23px&quot;&gt;VLM 单图推理&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;原图评分 + 框选 + 置信度&lt;br&gt;场景模式判断是否已在场景内&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#f2edfc;strokeColor=#b4a0d3;strokeWidth=1.5;fontColor=#654d8a;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="805" y="595" width="260" height="125" />
+        </mxCell>
+        <mxCell id="result" value="&lt;b style=&quot;font-size:23px&quot;&gt;接收评分与目标线索&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;图片分数关联同图可见候选&lt;br&gt;高分单路 / 中等分同框联合命中&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#f2edfc;strokeColor=#b4a0d3;strokeWidth=1.5;fontColor=#654d8a;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1130" y="595" width="280" height="125" />
+        </mxCell>
+        <mxCell id="submit" value="每采一张，立即提交" source="capture" target="queue" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#9374b5;fontColor=#9374b5;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;dashed=1;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="qv" value="" source="queue" target="vlm" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#9374b5;fontColor=#9374b5;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;dashed=1;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="vr" value="" source="vlm" target="result" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#9374b5;fontColor=#9374b5;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;dashed=1;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="score" value="① 已返回的方向评分" source="result" target="select" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#9374b5;fontColor=#9374b5;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=0.4;exitY=0;entryX=0.48;entryY=1;dashed=1;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="no_wait" value="选点不等本轮推理&lt;br&gt;缺分时只用几何分" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=18;fontColor=#715395;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1450" y="610" width="255" height="75" />
+        </mxCell>
+        <mxCell id="score_note" value="同图可见的多个候选共用图片分数；评分只影响后续选点，不改变正在执行的移动。" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=16;fontColor=#62758b;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="65" y="778" width="1610" height="35" />
+        </mxCell>
+        <mxCell id="clue" value="&lt;b style=&quot;font-size:23px&quot;&gt;优先处理目标线索&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;下一个决策周期接收&lt;br&gt;当前线索失败先尝试其他历史线索&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf8f2;strokeColor=#8fc5a9;strokeWidth=1.5;fontColor=#296a4d;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="130" y="995" width="330" height="135" />
+        </mxCell>
+        <mxCell id="scene" value="&lt;b style=&quot;font-size:23px&quot;&gt;场景：返回拍摄位姿&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;回到当时的位置，并对齐朝向&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf8f2;strokeColor=#8fc5a9;strokeWidth=1.5;fontColor=#296a4d;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="680" y="920" width="340" height="110" />
+        </mxCell>
+        <mxCell id="object" value="&lt;b style=&quot;font-size:23px&quot;&gt;物体：历史 RGB-D 定位&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;复用认可目标框 + YOLOE&lt;br&gt;深度优先，地图障碍射线作为保底&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf8f2;strokeColor=#8fc5a9;strokeWidth=1.5;fontColor=#296a4d;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="680" y="1120" width="340" height="110" />
+        </mxCell>
+        <mxCell id="approach" value="&lt;b style=&quot;font-size:23px&quot;&gt;规划停靠 · 接近&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;选择目标附近的可达停靠点&lt;br&gt;移动并对准目标&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf8f2;strokeColor=#8fc5a9;strokeWidth=1.5;fontColor=#296a4d;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1120" y="1120" width="280" height="110" />
+        </mxCell>
+        <mxCell id="done" value="&lt;b style=&quot;font-size:23px&quot;&gt;搜索完成&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;span style=&quot;font-size:16px&quot;&gt;场景返回到位&lt;br&gt;或物体停靠命令成功&lt;/span&gt;" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;rounded=1;arcSize=14;fillColor=#edf8f2;strokeColor=#8fc5a9;strokeWidth=1.5;fontColor=#296a4d;align=center;verticalAlign=middle;spacing=13;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1490" y="1000" width="220" height="125" />
+        </mxCell>
+        <mxCell id="trigger" value="② 目标线索：转入目标处理" source="result" target="clue" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#4c936e;fontColor=#4c936e;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=0.7;exitY=1;entryX=0.5;entryY=0;dashed=1;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1326" y="825" />
+              <mxPoint x="295" y="825" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cs" value="场景" source="clue" target="scene" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#4c936e;fontColor=#4c936e;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.25;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="560" y="1029" />
+              <mxPoint x="560" y="975" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="co" value="物体" source="clue" target="object" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#4c936e;fontColor=#4c936e;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.75;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="560" y="1096" />
+              <mxPoint x="560" y="1175" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="oa" value="定位成功" source="object" target="approach" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#4c936e;fontColor=#4c936e;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="sd" value="到位" source="scene" target="done" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#4c936e;fontColor=#4c936e;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1600" y="975" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ad" value="停靠成功" source="approach" target="done" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;arcSize=15;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#4c936e;fontColor=#4c936e;fontFamily=Microsoft YaHei;fontSize=15;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0.5;entryY=1;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1600" y="1175" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="rules_title" value="图中保留的是算法主干" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=18;fontColor=#42576c;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="65" y="1300" width="600" height="30" />
+        </mxCell>
+        <mxCell id="rules" value="• 每个导航周期先接收后台结果；线索优先于探索，但不抢占已下发的动作。目标处理期间暂停 VLM 队列，YOLOE 仍运行。&lt;br&gt;• 探索方向耗尽时再等队列；目标处理失败先用完历史线索，再按条件恢复探索或保底停止。&lt;br&gt;• 箭头实线表示执行顺序，虚线表示异步提交或结果传递。局部重试、终态与资源管理未展开。" style="html=1;whiteSpace=wrap;fontFamily=Microsoft YaHei;text;align=left;verticalAlign=middle;fontSize=16;fontColor=#62758b;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="65" y="1340" width="1620" height="95" />
+        </mxCell>
+        <mxCell id="yolo_direct" source="queue" target="result" value="YOLOE 高分直接交付" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;dashed=1;strokeColor=#9374b5;fontColor=#654d8a;fontSize=14;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;entryX=0.5;entryY=0;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="600" y="555" />
+              <mxPoint x="1270" y="555" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

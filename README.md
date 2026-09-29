@@ -15,14 +15,14 @@
 1. `src/robot_nav/__main__.py`：启动分派；参数定义见 `cli.py`。
 2. `src/robot_nav/launch.py`：两种环境共用的组件装配；环境创建与准备见 `environment.py`。
 3. `src/robot_nav/app.py`：完整运行循环，以及单周期的输入、感知、决策和运动。
-4. `src/robot_nav/core/navigator.py`：行为分派与公共输入检查，四类行为的入口。
+4. `src/robot_nav/core/navigator.py`：输入检查、感知结果归并、行为分派与执行反馈。
 5. `src/robot_nav/core/models.py`：算法输入、输出和跨周期状态。
 6. 当前使用的 Adapter：Habitat 或 Hermes + D435i。
 
 启动、配置和主要算法模块按“入口 → 主要步骤 → 内部辅助实现”阅读；
 Adapter 先列公共操作，再列内部实现。数据类型仍先于使用它们的函数定义。`launch.py` 的
 `_assemble_and_run` 展示组件连接，`app.py` 从 `run_navigation` 总循环读到
-`run_navigation_cycle` 单周期；计时与显示细节集中在 `runtime_reporting.py`。
+`run_navigation_cycle` 单周期；日志、终端输出和显示回调集中在 `run_log.py`。
 函数前缀 `_` 表示模块内部接口，不表示它是否属于算法计算。
 行为入口保留重要分支和恢复规则，计算函数直接表达具体算法；不为未使用的
 调用方式维护通用选项或转发接口。深度定位只保留当前导航使用的正深度采样与
@@ -30,6 +30,9 @@ Adapter 先列公共操作，再列内部实现。数据类型仍先于使用它
 
 算法细节见 [算法说明](docs/algorithm.md)，坐标和接口约定见
 [底盘接口标准](docs/chassis-interface.md)。
+核心运行逻辑先看 [核心算法流程图（draw.io XML）](docs/diagrams/navigation-main-states.drawio)；
+图中展示探索主线、逐图入队推理，以及评分与目标线索的返回路径。
+函数步骤、后台队列与恢复细节见 [完整流程图](docs/diagrams/navigation-state-machine.drawio)。
 
 ## 架构
 
@@ -56,9 +59,9 @@ ChassisInterface ──► NavigationFrame
 
 - `core/` 只做算法计算，不读取设备、不请求模型、不发送控制命令。
 - `app.py` 负责导航循环与单周期编排，并把可恢复的运动结果送回状态机。
-- 搜索核心按四类行为组织：`core/scan_behavior.py`（观察方向规划与采集）、
-  `core/exploration.py`（Frontier 探索）、`core/backtracking.py`（分支回退）、
-  目标处理（`core/scene_target.py`、`core/target_clue.py`、`core/object_approach.py`）。
+- 搜索核心按完整职责组织：`core/scan.py`（扫描规划、采集进度与覆盖复用）、
+  `core/exploration.py`（Frontier 生成、选点、历史与分支回退）、
+  `core/target.py`（目标线索、场景返回、物体接近与停靠）。
 - `perception/` 组织取帧、视觉队列、语义判定与历史物体定位；不直接控制底盘，
   也不修改搜索状态。
 - `adapters/` 负责设备协议、坐标转换、地图归一化和视觉模型请求。
@@ -66,11 +69,37 @@ ChassisInterface ──► NavigationFrame
   `rerun_view.py` 组织 Rerun 记录，`panels.py` 生成状态文本与模型卡片，
   `view_geometry.py` 计算显示坐标、机器人轮廓与路径线段。
 
+理解算法先读 `app.py::run_navigation_cycle` 和 `core/navigator.py::navigate`，
+再进入扫描、探索或目标处理文件。每个文件包含该职责的推进、恢复与专用计算，
+入口在前，细节在后：
+
+| 职责 | 主要入口与数据去向 |
+| --- | --- |
+| 扫描 | `continue_scanning` 规划转向／采集；`record_scanned_direction` 登记实际采集的覆盖并推进扫描 |
+| 探索 | `select_exploration_target` 生成候选；需要评分时，`complete_frontier_selection` 用缓存分数直接完成本轮选择 |
+| 回退与恢复 | `begin_backtracking` 逐层返回；探索失败交给 `recover_frontier_motion`，返回失败交给 `recover_backtrack_issue` |
+| 目标处理 | `continue_target_search` 处理线索、定位结果与停靠反馈，也决定历史线索耗尽后的去向 |
+
+跨职责仍共用同一套规则：扫描从探索模块取得完整 Frontier 边界，物体停靠共用
+可达区计算；它们通过普通函数调用，不复制算法。数据定义放在 `models.py`，
+坐标、动作转换与路径长度放在 `geometry.py`；独立的 `timing.py` 只向调用方
+提供的列表追加耗时，使算法和设备层都能计时而不依赖日志写盘。
+
+感知按数据流阅读：`snapshot_store.py` 固定和保存单帧 RGB-D，
+`semantic_queue.py` 管理 FIFO、评分缓存和线索交付，`analyzer.py` 定义单图
+输入、提示词及输出解析。`object_localizer.py` 复用已通过置信度融合的历史目标框与掩码，
+进行深度与障碍射线计算，不在定位时另行检测。内存快照由扫描队列与历史定位共用，模型请求通过 Adapter。
+线程和关闭顺序集中在队列与模型进程中。
+
+启动层创建同一份 `TargetSearchGoal`，传给感知组件和导航循环；每次采集显式
+传入当前帧的 `CaptureContext`，读取评分时显式传入地图坐标系，避免依赖此前
+绑定的帧。搜索状态仍只由核心更新，异步任务状态仍只由感知队列维护。
+
 ## 搜索方式
 
 | 模式 | 发现目标 | VLM 的作用 | 后续行为 |
 | --- | --- | --- | --- |
-| 物体搜索 | 后台检查前沿扫描采集的固定画面 | 单图评分与框选；历史定位复用该框 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
+| 物体搜索 | YOLOE 逐视频帧检测，扫描图及视频候选由 VLM 分析 | 单图评分、框选与置信度；与同帧 YOLOE 融合 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
 | 场景搜索 | 后台检查前沿扫描采集的固定画面 | 同一次请求判断场景与评分 Frontier | 返回拍摄位置并对齐朝向，搜索完成 |
 
 两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，到位后
@@ -84,13 +113,16 @@ ChassisInterface ──► NavigationFrame
 返回节点未完成时保留实际位置，跳过该返回节点并重新检查有效方向，不直接结束搜索。
 
 命令行默认使用异步 FIFO 视觉队列。扫描每采集一张图片就提交分析，不等待整轮收齐。
-模型直接查看原图，返回图片评分和目标框（场景模式返回是否已进入场景），不标注前沿点。
-同图视场内、地图视线可见的候选共用图片评分。模型任务只来自前沿扫描，移动途中不额外选帧。
+模型直接查看原图，返回图片评分、目标框和置信度（场景模式返回是否已进入场景及置信度），不标注前沿点。
+同图视场内、地图视线可见的候选共用图片评分。YOLOE-26s 默认以 10 Hz 上限检测最新视频帧，
+包括移动和转向期间；中等分候选送同帧给 VLM 确认，高分可直接形成目标线索。
+初始门槛为 VLM ≥ 0.90 或 YOLOE ≥ 0.70；或 VLM ≥ 0.60、YOLOE ≥ 0.30 且同帧框 IoU ≥ 0.30。
+两路置信度不求平均，方向评分不参与命中判定；阈值尚未统计校准，可在 `config.json` 调整。
 缺少语义分时按几何分继续走，评分只在下一次决策生效。
-后台按 FIFO 处理目标线索。场景模式返回拍摄位置并对齐朝向后完成，不进行到场视觉复查。
-物体模式复用扫描目标框在历史 RGB-D 上定位，同时保留 YOLO 独立检测，任一路
-检出即可使用；优先用 SAM2 掩码，分割失败时直接用检测框内深度。无法用深度定位时，
-有框就沿框中心方向查询地图中的首个障碍，无框则沿相机光轴，将障碍表面作为目标位置假设。
+后台按结果可用顺序交付目标线索，当前动作完成后才处理。场景模式返回拍摄位置并对齐朝向后完成，不进行到场视觉复查。
+物体模式仅用通过门槛的目标框在同帧历史 RGB-D 上定位；优先复用同帧匹配的 YOLOE 掩码，
+没有对应掩码或掩码测距失败时使用框内深度。无法用深度定位时，沿框中心方向查询地图中的首个障碍，
+将障碍表面作为目标位置假设。
 得到位置后，在目标周围搜索可达自由格，从当前位置一次前往停靠点并对准目标，
 停靠命令执行成功后直接完成搜索。
 历史定位失败时留在当前位置，继续下一条线索，并处理已采集但尚未分析的画面。
@@ -99,14 +131,18 @@ ChassisInterface ──► NavigationFrame
 当前线索定位和接近期间暂停普通队列，迟到结果暂存；需要更多历史线索时
 只恢复已有队列的分析，不为此新增运动。
 有效探索方向耗尽后先等待队列，模型失败不冒充“已经检查”。
+RGB-D 快照在内存交接，最多 256 帧、图像预算 2 GiB；未命中或定位完成后释放。
+JSONL 保存判断与计时，启用 Rerun 时录制画面；运行时不再写入或回读快照文件。
+随车运行后下载到本机回放使用 `bash hardware/hermes/tunnel.sh --record <导航参数>`，
+不传输实时画面，具体命令见 [离线录制与回放](docs/hermes.md#随车录制结束后在本机回放)。
 
 Hermes 与 Habitat 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
 未知区的累计长度超过 1.5 m 才取消动作，在本次运行中持续禁止向整个连通 Frontier 区域探索移动并转向其他候选，
 避免在同一片边界内换点反复取消。
 
-Hermes 的 `MoveToAction` 若连续 10 秒没有离开 0.5 m 半径，Adapter 就取消并确认
-停止，在近深度障碍位置或本次目标路线前方横向建立人工占用墙。原地摆头不算脱困；
-可靠近深度只用于提高墙的位置精度。墙在本次运行中永久叠加到探索图，后续地图更新
+Hermes 的 `MoveToAction` 朝向行进路径后，若连续 10 秒没有离开 0.5 m 半径，Adapter 就取消并确认
+停止，在近深度障碍位置或本次目标路线前方横向建立人工占用墙。扫描和 MoveTo 内部的调头不累计阻塞时间；
+可靠近深度只用于提高墙的位置精度。墙在本次运行中同时叠加到探索图和停靠规划使用的完整导航图，后续地图更新
 和再次到访都不会清除它；墙后的 Frontier 因不可达而退出候选。具体判定与墙的生成见
 Hermes 文档。
 
@@ -168,13 +204,18 @@ python -m robot_nav hermes --config config.json --target "chair" --enable-motion
 可跳过真机启动前移。固定外参保存在 camera 组已有的六个高度、偏移和角度字段中；
 远程方式先用 `hardware/hermes/fetch_camera_extrinsics.py` 获取一次，导航启动时读取。
 本地 USB 未配置齐六项时仍可用 `camera.camera_calibration` 指定外参文件。
-密钥继续通过环境变量或已有凭据读取。
+VLM 默认使用随车 Ollama 的 `qwen3.5:4b`，接口为
+`http://127.0.0.1:11434/v1/chat/completions`；本机调用无需密钥。
+在开发机运行导航时，先按 [随车本地模型说明](docs/hermes.md#随车本地-qwen35-4b)
+转发 11434 端口。显式改用云端模型时，密钥通过环境变量或已有凭据读取。
 `navigation.max_unknown_path_m` 是两种环境共用的未知路径长度上限（默认 1.5 米），
 从原来的 `hermes.max_unknown_path_m` 移到此处；自定义配置文件也需同步移动该字段。
 `--enable-motion`、`--preflight-only`、`--base-only` 只接受命令行设置，不能写入配置。
 
-`logging.rerun_viewer` 选择网页 `web` 或桌面 App `native`；可用
-`--rerun-viewer native` 临时覆盖，录制方式不变。
+`logging.rerun_viewer` 选择网页 `web`、桌面 App `native` 或仅录制 `record`；可用
+`--rerun-viewer record` 临时覆盖，三种方式均保存 RRD。
+在开发机用 `bash hardware/hermes/tunnel.sh --run <hermes 导航参数...>` 启动随车导航，
+会默认开启 Rerun 网页并自动转发到本机；[命令与访问地址](docs/hermes.md#从开发机启动并自动转发)。
 
 配置布尔值可临时覆盖：`--rerun` / `--no-rerun`、`--debug-random-score` /
 `--no-debug-random-score`、`--debug-frontier` / `--no-debug-frontier`。
@@ -233,53 +274,32 @@ python -m robot_nav hermes --preflight-only
 
 ## 主要目录
 
-| 路径 | 职责 |
+| 路径（相对 `src/robot_nav/`） | 职责 |
 | --- | --- |
-| `src/robot_nav/__main__.py`、`cli.py` | 启动分派、参数定义与组合校验 |
-| `src/robot_nav/launch.py` | 两种环境共用的组件装配、日志与可视化接线 |
-| `src/robot_nav/environment.py` | Adapter 创建、真机预检与启动前移 |
-| `src/robot_nav/app.py` | 完整导航循环、单周期编排与显式动作执行 |
-| `src/robot_nav/core/navigator.py` | 行为分派与公共输入检查 |
-| `src/robot_nav/core/scan_behavior.py` | Frontier 观察方向规划、补扫与画面采集 |
-| `src/robot_nav/core/exploration.py` | Frontier 选点、提交、淘汰与暂存方向恢复 |
-| `src/robot_nav/core/backtracking.py` | 分支节点回退与到点后恢复方向 |
-| `src/robot_nav/core/scene_target.py` | 场景线索返回拍摄位姿并完成 |
-| `src/robot_nav/core/target_clue.py` | 目标线索分派与丢弃 |
-| `src/robot_nav/core/object_approach.py` | 历史线索处理、停靠完成与保底返回停止 |
-| `src/robot_nav/core/frontier_regions.py` | Frontier 区域刷新、候选预览与区域屏蔽 |
-| `src/robot_nav/core/perception_flow.py` | 感知增量归并、采样上下文与目标处理状态 |
-| `src/robot_nav/core/actions.py` | 执行与日志共用的目标位姿转换 |
-| `src/robot_nav/runtime_reporting.py` | 周期日志回调与终端摘要 |
-| `src/robot_nav/core/navigation_io.py` | 动作构造与状态/边界校验的公共输入检查 |
-| `src/robot_nav/core/observation_coverage.py` | 局部 Frontier 观察点、RGB-D 覆盖记录和跨位置复用 |
-| `src/robot_nav/adapters/scan_image.py` | 固定原始扫描图像与相机标定 |
-| `src/robot_nav/core/path_validation.py` | 测量实际规划路径在算法未知区内的累计长度 |
-| `src/robot_nav/core/object_grounding.py` | RGB-D 定位与图像方向上的障碍位置假设 |
-| `src/robot_nav/core/object_standoff.py` | 在目标周围搜索满足净空与连通条件的停靠点 |
-| `src/robot_nav/perception/semantic_queue.py` | 扫描快照、FIFO 单图分析与迟到结果接收 |
-| `src/robot_nav/perception/analyzer.py` | 语义分析的模型边界协议 |
-| `src/robot_nav/perception/snapshot_store.py` | 语义快照的写入与读取 |
-| `src/robot_nav/adapters/habitat/` | Habitat Adapter |
-| `src/robot_nav/adapters/hermes/` | Hermes + D435i Adapter、REST 客户端与外参读取 |
-| `src/robot_nav/adapters/realsense/` | RealSense RGB-D 采集、D435i 配置 |
-| `src/robot_nav/adapters/openai_compatible.py` | VLM 请求与结构化结果解析 |
-| `src/robot_nav/perception/object_localizer.py` | 历史 VLM 框复用与 YOLO 检测、SAM2 分割与定位回退策略 |
-| `src/robot_nav/adapters/object_detection_worker.py` | 在指定环境中常驻运行 YOLO 或 SAM2，记录阶段与调用栈 |
-| `src/robot_nav/adapters/sam2_segmenter.py` | SAM2 边界框到像素掩码的分割 |
-| `src/robot_nav/adapters/object_model_process.py` | 模型进程的请求、进度、超时与退出 |
-| `src/robot_nav/adapters/yolo_world.py` | YOLO-World 模型加载与框检测 |
-| `src/robot_nav/visualization/` | Rerun 调试界面 |
-| `src/robot_nav/visualization/semantic_world.py` | World 节点的固定 RGB、评分与状态关联 |
-| `src/robot_nav/visualization/observation_card.py` | 同次观测的 RGB、评分锚点与状态卡片 |
-| `sim/habitat/` | Habitat 环境与启动脚本 |
-| `hardware/hermes/`、`hardware/realsense/` | D435i USB 转发、RSUSB 构建与 udev 规则 |
+| `__main__.py`、`cli.py`、`config.py` | 启动分派、参数与配置 |
+| `launch.py`、`environment.py` | 公共组件装配、设备准备与资源关闭 |
+| `app.py`、`core/navigator.py` | 取帧与执行编排；输入检查、感知归并、行为分派与反馈 |
+| `core/scan.py` | 扫描规划、转向采集推进、候选快照上下文与覆盖复用 |
+| `core/exploration.py` | 前沿提取与关联、评分选点、历史暂存、移动恢复与分支回退 |
+| `core/target.py` | 目标线索、场景返回、物体接近与停靠选点 |
+| `core/models.py` | 输入输出、搜索状态与结果构造 |
+| `core/geometry.py` | 坐标与角度计算、动作转换、路径未知长度 |
+| `core/timing.py` | 共用阶段计时，不读取或写入文件 |
+| `perception/semantic_queue.py` | 逐图提交、FIFO 推理、评分与线索交付 |
+| `perception/analyzer.py` | 模型协议、图像输入、短提示词与结果解析 |
+| `perception/snapshot_store.py` | 同帧 RGB-D 内存快照与历史帧恢复 |
+| `perception/object_localizer.py` | 复用同帧掩码，进行 RGB-D 与障碍射线定位 |
+| `adapters/` | Hermes / Habitat / RealSense、VLM 请求与本地模型进程 |
+| `run_log.py`、`visualization/` | JSONL 日志、终端和 Rerun 显示 |
+
+环境运行与设备准备脚本见 `sim/habitat/`、`hardware/hermes/`、`hardware/realsense/`。
 
 ## 当前边界
 
-物体接近的本地模型按需加载后常驻，同帧 SAM2 编码也复用，默认使用已有
+YOLOE 随导航启动预热，直接复用其分割结果；退出导航释放进程，默认使用已有
 `robot-nav` 模型环境。可用
-`--object-python` 指定已安装 PyTorch、ultralytics、SAM2 的解释器，
-`--object-class` 指定 YOLO 简短类别，`--object-device` 选择设备；场景模式和
+`--object-python` 指定已安装 PyTorch、ultralytics 的解释器，
+`--yolo-frequency-hz 10` 设置视频检测上限，`--object-class` 指定 YOLOE 简短英文类别，`--object-device` 选择设备；场景模式和
 随机评分模式不启动本地模型。详细流程与阈值见 [算法说明](docs/algorithm.md)。
 
 这是算法原型，不是功能安全系统。核心输出高层相对位姿，实际路径规划、避障和

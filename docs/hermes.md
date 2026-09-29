@@ -110,32 +110,46 @@ python hardware/hermes/fetch_camera_extrinsics.py --config config.json
 
 ## 运行物体搜索
 
-先在当前终端加载独立保存的 SiliconFlow 凭据，然后运行：
+默认调用随车本地 Qwen3.5-4B，无需加载云端凭据。在开发机运行时先转发模型端口，
+见 [随车本地模型](#随车本地-qwen35-4b)。以下为开发机 USB 相机示例：
 
 ```bash
-source data/credentials/siliconflow.env
 hardware/hermes/run.sh \
   python -m robot_nav hermes \
-  --target "门口" \
+  --target "沙发" --object-class sofa \
   --enable-motion \
   --max-cycles 100
 ```
 
 物体模式与 Habitat 共用后台 VLM 队列，联合检测目标与评分 Frontier。
-收到线索后复用扫描 VLM 框，结合历史 RGB-D、YOLO 检测和 SAM2 分割定位，直接前往目标
-附近的可达停靠点，YOLO 或 VLM 任一路检出即可使用。深度定位失败时，有框沿
-框中心方向、无框沿拍摄时光轴，在完整导航图中查询首个障碍作为位置假设。
+YOLOE-26s 默认以 10 Hz 上限检测最新视频包，包括移动和转向期间；当前动作完成后才处理命中结果。
+只有通过置信度规则的框才能形成线索，门槛与同帧框匹配规则见
+[视频检测与置信度融合](algorithm.md#视频检测与置信度融合)。收到线索后复用同帧 RGB-D，
+复用对应的 YOLOE 分割掩码定位，直接前往附近可达停靠点；深度定位失败时沿框中心方向查询完整导航图首个障碍。
 历史线索失败时原地继续
 其他画面，全部无法定位才保底返回拍摄位姿并停止。停靠命令执行成功后直接完成；
 实际运动失败才有限换点或继续下一条线索，详见 [物体接近](algorithm.md#物体接近)。
 
-本地模型按需启动后常驻，默认复用已有 `robot-nav` 环境。`--object-python` 可指定
-模型环境解释器，`--object-class` 可提供简短 YOLO 类别，`--object-device` 默认
-为 `cuda`；`--object-yolo-model` 与 `--object-sam-checkpoint` 可指定权重。
+YOLOE 在导航启动时加载并预热，随导航退出释放；默认复用已有 `robot-nav` 环境。`--object-python` 可指定
+模型环境解释器，`--object-class` 可提供简短英文 YOLOE 类别，`--object-device` 默认
+为 `cuda`；`--object-yolo-model` 指定权重，`--yolo-frequency-hz` 设置视频检测上限。
+
+YOLOE 使用官方 [YOLOE-26s 文本提示模型](https://docs.ultralytics.com/models/yoloe/)，
+模型环境要求 `ultralytics>=8.4.0`，以及 CLIP 分词器。权重放在：
+
+```text
+data/models/yoloe/yoloe-26s-seg.pt
+data/models/yoloe/mobileclip2_b.ts
+```
+
+两个文件都来自 `ultralytics/assets` 的 `v8.4.0` 发布；不要使用不支持自定义文本类别的 `-pf.pt`。
+模型子进程固定在该目录读取编码器，类别在启动时编码一次，CUDA 使用 FP16 推理。
+目标用中文描述时，建议用 `--object-class "door"` 等提供对应的简短英文类别；VLM 仍使用原始目标描述。
+模型文件部署不代表推理或导航已验收；实际检测频率和延迟需要查看运行日志。
 
 导航状态机、Frontier、地图处理与快照编码在 CPU 上执行；`--object-device`
 只控制本地视觉模型，不改变导航计算的设备。VLM 通过配置的本地或远程接口调用。
-`--debug-random-score` 不启动 YOLO/SAM2，不能用该模式评估 GPU 推理性能。
+`--debug-random-score` 不启动 YOLOE，不能用该模式评估 GPU 推理性能。
 
 ## 运行场景搜索
 
@@ -148,19 +162,18 @@ hardware/hermes/run.sh \
   --max-cycles 100
 ```
 
-场景模式不加载 YOLO-World 或 SAM2。前沿扫描画面逐张进入 FIFO 队列，VLM
+场景模式不加载 YOLOE。前沿扫描画面逐张进入 FIFO 队列，VLM
 在同一次请求中检查目的场景与评分 Frontier。缺少分数时按几何分继续探索；
 旧图检测到目标场景后返回拍摄位置并对齐朝向，到位即结束。未选方向暂存，新候选耗尽后
 逐个返回父节点，遇到有效方向再按原顺序恢复；返回父节点本身不额外扫描。
 
-当前 VLM 配置为 SiliconFlow 的 `Qwen/Qwen3.8-27B`，请求地址为
-`https://api.siliconflow.cn/v1/chat/completions`，格式为 `chat_completions`。
-使用英文提示词，当前模型请求显式设置 `enable_thinking=false`，并通过
-`response_format={"type":"json_object"}` 约束 JSON 输出。响应先正常解析 JSON，
+当前 VLM 默认使用随车 Ollama 的 `qwen3.5:4b`，请求地址为
+`http://127.0.0.1:11434/v1/chat/completions`，格式为 `chat_completions`。
+使用英文提示词、关闭思考并约束 JSON 输出，具体配置见下节。响应先正常解析 JSON，
 语法损坏时使用 `json_repair` 修复，不补造缺失的业务字段。返回后仍校验目标框或场景判断
-和评分字段；格式错误不当作“没有目标”。凭据文件导出 `ROBOT_NAV_VLM_API_KEY`，
-需在每个新终端中手动 `source`；该文件不纳入 Git，也不会被程序自动加载。
-这是默认云端配置；随车本地服务见下节。
+和评分字段；格式错误不当作“没有目标”。本机调用不读取云端密钥。
+若显式切换回 SiliconFlow，需同时指定云端接口、模型及 `ROBOT_NAV_VLM_API_KEY`；
+凭据文件不纳入 Git，也不会被程序自动加载。
 
 ### 随车本地 Qwen3.5-4B
 
@@ -173,7 +186,7 @@ hardware/hermes/run.sh \
 服务配置位于 `/home/hri/.config/systemd/user/nav-vlm.service`；服务启动不加载模型。
 
 导航选择本机 `qwen3.5:4b` 的 `/v1/chat/completions` 接口时，`launch.py` 在创建
-设备和执行启动动作之前调用 `adapters/ollama_warmup.py`，用 640×480 固定黑图
+设备和执行启动动作之前调用 `adapters/ollama_warmup.py`，用 848×480 固定黑图
 完成视觉预热；它不读取相机，也不产生导航线索。预热失败会终止本次启动。
 随机评分、只读预检和云端模型不触发预热。
 后续模型请求续期，导航退出或异常结束后无需额外清理；不发送保活心跳，长时间
@@ -189,24 +202,28 @@ systemctl --user restart nav-vlm.service
 journalctl --user -u nav-vlm.service -n 50 --no-pager
 ```
 
-在随车导航目录中，使用命令行覆盖默认云端配置：
+在随车导航目录中，默认配置即可使用本地模型：
 
 ```bash
 cd /home/hri/nav
-ROBOT_NAV_VLM_API_KEY=ollama .venv/bin/python -m robot_nav hermes \
-  --vlm-endpoint http://127.0.0.1:11434/v1/chat/completions \
-  --vlm-model qwen3.5:4b --vlm-api-format chat_completions \
+.venv/bin/python -m robot_nav hermes \
   --search-mode scene --target "洗手间" --enable-motion
 ```
 
-`ollama` 是本机接口忽略的占位凭据，用于满足当前启动入口的非空检查；此命令
-只为本次进程设置，不加载或转发云端密钥。该模型请求使用 `reasoning_effort=none`
+若导航运行在开发机，另开一个终端保持模型端口转发：
+
+```bash
+ssh -N -L 127.0.0.1:11434:127.0.0.1:11434 hri@10.113.45.27
+```
+
+本地与随车配置使用相同的回环接口地址；启动层自动跳过本机 Ollama 的密钥读取，
+无需设置占位凭据。该模型请求使用 `reasoning_effort=none`
 关闭思考、`temperature=0` 和 JSON Schema 输出约束，输出上限为
 `min(vlm_max_output_tokens, 128)`。Schema 限制字段结构，程序仍独立校验分数范围、
 框范围与顺序；格式合法不代表目标识别正确。保留原图分辨率及标准 `bbox_2d` 字段。停止服务可用
 `systemctl --user stop nav-vlm.service`。
 
-服务安装与模型下载不代表视觉推理或导航验收通过。物体搜索还会加载 YOLO/SAM2，
+服务安装与模型下载不代表视觉推理或导航验收通过。物体搜索还会加载 YOLOE，
 需要根据真实单图的输入长度和整套流程的峰值显存评估上下文及资源分配。
 
 ## 调试运动链路
@@ -326,11 +343,12 @@ D435i 筛选后的算法地图，
 启动前移和扫描转向不启用它。
 
 - 单个 Action 默认总超时 120 秒。
-- `MoveToAction` 期间从首帧底盘位姿开始计时。机器人连续 10 秒没有离开该位置
-  0.5 m 时判定阻塞；原地摆头不算脱困，实际平移达到 0.5 m 后才从新位置重新计时。
+- `RotateToAction` 扫描不计时。`MoveToAction` 按实际剩余路径判断行进方向，朝向
+  误差 ≤25° 后才计时；转向超出该角度则清空窗口，对齐后重新开始。连续 10 秒
+  未离开 0.5 m 半径才判定受阻；实际平移达到 0.5 m 后从新位置重新计时。
   D435i 的 0.5 m 近深度只用于提高墙位置精度，不再决定是否触发；没有可靠近深度时，
   墙放在本次目标路线前方 0.60 m。
-- 有可靠近深度时，墙位于挡路物前 0.15 m、且距阻塞锚点至少 0.60 m；没有时位于
+- 有可靠近深度时，墙位于挡路物前 0.15 m、且距当前机器人至少 0.60 m；没有时位于
   目标路线前方 0.60 m。人工墙沿路线横向延伸到当前已知通道两侧的障碍
   或未知边界，并按 0.36 m 车体净空膨胀。原始墙格和膨胀墙格独立持久保存，后续
   Hermes 自由格更新和再次到访都不能覆盖；本次程序退出后才清空。
@@ -339,7 +357,8 @@ D435i 筛选后的算法地图，
 - `RotateToAction` 以 1° 为有效进展，进入目标朝向 5° 内并达到到位稳定门槛即可主动收尾。
 - Frontier 明确规划失败时淘汰当前方向并继续其他候选。
 - Frontier 路径未知长度超过上限时，记录累计长度、上限、首个未知格和被拒绝路径，取消并屏蔽整个区域。
-- 人工墙建立后，当前动作取消并确认结束。Frontier 探索从实际位置按带墙的新地图
+- 判定受阻后先取消并确认动作结束，再按停止后的位姿保留车体净空并建墙。
+  原始墙也叠加到完整导航图供停靠选点，避免目标接近反复选择墙后的点。Frontier 探索从实际位置按新地图
   重新选择；返回父节点和目标接近仍走各自的失败恢复，但同样不能穿过人工墙。
 - 物体模式停靠命令成功后直接完成，不再复检或测距；实际运动失败时每条线索最多尝试三次停靠。
 - 网络、相机、地图或健康状态异常仍会停止程序。
@@ -350,19 +369,78 @@ D435i 筛选后的算法地图，
 
 ## Rerun 与日志
 
-当前配置默认开启 Rerun。常规导航与延迟对照使用 `--no-rerun`，需要可视化排错时
+仓库默认开启 Rerun，已部署的随车配置默认关闭。常规导航与延迟对照使用 `--no-rerun`，需要可视化排错时
 通过 `--rerun` 按需开启，允许开启时有更高延迟。
-`logging.rerun_viewer` 选择 `web` 或 `native`，可用 `--rerun-viewer` 临时覆盖。
+`logging.rerun_viewer` 选择 `web`、`native` 或 `record`，可用 `--rerun-viewer` 临时覆盖。
 随车配置为 `native`：在笔记本桌面终端运行时自动启动 Rerun App，
 通过本机 9878 端口传输实时数据，无需浏览器。纯 SSH 终端没有桌面显示环境时，
-请改用 `--rerun-viewer web`。两种方式都保存 RRD。关闭 Rerun 会同时关闭界面与 RRD
+请改用 `--rerun-viewer web`。`record` 只写 RRD，不启动界面或实时服务。三种方式都保存 RRD。关闭 Rerun 会同时关闭界面与 RRD
 录制，但保留 JSONL 决策与计时日志；终端 Frontier 调试输出
 由 `--debug-frontier` 单独控制。比较延迟时应保持这些开关一致。
+
+### 从开发机启动并自动转发
+
+在开发机项目目录执行下面一条命令，SSH 会同时启动随车导航、转发 Rerun 网页
+（9090）与实时数据（9877），不需要另开转发终端：
+
+```bash
+bash hardware/hermes/tunnel.sh --run \
+  --target "沙发" --object-class sofa \
+  --startup-forward-m 0 --enable-motion --max-cycles 100
+```
+
+服务启动后，在开发机浏览器打开
+<http://127.0.0.1:9090/?url=ws://127.0.0.1:9877>。导航、模型与相机均在随车端运行，
+日志也保存在随车端。脚本使用随车 `.venv/bin/python`，默认开启 Rerun 并强制网页模式，
+不改写随车配置。`--enable-motion` 仍须显式提供；开始正式运行前可用
+`bash hardware/hermes/tunnel.sh --run --preflight-only` 预检。
+
+保持该终端开启；Ctrl+C 交给导航按原有流程停止，SSH 会话结束后关闭转发。
+如果本机 9090 或 9877 已被占用，SSH 会报错退出，远端导航不会启动。
+`--no-rerun` 可关闭界面与录制，SSH 会话中的两个转发端口仍保留到退出。
+主机与项目目录可分别用 `ROBOT_NAV_ONBOARD_HOST`、`ROBOT_NAV_ONBOARD_REPO` 覆盖，
+默认是 `hri@10.113.45.27` 和 `/home/hri/nav`。
+
+此自动转发入口在开发机执行；直接在随车笔记本终端运行 Python 不会建立到开发机的转发。
+无参数的 `tunnel.sh` 仍用于将相机和底盘转给开发机运行导航，见
+[随车笔记本转发](#随车笔记本转发)。
+
+### 随车录制，结束后在本机回放
+
+在开发机项目目录运行：
+
+```bash
+bash hardware/hermes/tunnel.sh --record \
+  --target "椅子" --object-class chair \
+  --startup-forward-m 0 --yolo-frequency-hz 10 \
+  --enable-motion --max-cycles 100
+```
+
+导航和模型在随车端运行，Rerun 只写 RRD，不启动网页、桌面 App 或实时转发。
+正常结束或 Ctrl+C 完成导航收尾后，脚本下载本次确定的 RRD 与 JSONL 到
+`data/run_logs/onboard/run-*/`，再用本机 Rerun App 打开。关闭回放窗口后脚本返回
+本次导航退出码；Ctrl+C 中断通常返回非零。录制仍有编码和写盘开销，不等于 `--no-rerun`。
+
+脚本复用已有 SSH 认证；本机 Rerun 从 PATH、项目 `.venv` 或
+`~/micromamba/envs/robot-nav/bin/rerun` 查找，也可用 `ROBOT_NAV_RERUN_BIN` 指定可执行文件。
+本机须有可用的桌面显示环境，当前 WSL 使用 WSLg。没有安装 Rerun 时先停止，不启动导航。
+下载与回放不删除随车原文件；后续可直接执行 `rerun <本机路径.rrd>` 再次打开。
+SSH 断线时无法确认远端已退出，因此不自动下载，需确认导航结束后手动取回；下载失败
+保留 `.part`，不把不完整文件作为成功录制打开。
+
+`--record` 自动指定录制和日志路径，不能与 `--no-rerun`、`--preflight-only`、
+`--rerun-save` 或 `--run-log` 混用。直接在随车端启动时使用
+`--rerun --rerun-viewer record` 可以只录制，但不会自动下载。
+
+### 日志与画面
 
 远程相机由常驻订阅线程持续接收完整 RGB-D/位姿包，只保留最新包；地图由另一
 线程独立请求并转换，每轮完成后等待 `motion_frame_interval_s` 再更新。导航与
 可视化读取这些快照，仅观察图更新和组帧串行执行。本地 USB 仍使用 SDK 同步
-取帧。模型仅分析前沿扫描选帧；相机持续接收和运动可视化不生成模型任务。
+取帧。YOLOE 独立线程按频率上限检测最新视频包；中等分候选送 VLM 确认，高分直接形成线索。
+扫描图仍进入 VLM 评分队列；可视化开关不影响检测。`yolo_frame.backlog/queue_wait_s`
+反映最新帧等待时间；`backlog` 最多为 1，`received/replaced` 记录收到和被覆盖的帧数。
+相机仍为 30 FPS，无须为限制检测频率降低采集帧率。
 动作返回后，远程组帧要求相机包在本机的接收时刻晚于动作结束，必要时只等待
 下一包；此条件不证明源端曝光发生于动作结束后。RGB-D 与位姿始终取自同一个包，
 地图独立更新，不保证与图像同时采集。地图更新失败会停止运行；最近一次成功更新
@@ -389,8 +467,8 @@ D435i 筛选后的算法地图，
 World 隐藏候选的浮动标签；下方 `Live` 显示实时位姿和当前阶段，`Frontiers` 表格
 显示编号与暂存顺序，编号链接到对应点。VLM 和状态页显示当前分析与导航结果；
 物体接近阶段在 `Motion details` 中显示定位来源、目标位置、深度支持点数及停靠次数，
-选点时还显示地图来源、净空、候选数和计划目标距离。完整掩码、当次定位地图与
-本地推理记录保存在视觉队列目录的 `object-localization/`。
+选点时还显示地图来源、净空、候选数和计划目标距离。Rerun 记录同帧 YOLOE 掩码，
+JSONL 的 `object_localized` 保留定位依据和耗时；不再重复写入定位输入文件。
 `VLM full` 保留实际输入图、完整提示词、原始输出、HTTP JSON 与
 解析结果；新增 `VLM summary` 简要显示 FIFO 任务 J、模型请求 R、目标判断、
 评分与导航接收／排序周期。请求和返回各自记录到发生时刻，不将回包写回旧帧。
@@ -427,12 +505,9 @@ Action 创建后输出“下发计时”：`motion.ready_check` 为健康与定�
 在锁外进行。前台和后台仍可能在采集、地图更新阶段互相等待。
 
 每个 span 带 `started_monotonic_s`、`ended_monotonic_s`、`duration_s` 和 `completed`。
-主线程的 `snapshot.*` 记录前沿预览、观察点、覆盖计算和单图写盘任务提交；
-`snapshot.submit` 不再包含后台文件写入。扫描图像打包与深度压缩移到
-串行快照线程，其阶段计时保存在 `semantic_queue` 的 `scan_prepared` 事件中，
-通过 `timestamp_s` 关联拍摄帧。该事件仅记录编码完成，实际写盘并发布模型任务
-仍以 `queued` 事件为准。`scan_prepared` 仅写 JSONL，不刷新 Rerun；
-编码完成和入队都不表示模型已经分析。
+主线程的 `snapshot.*` 记录前沿预览、观察点、覆盖计算和单图准备任务提交。
+后台 `scan_prepared` 记录 RGB 打包与深度复制，通过 `timestamp_s` 关联拍摄帧；
+`queued` 表示已接纳内存快照，均不表示模型已完成分析。这里不再进行压缩或文件读写。
 `frontier.cache_hit` 表示复用了本周期同帧、同排除集的提取结果；前沿计时也包含
 快照预览中的调用。命中缓存时不会出现该次提取的准备、BFS、聚类等子阶段。
 同名阶段多次调用会逐条保留；`cycle.*` 包含内部的 `frame.*`、`frontier.*` 等子阶段，
@@ -447,13 +522,13 @@ Action 进度中的 `unknown_path=当前长度/允许上限` 使用米；取消�
 `unknown_path_length_m`、`unknown_path_limit_m` 和 `checked_path_length_m`，
 运行配置记录 `max_unknown_path_m`。
 
-视觉队列另外保存到 `data/run_logs/semantic-*/job-*`：压缩 RGB、拍摄位姿与
-候选快照在 `snapshot.json`，分析结果在 `result.json`。图片文件随运行增长；
-退出后保留，当前不自动恢复。有效方向耗尽后停止移动并等待任务和线索处理完，
+视觉队列使用有界内存快照：最多 256 帧、图像预算 2 GiB，视频最多占用 64 帧，
+其中待 VLM 确认最多 32 帧。未命中或定位完成后释放，退出不恢复；具体限制见算法说明。
+只有 JSONL、启用时的 Rerun 录制，以及 `data/run_logs/semantic-*/models/yoloe.log` 保存到磁盘。有效方向耗尽后停止移动并等待任务和线索处理完，
 等待不占 `--max-cycles` 额度；中断、决策上限或设备故障仍会结束运行。
 
 运行中的 Rerun 回调或 JSONL 写入失败会停用对应记录功能并提示，不终止导航。
-语义快照是待检测输入：正式扫描快照写入失败仍会停止，不能按普通日志故障处理。
+内存快照是待检测输入：扫描准备失败或容量耗尽仍会停止，不能按普通日志故障处理。
 
 Rerun 开启时，还会从启动开始持续写入 `data/run_logs/rerun-*.rrd`，保存图像、
 深度、完整地图、界面状态和默认布局，终端打印完整路径。
@@ -475,7 +550,7 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB），WebSocket 服务缓�
 随车目录的 `config.json` 使用 `camera_source=remote`、
 `camera_endpoint=ipc:///tmp/rgbd_pose.ipc` 和 `base_url=http://192.168.11.1:1448`，
 默认 `no_rerun=true`。这里 `remote` 表示读取发布器协议，不要求跨机器。
-固定安装外参沿用开发机配置，YOLO、SAM2 和 CLIP 权重保存在随车目录。
+固定安装外参沿用开发机配置，YOLOE 和 CLIP 权重保存在随车目录。
 无需开发机相机或底盘转发；发布器按原方式启动，勿重复启动。
 
 随车笔记本通过 Wi-Fi 访问云端模型，有线连接用于底盘。底盘 DHCP 提供的
@@ -498,10 +573,24 @@ python -m robot_nav hermes --preflight-only
 python -m robot_nav hermes --target chair --debug-random-score --enable-motion --max-cycles 100
 ```
 
-正式搜索去掉 `--debug-random-score`，并先执行
-`source data/credentials/siliconflow.env`。本次配置的 SiliconFlow 凭据已独立保存，
-后续部署代码时不要将凭据纳入代码包。日志保存在随车
+正式搜索去掉 `--debug-random-score`，确认 `nav-vlm.service` 正常即可，
+默认本地模型无需云端凭据。已有云端凭据继续独立保存，不纳入代码包。日志保存在随车
 `/home/hri/nav/data/run_logs/`。依赖安装与文件迁移不代表模型推理或导航验收通过。
+
+随车端使用已运行的相机发布器时，首轮完整物体测试可执行：
+
+```bash
+cd /home/hri/nav
+.venv/bin/python -m robot_nav hermes --preflight-only
+.venv/bin/python -m robot_nav hermes \
+  --target "沙发" --object-class sofa \
+  --startup-forward-m 0 --enable-motion --max-cycles 100 --rerun
+```
+
+随车配置使用 `camera_source=remote` 和 `ipc:///tmp/rgbd_pose.ipc`，不另开 USB
+相机实例。预检成功后再执行第二条；`--startup-forward-m 0` 只跳过额外的启动前移，
+搜索仍会控制底盘。`--rerun` 显式开启显示，需要观察识别框与路径时保留；比较耗时
+时改为 `--no-rerun`，JSONL 仍保存，感知快照仅在内存中保留到消费完成。目标描述可用中文，YOLOE 类别用英文。
 
 ## 随车笔记本转发
 
@@ -527,8 +616,14 @@ python rgbd_pose_publisher.py
 
 如果随车端有本仓库，也可运行 `bash hardware/hermes/run_camera.sh`，脚本仅调用上述文件。
 两种启动方式选其一。新发布器不解析命令行参数，序列号通过其 `CAMERA_SERIAL`
-配置；导航要求保持 `ALIGN_DEPTH_TO_COLOR=True`。协议未携带对齐开关，接收端
-不能仅凭图像尺寸确认对齐。发布器的 `ROBOT_IP` 应与底盘转发指向同一台 Hermes。
+配置；导航要求保持 `ALIGN_DEPTH_TO_COLOR=True`，v2 元数据显式声明对齐方式，
+接收端同时检查对齐声明与图像尺寸。发布器的 `ROBOT_IP` 应与底盘转发指向同一台 Hermes。
+
+当前彩色和原始深度均为 848×480、30 FPS；同分辨率仍需按两相机内外参将深度
+对齐到彩色图，对齐后同样输出 848×480。分辨率由发布器顶部的 `RGB_WIDTH/RGB_HEIGHT` 和
+`DEPTH_WIDTH/DEPTH_HEIGHT` 指定，修改后重启发布器生效。本地 USB 采集使用相同
+默认配置，见 `adapters/realsense/d435i_camera.py::D435iConfig`。
+导航根据每帧内参自动计算视场角，安装外参不因分辨率变化而修改。
 
 开发机另开终端建立 SSH 转发并保持运行：
 
@@ -581,7 +676,7 @@ FOV、图像投影和物体定位继续使用“同步底盘二维位姿 + 固�
 不拼接“旧图像 + 最新 REST 位姿”。地图和动作执行反馈仍单独读取 REST；
 地图不在同步包内，也不保证与图像同一采集时刻。
 
-默认 640×480、30 FPS 的 RGB-D 原始载荷约 46 MB/s；常驻订阅会持续使用链路
+默认 848×480、30 FPS 的对齐 RGB-D 原始载荷约 61 MB/s；常驻订阅会持续使用链路
 带宽。接收线程独占 socket，完整消息解码后原子替换最新包，不排队保存历史帧；
 ZMQ 接收高水位为 1。断流超时后报错，不无限沿用最后一帧，也不静默重试。
 
@@ -639,11 +734,12 @@ GUI 入口与操作编排在 `chassis_gui.py`，页面在 `chassis_gui.html`，�
 | --- | --- |
 | `--base-url` | Robot Agent 地址，默认 `http://192.168.11.1:1448` |
 | `--search-mode` | `object` 或 `scene`，默认 `object` |
+| `--yolo-frequency-hz` | 视频检测上限，默认 10 Hz，取最新帧；扫描图额外检测 |
 | `--action-timeout-s` | 单 Action 总超时，默认 120 秒 |
 | `--action-stall-timeout-s` | 原地转向无有效进展的上限，当前根配置 1 秒 |
 | `--front-blockage-distance-m` | 用于细化墙位置的最远近深度，当前 0.5 m |
 | `--blocked-pose-radius-m` | 判定底盘没有脱困的位置半径，当前 0.5 米 |
-| `--blocked-pose-duration-s` | 底盘留在阻塞半径内多久后建立人工墙，当前 10 秒 |
+| `--blocked-pose-duration-s` | 朝向行进路径后持续留在阻塞半径内多久判定受阻，根配置 10 秒 |
 | `--max-unknown-path-m` | 当前剩余路径允许的累计未知长度，默认 1.5 m；超过才取消，0 表示不允许正长度未知段 |
 | `--min-localization-quality` | 定位模式最低质量，默认 1 |
 | `--camera-source` | `local`（默认）或 `remote`，不改变导航实现 |
@@ -653,6 +749,7 @@ GUI 入口与操作编排在 `chassis_gui.py`，页面在 `chassis_gui.html`，�
 | `--camera-calibration` | 本地 USB 的外参文件；六项固定外参配齐时不再读取，远程使用六项配置 |
 | `--debug-frontier` | 打印本轮 Frontier 评分明细 |
 | `--rerun-save` | 指定 RRD 录制路径，默认自动创建 |
+| `--rerun-viewer record` | 仅录制，不启动实时界面；需开启 Rerun |
 | `--no-rerun` | 关闭 Rerun 界面及录制 |
 
 完整参数以 `python -m robot_nav hermes --help` 为准。

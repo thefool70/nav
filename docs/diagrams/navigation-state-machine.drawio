@@ -1,0 +1,328 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net" version="26.0.0" type="device">
+  <diagram id="nav-core" name="核心运行状态机">
+    <mxGraphModel dx="2640" dy="2160" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2640" pageHeight="2160" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="panel_runtime" value="" style="rounded=1;arcSize=2;fillColor=#fbfcfe;strokeColor=#d9e1ec;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="30" y="150" width="570" height="1860" />
+        </mxCell>
+        <mxCell id="head_runtime" value="01  运行循环" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=23;fontColor=#334155;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="54" y="170" width="522" height="35" />
+        </mxCell>
+        <mxCell id="sub_runtime" value="app.py · 取帧 → 决策 → 感知补充 → 同步执行" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=14;fontColor=#334155;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="54" y="210" width="522" height="45" />
+        </mxCell>
+        <mxCell id="panel_explore" value="" style="rounded=1;arcSize=2;fillColor=#fbfcfe;strokeColor=#d9e1ec;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="620" y="150" width="620" height="1860" />
+        </mxCell>
+        <mxCell id="head_explore" value="02  探索状态机" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=23;fontColor=#334155;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="644" y="170" width="572" height="35" />
+        </mxCell>
+        <mxCell id="sub_explore" value="core/ · 状态计算，不直接调用设备或模型" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=14;fontColor=#334155;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="644" y="210" width="572" height="45" />
+        </mxCell>
+        <mxCell id="panel_target" value="" style="rounded=1;arcSize=2;fillColor=#fbfcfe;strokeColor=#d9e1ec;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1260" y="150" width="710" height="1860" />
+        </mxCell>
+        <mxCell id="head_target" value="03  目标处理" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=23;fontColor=#334155;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1284" y="170" width="662" height="35" />
+        </mxCell>
+        <mxCell id="sub_target" value="目标线索优先；普通模型队列在处理期间暂停" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=14;fontColor=#334155;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1284" y="210" width="662" height="45" />
+        </mxCell>
+        <mxCell id="panel_async" value="" style="rounded=1;arcSize=2;fillColor=#fbfcfe;strokeColor=#d9e1ec;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1990" y="150" width="620" height="1860" />
+        </mxCell>
+        <mxCell id="head_async" value="04  后台感知" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=23;fontColor=#334155;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2014" y="170" width="572" height="35" />
+        </mxCell>
+        <mxCell id="sub_async" value="perception/ · 逐图提交，FIFO 串行分析" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=14;fontColor=#334155;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2014" y="210" width="572" height="45" />
+        </mxCell>
+        <mxCell id="title" value="机器人语义搜索 · 核心运行状态机" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=32;fontColor=#334155;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="25" width="1800" height="55" />
+        </mxCell>
+        <mxCell id="subtitle" value="Habitat / Hermes 共用主流程 · 状态框保留 SearchPhase 原名；同名 A/B/C/D 端口表示跨区连接" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#334155;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="85" width="2520" height="40" />
+        </mxCell>
+        <mxCell id="start" value="&lt;b&gt;启动与装配&lt;/b&gt;&lt;br&gt;读取并校验配置 → 创建感知 → 创建设备&lt;br&gt;YOLOE / 已选本地 Qwen 预热；Hermes 启动前移&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;launch.py::_assemble_and_run / environment.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="280" width="440" height="120" />
+        </mxCell>
+        <mxCell id="frame" value="&lt;b&gt;取帧与接收结果 · 接口 D&lt;/b&gt;&lt;br&gt;位姿 + RGB-D + 地图；接收后台增量&lt;br&gt;更新 SearchState，优先领取下一条目标线索&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;app.py::run_navigation_cycle / _prepare_state&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="450" width="440" height="110" />
+        </mxCell>
+        <mxCell id="dispatch" value="&lt;b&gt;navigate() 行为分派&lt;/b&gt;&lt;br&gt;已有目标线索 / 物体历史 → B&lt;br&gt;否则按当前探索阶段 → A&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;core/navigator.py::navigate&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="610" width="440" height="105" />
+        </mxCell>
+        <mxCell id="supply" value="&lt;b&gt;补充核心请求，完成本轮决策&lt;/b&gt;&lt;br&gt;采图 → 单图入队 C；缓存评分 → 直接选点&lt;br&gt;历史定位 → 停底盘后调用感知，再交回核心&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;app.py::_supply_perception&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="765" width="440" height="115" />
+        </mxCell>
+        <mxCell id="execute" value="&lt;b&gt;同步执行 NavigationAction&lt;/b&gt;&lt;br&gt;Adapter 执行转向或移动并监控结果&lt;br&gt;视频继续进入 YOLOE；命中不取消动作&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;app.py::_execute_action&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="930" width="440" height="110" />
+        </mxCell>
+        <mxCell id="feedback" value="&lt;b&gt;执行反馈 → 状态更新&lt;/b&gt;&lt;br&gt;成功继续；可恢复失败按动作用途处理&lt;br&gt;保留实际位置，不假装到达或已检查&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;core/navigator.py::apply_execution_result&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="1090" width="440" height="110" />
+        </mxCell>
+        <mxCell id="next" value="&lt;b&gt;终态或继续？&lt;/b&gt;&lt;br&gt;未终止：保存状态，下一周期重新取帧&lt;br&gt;纯等待不消耗 max_cycles 决策额度" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f3f5f8;strokeColor=#9ba8b8;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="1250" width="440" height="110" />
+        </mxCell>
+        <mxCell id="r1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="start" target="frame">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="r2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="frame" target="dispatch">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="r3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="dispatch" target="supply">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="r4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="supply" target="execute">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="r5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="execute" target="feedback">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="r6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="feedback" target="next">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="loop" value="下一周期" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="next" target="frame">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="65" y="1305" />
+              <mxPoint x="65" y="505" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="recovery" value="&lt;b&gt;动作失败的恢复规则&lt;/b&gt;&lt;br&gt;扫描转向：按真实朝向重建扫描&lt;br&gt;探索失败：排除尝试点；未知超限/阻塞屏蔽区域&lt;br&gt;回退失败：跳过返回节点、释放其暂存方向&lt;br&gt;场景返回失败：丢弃线索；物体停靠失败：换点" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="1440" width="440" height="185" />
+        </mxCell>
+        <mxCell id="wall" value="&lt;b&gt;Hermes 阻塞处理&lt;/b&gt;&lt;br&gt;连续 10 秒未离开 0.5 m 半径 → 人工墙&lt;br&gt;取消并确认终态后反馈 PATH_BLOCKED&lt;br&gt;墙在本次运行持续生效，限制后续路径&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;adapters/hermes/adapter.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="1675" width="440" height="130" />
+        </mxCell>
+        <mxCell id="exit" value="&lt;b&gt;运行退出与资源收尾&lt;/b&gt;&lt;br&gt;COMPLETE → 0；STOPPED → 3&lt;br&gt;FAILED / 周期上限 → 1；系统异常中止&lt;br&gt;退出关闭设备、感知及日志" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fceeed;strokeColor=#bc706d;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="95" y="1860" width="440" height="120" />
+        </mxCell>
+        <mxCell id="A" value="&lt;b&gt;A · 常规探索入口&lt;/b&gt;&lt;br&gt;启动或探索移动后进入 SCANNING" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;arcSize=50;dashed=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="280" width="430" height="70" />
+        </mxCell>
+        <mxCell id="scan" value="&lt;b&gt;SCANNING · 局部扫描&lt;/b&gt;&lt;br&gt;规划未检查的局部 Frontier 方向&lt;br&gt;转向到位 → 采集单张历史 RGB-D → C&lt;br&gt;无待查方向：仍采当前图，不额外转向&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;scan.py::continue_scanning&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="405" width="430" height="145" />
+        </mxCell>
+        <mxCell id="select" value="&lt;b&gt;EXPLORING · Frontier 选点&lt;/b&gt;&lt;br&gt;提取可达边界，过滤失效/已尝试/屏蔽区域&lt;br&gt;优先新候选：几何分 + 已返回的语义分&lt;br&gt;缺语义分用几何分；未选新方向暂存&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;exploration.py::select_exploration_target&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="625" width="430" height="145" />
+        </mxCell>
+        <mxCell id="move" value="&lt;b&gt;提交探索移动&lt;/b&gt;&lt;br&gt;记录分支历史，执行选中 Frontier 命令&lt;br&gt;提交时预置 SCANNING；同步运动后再取帧&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;exploration.py::commit_frontier_move&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="840" width="430" height="100" />
+        </mxCell>
+        <mxCell id="back" value="&lt;b&gt;BACKTRACKING · 逐级回退&lt;/b&gt;&lt;br&gt;新方向耗尽 → 返回当前分支栈顶节点&lt;br&gt;距节点 ≤ 0.25 m：刷新候选，不额外扫描&lt;br&gt;有暂存方向按原顺序恢复；无方向再退一层&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;exploration.py::begin_backtracking&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="1020" width="430" height="145" />
+        </mxCell>
+        <mxCell id="wait" value="&lt;b&gt;WAITING_FOR_SEMANTICS&lt;/b&gt;&lt;br&gt;分支耗尽但后台工作/线索未处理完：原地等&lt;br&gt;新线索 → B；出现新候选/待查边界 → 扫描&lt;br&gt;结果失败不等于“已经检查”&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;exploration.py::wait_for_semantics_or_finish&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="1240" width="430" height="140" />
+        </mxCell>
+        <mxCell id="failed" value="&lt;b&gt;FAILED · 探索方向耗尽&lt;/b&gt;&lt;br&gt;没有有效方向，且队列与线索已经耗尽&lt;br&gt;NO_SOLUTION / explore.exhausted" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fceeed;strokeColor=#bc706d;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="1470" width="430" height="100" />
+        </mxCell>
+        <mxCell id="a1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="A" target="scan">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a2" value="本轮方向采集结束" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="scan" target="select">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="scanloop" value="下一方向 / 转向恢复" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=1;exitY=0.25;entryX=1;entryY=0.8;" edge="1" parent="1" source="scan" target="scan">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1180" y="445" />
+              <mxPoint x="1195" y="445" />
+              <mxPoint x="1195" y="520" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="a3" value="有新候选" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="select" target="move">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a4" value="移动完成 / 可恢复失败后重查" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="move" target="scan">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="675" y="890" />
+              <mxPoint x="675" y="477" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="a5" value="无新候选" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="select" target="back">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1205" y="697" />
+              <mxPoint x="1205" y="1092" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="a6" value="有有效暂存方向" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="back" target="move">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="backloop" value="无方向：退一层" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=1;exitY=0.75;entryX=0.5;entryY=1;" edge="1" parent="1" source="back" target="back">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1170" y="1125" />
+              <mxPoint x="1180" y="1195" />
+              <mxPoint x="930" y="1195" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="a7" value="分支栈耗尽；有待处理工作" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.2;exitY=1;entryX=0.2;entryY=0;" edge="1" parent="1" source="back" target="wait">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a8" value="耗尽且无方向 / 线索" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="wait" target="failed">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a9" value="出现新候选 / 未查边界" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.24;" edge="1" parent="1" source="wait" target="scan">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="655" y="1310" />
+              <mxPoint x="655" y="440" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="anote" value="&lt;b&gt;探索顺序与等待边界&lt;/b&gt;&lt;br&gt;返回节点显露新候选时，也可转入选点&lt;br&gt;若分支与队列已同时耗尽，可直接 FAILED&lt;br&gt;普通评分不会中断或修改正在执行的移动" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f3f5f8;strokeColor=#9ba8b8;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="1650" width="430" height="135" />
+        </mxCell>
+        <mxCell id="aport" value="&lt;b&gt;A ↔ B · 目标处理优先&lt;/b&gt;&lt;br&gt;每周期先取线索；执行中的动作先同步结束&lt;br&gt;目标处理结束后，按其结果完成、停止或恢复探索" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f3f5f8;strokeColor=#9ba8b8;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;arcSize=50;dashed=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="715" y="1840" width="430" height="115" />
+        </mxCell>
+        <mxCell id="B" value="&lt;b&gt;B · 激活目标线索&lt;/b&gt;&lt;br&gt;保留拍摄位姿、历史 RGB-D 与目标框&lt;br&gt;scene → 场景返回；object → 历史定位" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;arcSize=50;dashed=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="280" width="530" height="95" />
+        </mxCell>
+        <mxCell id="scene" value="&lt;b&gt;REVISITING_TARGET · 场景返回&lt;/b&gt;&lt;br&gt;返回拍摄点并对齐原朝向（≤ 0.25 m / ≤ 5°）&lt;br&gt;到位 → COMPLETE；无须再次调用 VLM&lt;br&gt;返回失败 / 坐标系不符 → 下一线索，耗尽回 A&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;target.py::continue_scene_target&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="440" width="530" height="125" />
+        </mxCell>
+        <mxCell id="localize" value="&lt;b&gt;LOCALIZING_OBJECT · 历史定位&lt;/b&gt;&lt;br&gt;复用置信度融合认可的历史框&lt;br&gt;YOLOE 掩码 → 框内深度 → 地图障碍射线&lt;br&gt;得到目标坐标才规划停靠；不再请求 VLM&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;target.py / perception/object_localizer.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="650" width="530" height="145" />
+        </mxCell>
+        <mxCell id="approach" value="&lt;b&gt;APPROACHING_OBJECT · 规划并接近&lt;/b&gt;&lt;br&gt;选择目标附近可达、有净空的停靠点并对准目标&lt;br&gt;命令成功 → COMPLETE，无到达后视觉复查&lt;br&gt;运动失败换点：每条线索最多 3 次停靠&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;target.py::plan_approach&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="870" width="530" height="135" />
+        </mxCell>
+        <mxCell id="history" value="&lt;b&gt;当前线索失败 → 继续历史&lt;/b&gt;&lt;br&gt;无法定位 / 无停靠点 / 三次停靠失败&lt;br&gt;保持当前位置，取下一条线索 → 历史定位&lt;br&gt;线索暂时用完但仍有任务：恢复已有队列并等待&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;discard_object_clue / continue_object_history&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="1080" width="530" height="135" />
+        </mxCell>
+        <mxCell id="histend" value="&lt;b&gt;历史队列彻底耗尽&lt;/b&gt;&lt;br&gt;曾定位成功但未完成接近 → 恢复探索 A&lt;br&gt;全部历史都无法定位 → 保底返回首条拍摄位姿" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="1290" width="530" height="105" />
+        </mxCell>
+        <mxCell id="fallback" value="&lt;b&gt;REVISITING_TARGET · 物体保底&lt;/b&gt;&lt;br&gt;返回首条线索拍摄点并恢复朝向&lt;br&gt;到位或返回失败均停止，不继续搜索&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;target.py::_return_to_capture&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="1470" width="530" height="105" />
+        </mxCell>
+        <mxCell id="stopped" value="&lt;b&gt;STOPPED · 停止但未完成&lt;/b&gt;&lt;br&gt;物体保底流程结束；CLI 退出码 3" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fceeed;strokeColor=#bc706d;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="1645" width="530" height="80" />
+        </mxCell>
+        <mxCell id="complete" value="&lt;b&gt;COMPLETE · 搜索成功&lt;/b&gt;&lt;br&gt;场景返回到位 / 物体停靠命令成功&lt;br&gt;CLI 退出码 0" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="1350" y="1850" width="530" height="105" />
+        </mxCell>
+        <mxCell id="b1" value="scene" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="B" target="scene">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="b2" value="object" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="B" target="localize">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1310" y="327" />
+              <mxPoint x="1310" y="722" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="b3" value="定位成功" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="localize" target="approach">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="b4" value="无可用停靠点 / 尝试耗尽" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="approach" target="history">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="b5" value="无法定位" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="localize" target="history">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1920" y="722" />
+              <mxPoint x="1920" y="1147" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="b6" value="下一历史线索" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.72;" edge="1" parent="1" source="history" target="localize">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1290" y="1147" />
+              <mxPoint x="1290" y="755" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="b7" value="历史处理完" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="history" target="histend">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="b8" value="从未定位成功" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="histend" target="fallback">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="b9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="fallback" target="stopped">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="b10" value="场景到位" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#52966c;fontColor=#52966c;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="scene" target="complete">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1945" y="502" />
+              <mxPoint x="1945" y="1902" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="b11" value="停靠成功" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#52966c;fontColor=#52966c;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="approach" target="complete">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="1330" y="937" />
+              <mxPoint x="1330" y="1902" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="C" value="&lt;b&gt;C · 扫描图 + 限频 YOLOE&lt;/b&gt;&lt;br&gt;固定原图、同帧深度、位姿和相机标定&lt;br&gt;扫描图与中等分视频候选入队；高分直接交付" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;arcSize=50;dashed=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2075" y="280" width="450" height="100" />
+        </mxCell>
+        <mxCell id="snapshot" value="&lt;b&gt;串行快照准备&lt;/b&gt;&lt;br&gt;RGB 打包、同帧深度复制到内存&lt;br&gt;准备一张即进入模型 FIFO&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;semantic_queue.py / snapshot_store.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2075" y="450" width="450" height="105" />
+        </mxCell>
+        <mxCell id="vlm" value="&lt;b&gt;单图 VLM 分析&lt;/b&gt;&lt;br&gt;物体：score + 框 + confidence；场景：found + confidence&lt;br&gt;逐项校验：检测失败与有效未命中分开&lt;br&gt;本地 Qwen：关闭思考 + JSON Schema&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;openai_compatible.py / perception/analyzer.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2075" y="625" width="450" height="125" />
+        </mxCell>
+        <mxCell id="cache" value="&lt;b&gt;保存结果，等待主循环接收&lt;/b&gt;&lt;br&gt;图像分数赋给同图可见候选；首次有效分保留&lt;br&gt;高分单路 / 中等分同框联合：保留目标框与深度&lt;br&gt;有效扫描检测才登记已检查覆盖；失败单独记录" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2075" y="825" width="450" height="140" />
+        </mxCell>
+        <mxCell id="D" value="&lt;b&gt;D · 下一周期合入主循环&lt;/b&gt;&lt;br&gt;begin_cycle → receive_perception&lt;br&gt;分数用于后续选点；线索按可用顺序进入 B&lt;br&gt;后台不控制底盘，不直接修改 SearchState&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;app.py::_prepare_state / core/navigator.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;arcSize=50;dashed=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2075" y="1040" width="450" height="120" />
+        </mxCell>
+        <mxCell id="c1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#9675bd;fontColor=#9675bd;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;dashed=1;" edge="1" parent="1" source="C" target="snapshot">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="c2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#9675bd;fontColor=#9675bd;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;dashed=1;" edge="1" parent="1" source="snapshot" target="vlm">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="c3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#9675bd;fontColor=#9675bd;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;dashed=1;" edge="1" parent="1" source="vlm" target="cache">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="c4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#9675bd;fontColor=#9675bd;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;dashed=1;" edge="1" parent="1" source="cache" target="D">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="pause" value="&lt;b&gt;目标处理时的暂停规则&lt;/b&gt;&lt;br&gt;暂停普通 VLM 队列，迟到结果暂存&lt;br&gt;已开始请求和快照准备可收尾&lt;br&gt;需要更多历史线索时，仅恢复已有队列&lt;br&gt;YOLOE 继续限频检测；暂停时不新增视频任务" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f3f5f8;strokeColor=#9ba8b8;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2075" y="1250" width="450" height="160" />
+        </mxCell>
+        <mxCell id="lifetime" value="&lt;b&gt;随车本地模型的生命周期&lt;/b&gt;&lt;br&gt;启动导航且选择本机 Qwen3.5-4B → 预热&lt;br&gt;连续 5 分钟无模型请求 → Ollama 卸载&lt;br&gt;没有保活心跳；下次请求重新加载&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;adapters/ollama_warmup.py / nav-vlm.service&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2075" y="1490" width="450" height="140" />
+        </mxCell>
+        <mxCell id="legend" value="&lt;b&gt;读图说明&lt;/b&gt;&lt;br&gt;蓝色：运行编排 / 探索状态&lt;br&gt;绿色：目标定位、返回与成功&lt;br&gt;紫色虚线：后台数据处理，不代表底盘动作&lt;br&gt;橙色：可恢复分支；红色：停止或失败&lt;br&gt;A/B/C/D：同名跨区端口，避免长线交叉" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f3f5f8;strokeColor=#9ba8b8;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="2075" y="1710" width="450" height="220" />
+        </mxCell>
+        <mxCell id="footer" value="实现映射：app.py 负责副作用与动作反馈；core/navigator.py 分派行为；SearchState 保存跨周期状态；SemanticPerception 保存队列与快照。&lt;br&gt;本图合并重复周期和局部辅助计算；蓝/绿状态名对应 SearchPhase，其他框表示操作或条件。系统故障、输入错误、用户中断或决策上限均可结束运行。" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=16;fontColor=#334155;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="45" y="2040" width="2530" height="85" />
+        </mxCell>
+        <mxCell id="yolo_direct" source="C" target="cache" value="YOLOE 高分" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;dashed=1;strokeColor=#9374b5;fontColor=#654d8a;fontSize=14;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=1;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="2545.0" y="330.0" />
+              <mxPoint x="2545.0" y="875.0" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
