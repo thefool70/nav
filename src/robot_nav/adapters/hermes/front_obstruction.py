@@ -22,9 +22,12 @@ MIN_NEAR_CLUSTER_SAMPLE_COUNT = 12
 MAX_NEIGHBOR_DEPTH_DELTA_M = 0.20
 # 同一个人的深度点会落在身体不同部位，世界坐标允许人体尺度内的变化。
 MAX_OBSTACLE_SPREAD_M = 0.45
-# 人工墙膨胀半径为 0.36 m；墙中心至少留在机器人起点前方 0.60 m。
+# 人工墙膨胀半径为 0.36 m；墙中心至少留在机器人当前位置前方 0.60 m。
 MIN_WALL_DISTANCE_FROM_ROBOT_M = 0.60
 WALL_BEFORE_OBSTACLE_M = 0.15
+# MoveTo 内部也可能先转向。朝向剩余路径首个有效点后才开始平移阻塞计时。
+TRANSLATION_HEADING_TOLERANCE_RAD = math.radians(25.0)
+PATH_HEADING_LOOKAHEAD_M = 0.20
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,7 @@ class FrontObstructionDetector:
         self._latest_pose: Optional[Pose2D] = None
         self._target_world_xy: Optional[Tuple[float, float]] = None
         self._restart_reason = ""
+        self._travel_heading_rad: Optional[float] = None
 
     def start_translation(
         self,
@@ -105,6 +109,7 @@ class FrontObstructionDetector:
             self._latest_pose = None
             self._target_world_xy = target_world_xy
             self._restart_reason = ""
+            self._travel_heading_rad = None
 
     def stop_translation(self) -> None:
         with self._lock:
@@ -116,9 +121,21 @@ class FrontObstructionDetector:
             self._latest_timestamp_s = None
             self._latest_pose = None
             self._target_world_xy = None
+            self._travel_heading_rad = None
+
+    def update_path(self, pose: Pose2D, remaining_path) -> None:
+        """动作监控线程提供底盘实际路径方向；不依赖不稳定的 stage 文本。"""
+        with self._lock:
+            if not self._active:
+                return
+            target = next((point for point in remaining_path
+                           if math.hypot(point[0] - pose.x_m, point[1] - pose.y_m)
+                           >= PATH_HEADING_LOOKAHEAD_M), self._target_world_xy)
+            self._travel_heading_rad = (math.atan2(target[1] - pose.y_m, target[0] - pose.x_m)
+                                        if target is not None else None)
 
     def observe(self, frame: NavigationFrame) -> Optional[FrontObstruction]:
-        """接收一帧；底盘在配置半径内停留满时长后返回一次墙中心。"""
+        """接收一帧；朝向路径、底盘在配置半径内停留满时长后返回一次墙中心。"""
         with self._lock:
             if not self._active or self._triggered:
                 return None
@@ -127,6 +144,21 @@ class FrontObstructionDetector:
         near = _front_observation(frame, self._maximum_depth_m)
         with self._lock:
             if not self._active or self._triggered:
+                return None
+
+            # 初始调头和路径中的转弯都不算行进受阻。暂停即丢弃上一计时窗口，
+            # 朝向重新对齐后从零计时；整个 Action 仍受原有总超时约束。
+            heading = self._travel_heading_rad
+            error = (abs(math.atan2(math.sin(frame.pose.yaw_rad - heading),
+                                    math.cos(frame.pose.yaw_rad - heading))) if heading is not None else math.pi)
+            if error > TRANSLATION_HEADING_TOLERANCE_RAD:
+                self._anchor_timestamp_s = None
+                self._anchor_pose = None
+                self._samples.clear()
+                self._near_observation_count = 0
+                self._latest_timestamp_s = timestamp_s
+                self._latest_pose = frame.pose
+                self._restart_reason = "转向完成后重新计时"
                 return None
 
             if self._anchor_timestamp_s is None or self._anchor_pose is None:
@@ -166,7 +198,7 @@ class FrontObstructionDetector:
                 self._samples,
                 duration_s,
                 self._near_observation_count,
-                self._anchor_pose,
+                frame.pose,
                 self._target_world_xy,
             )
 
@@ -319,7 +351,7 @@ def _obstruction_from_window(
     samples: list[_NearObservation],
     duration_s: float,
     sample_count: int,
-    anchor_pose: Pose2D,
+    robot_pose: Pose2D,
     target_world_xy: Optional[Tuple[float, float]],
 ) -> FrontObstruction:
     depth_m = None
@@ -327,12 +359,12 @@ def _obstruction_from_window(
         obstacle_x = statistics.median(item.obstacle_world_xy[0] for item in samples)
         obstacle_y = statistics.median(item.obstacle_world_xy[1] for item in samples)
         heading = math.atan2(
-            obstacle_y - anchor_pose.y_m,
-            obstacle_x - anchor_pose.x_m,
+            obstacle_y - robot_pose.y_m,
+            obstacle_x - robot_pose.x_m,
         )
         obstacle_distance = math.hypot(
-            obstacle_x - anchor_pose.x_m,
-            obstacle_y - anchor_pose.y_m,
+            obstacle_x - robot_pose.x_m,
+            obstacle_y - robot_pose.y_m,
         )
         wall_distance = max(
             MIN_WALL_DISTANCE_FROM_ROBOT_M,
@@ -341,21 +373,21 @@ def _obstruction_from_window(
         depth_m = statistics.median(item.depth_m for item in samples)
     else:
         target_x, target_y = target_world_xy or (
-            anchor_pose.x_m + math.cos(anchor_pose.yaw_rad),
-            anchor_pose.y_m + math.sin(anchor_pose.yaw_rad),
+            robot_pose.x_m + math.cos(robot_pose.yaw_rad),
+            robot_pose.y_m + math.sin(robot_pose.yaw_rad),
         )
-        if math.hypot(target_x - anchor_pose.x_m, target_y - anchor_pose.y_m) > 1e-6:
+        if math.hypot(target_x - robot_pose.x_m, target_y - robot_pose.y_m) > 1e-6:
             heading = math.atan2(
-                target_y - anchor_pose.y_m,
-                target_x - anchor_pose.x_m,
+                target_y - robot_pose.y_m,
+                target_x - robot_pose.x_m,
             )
         else:
-            heading = anchor_pose.yaw_rad
+            heading = robot_pose.yaw_rad
         wall_distance = MIN_WALL_DISTANCE_FROM_ROBOT_M
     return FrontObstruction(
         center_world_xy=(
-            anchor_pose.x_m + wall_distance * math.cos(heading),
-            anchor_pose.y_m + wall_distance * math.sin(heading),
+            robot_pose.x_m + wall_distance * math.cos(heading),
+            robot_pose.y_m + wall_distance * math.sin(heading),
         ),
         heading_world_rad=heading,
         depth_m=depth_m,

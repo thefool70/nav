@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Dict, Mapping, Optional, Sequence, Set, Tuple
 
 from ...core.geometry import (
@@ -122,14 +123,35 @@ class HermesObservedMap:
         )
         return obstacle_map, visibility_map
 
+    def navigation_map(self, source: ObstacleMap) -> ObstacleMap:
+        """完整底盘图叠加同一份原始人工墙；停靠规划自行计算净空，不重复膨胀。"""
+        self._prepare_map_geometry(source)
+        if not self._artificial_wall_keys:
+            return source
+        wall_values = self._cached_occupancy_in(source, {key: 1.0 for key in self._artificial_wall_keys})
+        occupancy = tuple(tuple(1.0 if wall_values[row][col] is not None else value
+                                for col, value in enumerate(values))
+                          for row, values in enumerate(source.occupancy))
+        return replace(source, occupancy=occupancy)
+
     def add_permanent_wall(
         self,
         obstacle_map: ObstacleMap,
         center_world_xy: Tuple[float, float],
         forward_heading_rad: float,
+        robot_pose: Pose2D,
     ) -> int:
         """在障碍前横向封住当前已知通道，返回新增的原始占用格数。"""
         self._prepare_map_geometry(obstacle_map)
+        # 停稳后以当前位姿检查法向距离，连同栅格取整误差一起预留净空。
+        forward = (math.cos(forward_heading_rad), math.sin(forward_heading_rad))
+        separation = ((center_world_xy[0] - robot_pose.x_m) * forward[0]
+                      + (center_world_xy[1] - robot_pose.y_m) * forward[1])
+        clearance = self._inflation_radius_m + 2 * obstacle_map.resolution_m
+        if separation < clearance:
+            shift = clearance - separation
+            center_world_xy = (center_world_xy[0] + shift * forward[0],
+                               center_world_xy[1] + shift * forward[1])
         center_cell = world_to_nearest_grid_cell(center_world_xy, obstacle_map)
         if not _cell_in_map(center_cell, obstacle_map):
             raise ValueError("人工墙中心落在当前地图外")
@@ -163,13 +185,16 @@ class HermesObservedMap:
 
         keys = {self._cell_to_world_key(cell, obstacle_map) for cell in wall_cells}
         new_count = len(keys - self._artificial_wall_keys)
-        self._artificial_wall_keys.update(keys)
         offsets = _inflation_offsets(obstacle_map.resolution_m, self._inflation_radius_m)
-        self._inflated_artificial_wall_keys.update(
+        inflated_keys = {
             (key[0] + row_offset, key[1] + col_offset)
             for key in keys
             for row_offset, col_offset in offsets
-        )
+        }
+        if self._world_to_key((robot_pose.x_m, robot_pose.y_m)) in inflated_keys:
+            raise RuntimeError("人工墙膨胀覆盖机器人当前位置，拒绝写入地图")
+        self._artificial_wall_keys.update(keys)
+        self._inflated_artificial_wall_keys.update(inflated_keys)
         for key in self._artificial_wall_keys:
             self._raw_occupancy[key] = 1.0
         for key in self._inflated_artificial_wall_keys:
