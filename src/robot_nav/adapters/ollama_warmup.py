@@ -10,13 +10,20 @@ from urllib.request import Request, urlopen
 import zlib
 
 
+def is_local_qwen(endpoint_url: str, model: str, api_format: str) -> bool:
+    """识别本机或 SSH 转发的 Qwen 服务，统一凭据与预热的适用条件。"""
+    address = urlsplit(endpoint_url.strip())
+    return (model.strip().lower() == "qwen3.5:4b" and api_format == "chat_completions"
+            and address.scheme in ("http", "https")
+            and address.hostname in ("localhost", "127.0.0.1", "::1")
+            and address.path == "/v1/chat/completions")
+
+
 def warmup_local_qwen(endpoint_url: str, model: str, api_format: str) -> None:
     """仅预热当前支持的本机 Ollama 配置；在设备创建前完成，不产生导航线索。"""
-    address = urlsplit(endpoint_url.strip())
-    if (model.strip().lower() != "qwen3.5:4b" or api_format != "chat_completions"
-            or address.hostname not in ("localhost", "127.0.0.1", "::1")
-            or address.path != "/v1/chat/completions"):
+    if not is_local_qwen(endpoint_url, model, api_format):
         return
+    address = urlsplit(endpoint_url.strip())
     print("预热本机 Qwen 视觉模型；连续 5 分钟无请求后自动卸载。", flush=True)
     # 使用固定黑图，不读取相机、不接触导航队列；不仅加载权重，也初始化视觉计算。
     def chunk(kind, data):

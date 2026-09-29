@@ -11,28 +11,16 @@ import time
 import zlib
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
-from typing import (
-    Any,
-    Callable,
-    Mapping,
-    Optional,
-    Tuple,
-)
+from typing import Any, Callable, Mapping, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from ..core.models import (
-    SemanticAnalysis,
-    SearchMode,
-    TargetSearchGoal,
-)
-from ..core.vision import (
+from ..core.models import SemanticAnalysis, SearchMode, TargetSearchGoal
+from ..perception.analyzer import (
     build_semantic_analysis_prompt,
     parse_semantic_analysis_response,
     semantic_analysis_schema,
-)
-from .perception import (
     VlmInputImage,
     VlmInteraction,
 )

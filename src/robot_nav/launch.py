@@ -15,21 +15,20 @@ from pathlib import Path
 from typing import Callable, Optional
 from uuid import uuid4
 
-from .environment import create_chassis, prepare_navigation, run_preflight, validate_environment
+from .adapters.ollama_warmup import warmup_local_qwen
 from .adapters.openai_compatible import (
     OpenAIApiFormat,
     OpenAICompatibleConfig,
     OpenAICompatibleTargetObserver,
 )
-from .perception.analyzer import SemanticAnalyzer
 from .adapters.random_observer import RandomScoreTargetObserver
-from .adapters.ollama_warmup import warmup_local_qwen
-from .perception.object_localizer import ObjectLocalizerConfig
-from .core.models import SearchMode
-from .perception import SemanticPerception
 from .app import run_navigation
-from .runtime_reporting import optional_callback
-from .run_log import NavigationRunLogger, default_run_log_path
+from .core.models import SearchMode, TargetSearchGoal
+from .environment import create_chassis, prepare_navigation, run_preflight, validate_environment
+from .perception.analyzer import SemanticAnalyzer, DetectionThresholds
+from .adapters.object_model_process import ObjectModelConfig
+from .perception.semantic_queue import SemanticPerception
+from .run_log import NavigationRunLogger, default_run_log_path, optional_callback
 
 
 def run_entries(args: argparse.Namespace, api_key: str) -> int:
@@ -70,19 +69,22 @@ def _run_logged_navigation(args: argparse.Namespace, api_key: str) -> int:
 def _assemble_and_run(args: argparse.Namespace, api_key: str, run_logger: NavigationRunLogger) -> int:
     """创建显示、感知和设备，完成准备后进入两种环境共用的导航循环。"""
     visualization = _build_visualization(args)
+    goal = TargetSearchGoal(args.target, SearchMode(args.search_mode))
     # 感知先创建，设备后创建；退出时先关闭设备并结束尚未完成的动作。
-    with _build_perception(args, api_key, visualization, run_logger) as perception:
+    with _build_perception(args, api_key, visualization, run_logger, goal) as perception:
         with create_chassis(
             args,
             on_motion_frame=optional_callback(visualization.on_motion_frame, "运动帧可视化"),
             on_motion_plan=visualization.on_motion_plan,
             on_action_progress=_action_progress_callback(run_logger),
             on_chassis_status=visualization.on_chassis_status,
+            on_rgbd_frame=perception.observe_rgbd_frame if perception.detects_video else None,
+            on_sensor_frame=perception.observe_navigation_frame if perception.detects_video else None,
         ) as chassis:
             # 仅真机执行启动前移；随后两种环境进入完全相同的导航循环。
             prepare_navigation(args, chassis)
             return run_navigation(
-                chassis, args.target, SearchMode(args.search_mode), args.max_cycles,
+                chassis, goal, args.max_cycles,
                 perception, on_cycle=visualization.on_cycle, debug_frontier=args.debug_frontier,
                 run_logger=run_logger,
             )
@@ -134,13 +136,16 @@ def _build_perception(
     api_key: str,
     visualization: _VisualizationCallbacks,
     run_logger: NavigationRunLogger,
+    goal: TargetSearchGoal,
 ) -> SemanticPerception:
     """连接队列事件、物体定位配置和模型分析器，构造公共感知模块。"""
     on_event = _perception_event_callback(visualization.on_semantic_event, run_logger)
     object_config = _object_config(args)
     # analyzer 封装模型请求；perception 管理快照、队列和结果交付。
     analyzer = _build_analyzer(args, api_key, visualization.on_vlm_interaction)
-    return SemanticPerception(analyzer, on_event=on_event, object_config=object_config)
+    return SemanticPerception(analyzer, goal, on_event=on_event, object_config=object_config,
+        thresholds=DetectionThresholds(args.vlm_high_confidence, args.yolo_high_confidence,
+                                       args.vlm_joint_confidence, args.yolo_joint_confidence, args.detection_box_iou))
 
 
 def _build_analyzer(
@@ -148,7 +153,7 @@ def _build_analyzer(
     api_key: str,
     on_vlm_interaction=None,
 ) -> SemanticAnalyzer:
-    """构造语义分析器：调试用随机分数，正式用 OpenCode Go 上的 VLM。"""
+    """构造语义分析器：调试用随机分数，正式使用配置指定的 VLM。"""
     if args.debug_random_score:
         print(
             "调试随机感知模式：不调用视觉模型，只用于调试扫描、Frontier、"
@@ -158,7 +163,7 @@ def _build_analyzer(
     warmup_local_qwen(args.vlm_endpoint, args.vlm_model, args.vlm_api_format)
     # 同一次导航共用会话标识。
     session_id = uuid4().hex
-    print(f"VLM 配置：{args.vlm_model}，会话 {session_id}", flush=True)
+    print(f"VLM 配置：{args.vlm_model}，接口 {args.vlm_endpoint}，会话 {session_id}", flush=True)
     return OpenAICompatibleTargetObserver(
         OpenAICompatibleConfig(
             endpoint_url=args.vlm_endpoint,
@@ -175,13 +180,13 @@ def _build_analyzer(
     )
 
 
-def _object_config(args) -> Optional[ObjectLocalizerConfig]:
-    # 场景搜索和随机评分不需要启动 YOLO/SAM2 的物体定位链。
+def _object_config(args) -> Optional[ObjectModelConfig]:
+    # 场景搜索和随机评分不需要启动 YOLOE 进程。
     if args.debug_random_score or args.search_mode != SearchMode.OBJECT.value:
         return None
-    return ObjectLocalizerConfig(
+    return ObjectModelConfig(
         python_executable=args.object_python, class_text=args.object_class or "", device=args.object_device,
-        yolo_model=args.object_yolo_model, sam2_checkpoint=args.object_sam_checkpoint,
+        yolo_model=args.object_yolo_model, frequency_hz=args.yolo_frequency_hz,
         timeout_s=args.object_timeout_s,
     )
 
@@ -193,7 +198,7 @@ def _perception_event_callback(on_event, run_logger: NavigationRunLogger):
     def callback(event):
         run_logger.log_semantic_queue_event(event)
         # 采样和编码计时只落 JSONL，不为它们刷新整套 VLM 可视化。
-        if visualization is not None and event["event"] != "scan_prepared":
+        if visualization is not None and event["event"] not in ("scan_prepared", "yolo_frame"):
             visualization(event)
 
     return callback

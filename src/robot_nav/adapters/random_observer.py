@@ -11,7 +11,7 @@ class RandomScoreTargetObserver:
 
     def analyze_view(self, image, goal, *, trace_context=None) -> SemanticAnalysis:
         """同张图覆盖的前沿共用一个随机分，与正式单图评分的数据流一致。"""
-        return SemanticAnalysis(False, image_score=self._random.random())
+        return SemanticAnalysis(False, image_score=self._random.random(), confidence=0.0)
 
 
 __all__ = ["RandomScoreTargetObserver"]

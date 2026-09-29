@@ -1,4 +1,4 @@
-"""持续接收随车端 RGB-D + 同步位姿，只保留最新完整包。"""
+"""持续接收随车端 RGB-D + 同步位姿；逐包交付检测，导航读取最新完整包。"""
 
 import importlib
 import math
@@ -15,7 +15,7 @@ class RemoteD435iCamera:
     等待上限不是跨机传感器到接收端的帧龄保证。
     """
 
-    def __init__(self, endpoint, *, topic="rgbd.pose", timeout_s=3.0):
+    def __init__(self, endpoint, *, topic="rgbd.pose", timeout_s=3.0, on_capture=None):
         if not endpoint.startswith("ipc:///"):
             raise ValueError("相机地址必须为绝对路径 ZMQ ipc:/// 地址")
         if not topic or not math.isfinite(timeout_s) or timeout_s <= 0:
@@ -29,6 +29,7 @@ class RemoteD435iCamera:
         self._endpoint = endpoint
         self._topic = topic.encode("utf-8")
         self._timeout_s = timeout_s
+        self._on_capture = on_capture
         self._condition = threading.Condition()
         self._stop = threading.Event()
         self._latest = None
@@ -53,7 +54,7 @@ class RemoteD435iCamera:
             return self._latest
 
     def _receive_loop(self):
-        """持续排空消息，覆盖旧包；socket 在此线程创建和关闭。"""
+        """逐包交付回调并更新导航快照；回调只入队，socket 在此线程创建和关闭。"""
         context = None
         socket = None
         try:
@@ -61,7 +62,7 @@ class RemoteD435iCamera:
             context = zmq.Context()
             socket = context.socket(zmq.SUB)
             socket.setsockopt(zmq.LINGER, 0)
-            socket.setsockopt(zmq.RCVHWM, 1)
+            socket.setsockopt(zmq.RCVHWM, 32 if self._on_capture is not None else 1)
             socket.setsockopt(zmq.MAXMSGSIZE, MAX_FRAME_BYTES)
             socket.setsockopt(zmq.SUBSCRIBE, self._topic)
             socket.connect(self._endpoint)
@@ -83,6 +84,8 @@ class RemoteD435iCamera:
                     self._received_s = received
                     self._condition.notify_all()
                 last_received = received
+                if self._on_capture is not None:
+                    self._on_capture(capture)
         except BaseException as exc:
             with self._condition:
                 self._error = exc

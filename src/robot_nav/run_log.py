@@ -1,42 +1,39 @@
-"""把导航决策和底盘反馈保存为便于复盘的 JSONL 运行日志。"""
+"""导航过程记录：JSONL 日志、终端摘要、可视化回调与周期计时汇总。
+
+只记录输入、决策和执行反馈，不参与导航决策。"""
 
 from __future__ import annotations
-
-from .core.actions import action_command
 
 import json
 import math
 import threading
 import time
-from datetime import datetime
 from dataclasses import asdict
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from time import monotonic
 from typing import Any, Mapping, Optional, TextIO, Tuple
 
-from .core.geometry import world_to_nearest_grid_cell
-from .core.observation_coverage import camera_world_position
+from .core.geometry import action_command, world_to_nearest_grid_cell
 from .core.models import (
-    NavigationFrame,
     NavigationResult,
+    NavigationStatus,
+    NavigationFrame,
     ObservationNode,
     ObservationView,
     ObstacleMap,
     Pose2D,
     RelativePoseCommand,
+    SearchDirectionState,
     SearchState,
     TargetObservation,
 )
+from .core.scan import camera_world_position
+from .core.timing import measure_stage
 
 
 DEFAULT_RUN_LOG_DIRECTORY = Path("data/run_logs")
-
-
-def default_run_log_path(adapter_name: str) -> Path:
-    """返回带本地时间和微秒的默认日志路径，避免不同运行互相覆盖。"""
-    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-    safe_adapter_name = adapter_name.replace("/", "-").replace(" ", "-")
-    return DEFAULT_RUN_LOG_DIRECTORY / f"{safe_adapter_name}-{timestamp}.jsonl"
 
 
 class NavigationRunLogger:
@@ -125,8 +122,10 @@ class NavigationRunLogger:
         )
 
     def log_semantic_queue_event(self, event: Mapping[str, Any]) -> None:
-        """队列事件记录任务 ID 与拍摄快照路径，允许关联迟到的模型结果。"""
-        self._write("semantic_queue", queue_event=event.get("event"), details=dict(event))
+        """记录任务 ID 与小型诊断数据；图像只交给 Rerun，不写入 JSONL。"""
+        details = {key: value for key, value in event.items()
+                   if key not in ("image", "observation_frame", "observation")}
+        self._write("semantic_queue", queue_event=event.get("event"), details=details)
 
 
     def log_error(self, exc: BaseException) -> None:
@@ -181,6 +180,133 @@ class NavigationRunLogger:
                 except OSError:
                     pass
                 print(f"运行日志已停用，导航继续：{exc}", flush=True)
+
+
+def report_cycle_decision(frame, decision, started, timings, *, on_cycle, on_timing):
+    """执行运动前的决策回调并汇总本周期计时；不包含运动耗时。"""
+    with measure_stage(timings, "cycle.callbacks"):
+        if on_cycle is not None:
+            on_cycle(frame, None, decision)
+    if on_timing is not None:
+        ended = monotonic()
+        on_timing({
+            "started_monotonic_s": started,
+            "ended_monotonic_s": ended,
+            "duration_s": ended - started,
+            "stage": decision.debug.stage,
+            "has_command": decision.status is NavigationStatus.OK and decision.action is not None,
+            "spans": timings,
+        })
+
+
+def record_decision(frame, observation, result, *, on_cycle, debug_frontier,
+                    run_logger, cycle_index):
+    """按固定顺序记录决策、更新显示、输出候选，再保存各步骤耗时。"""
+    timings = [] if run_logger is not None else None
+    if run_logger is not None:
+        with measure_stage(timings, "callback.decision_log"):
+            run_logger.log_cycle_decision(cycle_index, frame, observation, result)
+    with measure_stage(timings, "callback.visualization_and_debug"):
+        if on_cycle is not None:
+            on_cycle(frame, observation, result)
+        if debug_frontier:
+            _print_frontier_debug(frame, result)
+    if run_logger is not None:
+        run_logger.log_callback_timing(timings)
+
+
+def optional_callback(callback, description):
+    """可视化 I/O 或运行库故障时停用回调；类型、字段等程序错误继续传播。"""
+    if callback is None:
+        return None
+    # 每个包装函数独立记住是否停用，避免一个显示故障影响其他回调。
+    enabled = True
+
+    def invoke(*args):
+        nonlocal enabled
+        if not enabled:
+            return
+        try:
+            callback(*args)
+        except (OSError, RuntimeError) as exc:
+            enabled = False
+            print(f"{description}已停用：{exc}", flush=True)
+
+    return invoke
+
+
+def print_cycle(cycle_index: int, result: NavigationResult) -> None:
+    """输出足以沿算法步骤排错的一行周期信息。"""
+    print(
+        f"[{cycle_index:03d}] status={result.status.value} "
+        f"phase={result.state.phase.value} stage={result.debug.stage} | "
+        f"{result.debug.message}"
+    )
+
+
+def default_run_log_path(adapter_name: str) -> Path:
+    """返回带本地时间和微秒的默认日志路径，避免不同运行互相覆盖。"""
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+    safe_adapter_name = adapter_name.replace("/", "-").replace(" ", "-")
+    return DEFAULT_RUN_LOG_DIRECTORY / f"{safe_adapter_name}-{timestamp}.jsonl"
+
+
+def _print_frontier_debug(frame, result: NavigationResult) -> None:
+    """打印父节点返回目标，或本轮 Frontier 候选的评分组成。"""
+    details = result.debug.details
+    stage = details.get("next_stage", result.debug.stage)
+    if stage == "backtrack.return":
+        print(
+            f"[Frontier] stage={stage}，逐级返回节点={details['parent_node_id']}，"
+            f"移动目标={details['destination_world_xy']}，"
+            f"分支深度={details['branch_depth']}，"
+            f"本节点暂存方向={details['pending_direction_count']}，到达后刷新并决策"
+        )
+        return
+    if stage not in ("explore.select", "backtrack.resume"):
+        return
+    candidates = result.debug.details.get("frontier_candidates")
+    if not candidates:
+        return
+
+    path_weight = result.debug.details["frontier_path_distance_weight"]
+    semantic_weight = result.debug.details["frontier_semantic_score_weight"]
+    print(
+        "[Frontier] "
+        f"stage={stage}，"
+        f"本轮候选={len(candidates)}，"
+        f"选择来源={result.debug.details['frontier_selection_source']}，"
+        f"新方向={result.debug.details['new_frontier_count']}，"
+        f"暂存旧方向={result.debug.details['deferred_frontier_count']}，"
+        f"robot=({frame.pose.x_m:.3f}, {frame.pose.y_m:.3f}) m"
+    )
+    if stage == "backtrack.resume":
+        print(f"[Frontier] 已到达父节点={details['parent_node_id']}，恢复该节点暂存方向。")
+    print(
+        "[Frontier] score = 前沿跨度 "
+        f"- {path_weight:.2f}×路径距离 + 语义奖励（仅用于新方向排序）；"
+        f"语义奖励 = {semantic_weight:.2f}×(2×VLM分数-1)"
+    )
+    for rank, candidate in enumerate(candidates, start=1):
+        selected = " selected" if rank == 1 else ""
+        semantic_score = candidate["semantic_score"]
+        semantic_text = "none" if semantic_score is None else f"{semantic_score:.3f}"
+        print(
+            f"[Frontier #{rank:02d}{selected}] "
+            f"id={candidate['candidate_id']} "
+            f"grid=({candidate['row']}, {candidate['col']}) "
+            f"world=({candidate['world_x_m']:.3f}, "
+            f"{candidate['world_y_m']:.3f}) m "
+            f"cells={candidate['frontier_cell_count']} "
+            f"span={candidate['frontier_span_m']:.3f} m "
+            f"path={candidate['path_distance_m']:.3f} m "
+            f"distance_penalty={candidate['distance_penalty']:.3f} "
+            f"vlm={semantic_text} "
+            f"semantic_bonus={candidate['semantic_bonus']:+.3f} "
+            f"deferred_order={candidate['deferred_order']} "
+            f"score={candidate['score']:.3f}"
+        )
+    print(f"[Frontier] 本次完整移动目标={result.debug.details['destination_world_xy']}")
 
 
 def _result_summary(
@@ -368,16 +494,9 @@ def _mask_summary(mask: Any) -> Optional[Mapping[str, Any]]:
 
 def _state_summary(state: SearchState) -> Mapping[str, Any]:
     """汇总跨周期搜索状态，保留分支、暂存区域和线索的关联信息供复盘。"""
-    direction_counts = {
-        "pending": 0,
-        "committed": 0,
-        "explored": 0,
-        "invalidated": 0,
-        "stalled": 0,
-    }
+    direction_counts = {item.value: 0 for item in SearchDirectionState}
     for node in state.observation_history:
-        for direction in node.directions:
-            direction_counts[direction.state.value] += 1
+        direction_counts[node.state.value] += 1
 
     latest_node = (
         state.observation_history[-1]
@@ -393,14 +512,7 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
     return {
         "phase": state.phase.value,
         "scan_headings_world_rad": state.scan_headings_world_rad,
-        "next_scan_index": state.next_scan_index,
-        "scan_evidence": tuple(
-            {
-                "heading_world_rad": evidence.heading_world_rad,
-                "visibility": evidence.visibility.value,
-            }
-            for evidence in state.scan_evidence
-        ),
+        "scan_captured_count": len(state.scan_views),
         "history_node_count": len(state.observation_history),
         "history_direction_counts": direction_counts,
         "active_frontier_id": state.active_frontier_id,
@@ -448,8 +560,7 @@ def _state_summary(state: SearchState) -> Mapping[str, Any]:
             if state.observed_views else None
         ),
         "scan_views": tuple(
-            _observation_view_summary(evidence.view)
-            for evidence in state.scan_evidence if evidence.view is not None
+            _observation_view_summary(view) for view in state.scan_views
         ),
         "latest_node": _node_summary(latest_node),
     }
@@ -472,23 +583,17 @@ def _observation_view_summary(view: ObservationView) -> Mapping[str, Any]:
 def _node_summary(
     node: Optional[ObservationNode],
 ) -> Optional[Mapping[str, Any]]:
-    """展开一个历史节点的方向与执行结果；没有节点时返回 None。"""
+    """记录一次探索移动；没有节点时返回 None。"""
     if node is None:
         return None
     return {
         "node_id": node.node_id,
         "position_world_xy": node.position_world_xy,
-        "directions": tuple(
-            {
-                "direction_id": direction.direction_id,
-                "heading_world_rad": direction.heading_world_rad,
-                "candidate_world_xy": direction.candidate_world_xy,
-                "command_world_xy": direction.command_world_xy,
-                "execution_reason": direction.execution_reason,
-                "state": direction.state.value,
-            }
-            for direction in node.directions
-        ),
+        "candidate_id": node.candidate_id,
+        "heading_world_rad": node.heading_world_rad,
+        "destination_world_xy": node.destination_world_xy,
+        "execution_reason": node.execution_reason,
+        "state": node.state.value,
     }
 
 
@@ -540,9 +645,3 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return str(value)
-
-
-__all__ = [
-    "NavigationRunLogger",
-    "default_run_log_path",
-]

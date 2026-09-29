@@ -29,11 +29,9 @@ from .adapters.chassis import (
     MotionStalledError,
     RecoverableMotionError,
 )
-from .core.actions import action_command
-from .core.perception_flow import capture_context, receive_perception, target_handling_active
-from .core.frontier import FrameFrontierCache
+from .core.exploration import FrameFrontierCache, complete_frontier_selection
+from .core.geometry import action_command
 from .core.models import (
-    ActionKind,
     ActionConstraint,
     ActionPurpose,
     ActionOutcome,
@@ -43,7 +41,6 @@ from .core.models import (
     NavigationResult,
     NavigationStatus,
     SearchPhase,
-    SearchMode,
     SearchState,
     TargetObservation,
     TargetSearchGoal,
@@ -51,12 +48,18 @@ from .core.models import (
 from .core.navigator import (
     apply_execution_result,
     navigate,
+    receive_perception,
+    target_handling_active,
 )
+from .core.scan import capture_context, record_scanned_direction
 from .core.timing import TimingSpans, measure_stage
-from .perception import SemanticPerception
-from .run_log import NavigationRunLogger
-from .runtime_reporting import (
-    record_decision, optional_callback, print_cycle, report_cycle_decision,
+from .perception.semantic_queue import SemanticPerception
+from .run_log import (
+    NavigationRunLogger,
+    record_decision,
+    optional_callback,
+    print_cycle,
+    report_cycle_decision,
 )
 
 NavigationCycleCallback = Callable[
@@ -67,8 +70,7 @@ NavigationCycleCallback = Callable[
 
 def run_navigation(
     chassis: ChassisInterface,
-    target_text: str,
-    search_mode: SearchMode,
+    goal: TargetSearchGoal,
     max_cycles: int,
     perception: SemanticPerception,
     *,
@@ -78,7 +80,6 @@ def run_navigation(
 ) -> int:
     """重复执行环境无关的单周期入口，直到完成、失败或达到上限。"""
 
-    goal = TargetSearchGoal(target_text, search_mode)
     state = None
     cycle_index = 0
     decision_cycles = 0
@@ -150,8 +151,6 @@ def run_navigation_cycle(
     if timings is not None:
         timings.extend(frame.acquisition_timings)
 
-    if perception is not None:
-        perception.set_goal(goal)
     working_state = _prepare_state(frame, perception, state or SearchState())
     with measure_stage(timings, "cycle.navigate"):
         decision = navigate(frame, goal, working_state, timings=timings, frontier_cache=frontier_cache)
@@ -163,7 +162,7 @@ def run_navigation_cycle(
             timings=timings, frontier_cache=frontier_cache,
         )
     if perception is not None:
-        _sync_perception(frame, decision.state, perception)
+        _sync_perception_pause(decision.state, perception)
         decision = _merge_perception_diagnostics(decision, perception)
 
     report_cycle_decision(frame, decision, started, timings,
@@ -180,12 +179,12 @@ def _prepare_state(
     """取回后台结果并同步感知计数；返回给核心作为本周期输入的显式状态。"""
     if perception is None:
         return state
-    intake = perception.begin_cycle(frame)
+    observed_views = perception.begin_cycle(frame)
     clue = perception.take_target_clue(busy=target_handling_active(state))
     pending, failed, pending_views = perception.pending_counts()
-    working_state = receive_perception(state, intake.observed_views,
+    working_state = receive_perception(state, observed_views,
         pending=pending, failed=failed, pending_views=pending_views, clue=clue)
-    _sync_perception(frame, working_state, perception)
+    _sync_perception_pause(working_state, perception)
     return working_state
 
 
@@ -217,8 +216,8 @@ def _supply_perception(
         )
 
     if decision.status is NavigationStatus.NEEDS_SCAN_CAPTURE:
-        _sync_perception(frame, decision.state, perception)
-        decision = _capture_scan_direction(frame, goal, decision, perception,
+        _sync_perception_pause(decision.state, perception)
+        decision = _capture_scan_direction(frame, decision, perception,
             timings=timings, frontier_cache=frontier_cache,
         )
 
@@ -228,10 +227,8 @@ def _supply_perception(
         if request is None:
             return decision
         with measure_stage(timings, "observer.score_frontiers"):
-            scores = perception.score_frontiers(request)
-        return navigate(frame, goal, decision.state, frontier_scores=scores,
-            timings=timings, frontier_cache=frontier_cache,
-        )
+            scores = perception.score_frontiers(frame.obstacle_map.frame_id, request)
+        return complete_frontier_selection(frame, decision.state, request, scores, timings=timings)
 
     return decision
 
@@ -268,9 +265,8 @@ def _execute_action(
     return apply_execution_result(decision, ActionExecutionResult(ActionOutcome.SUCCEEDED))
 
 
-def _sync_perception(frame, state, perception):
-    """更新采集上下文，并按目标处理状态暂停或恢复模型队列。"""
-    perception.bind_frame(frame, capture_context(frame, state))
+def _sync_perception_pause(state, perception):
+    """按目标处理状态及排队线索暂停或恢复模型队列。"""
     perception.pause_for_target_handling(
         target_handling_active(state) or perception.has_target_clues(),
         reason="target_handling",
@@ -279,7 +275,6 @@ def _sync_perception(frame, state, perception):
 
 def _capture_scan_direction(
     frame: NavigationFrame,
-    goal: TargetSearchGoal,
     decision: NavigationResult,
     perception: SemanticPerception,
     *,
@@ -287,24 +282,17 @@ def _capture_scan_direction(
     frontier_cache: Optional[FrameFrontierCache] = None,
 ) -> NavigationResult:
     """采集当前扫描方向并推进核心登记结果；这是扫描的常规推进路径。"""
-    from .core.scan_behavior import record_scanned_direction
 
     state = decision.state
-    if not 0 <= state.next_scan_index < len(state.scan_headings_world_rad):
-        return decision
     with measure_stage(timings, "observer.capture_scan"):
-        perception.capture_scan_view(frame,
+        captured_view = perception.capture_scan_view(frame, context=capture_context(frame, state),
             timings=timings, frontier_cache=frontier_cache,
         )
     pending, failed, pending_views = perception.pending_counts()
     state = receive_perception(state, pending=pending, failed=failed, pending_views=pending_views)
-    return record_scanned_direction(frame, goal, state, _current_scan_heading(state),
+    return record_scanned_direction(frame, state, captured_view,
         timings=timings, frontier_cache=frontier_cache,
     )
-
-
-def _current_scan_heading(state: SearchState) -> float:
-    return state.scan_headings_world_rad[state.next_scan_index]
 
 
 def _merge_perception_diagnostics(

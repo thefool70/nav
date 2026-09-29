@@ -11,7 +11,7 @@ def camera_factory(args):
         raise ValueError("远程相机序列号请在相机服务启动时指定")
     from .adapters.hermes.remote.camera_client import RemoteD435iCamera
 
-    def remote_camera(_config):
+    def remote_camera(_config, *, on_capture=None):
         return RemoteD435iCamera(args.camera_endpoint, topic=args.camera_topic,
-            timeout_s=args.camera_timeout_s)
+            timeout_s=args.camera_timeout_s, on_capture=on_capture)
     return remote_camera

@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Optional, Protocol, Tuple
 
+from ...core.geometry import UnknownPathMeasurement, measure_unknown_path_length
 from ...core.models import (
     CameraExtrinsics,
     NavigationFrame,
@@ -15,7 +16,6 @@ from ...core.models import (
     Pose2D,
     RelativePoseCommand,
 )
-from ...core.path_validation import UnknownPathMeasurement, measure_unknown_path_length
 from ...core.timing import measure_stage
 from ..chassis import (
     MotionPathUnknownError,
@@ -128,8 +128,9 @@ class HermesAdapter:
         on_action_progress: Optional[ActionProgressCallback] = None,
         on_motion_plan: Optional[MotionPlanCallback] = None,
         *,
-        camera_factory: Callable[[D435iConfig], RgbdCamera] = D435iCamera,
+        camera_factory: Callable[..., RgbdCamera] = D435iCamera,
         on_chassis_status: Optional[Callable[[str, Mapping[str, Any]], None]] = None,
+        on_rgbd_frame=None,
     ) -> None:
         _validate_config(config)
         self.config = config
@@ -138,6 +139,7 @@ class HermesAdapter:
         self._on_action_progress = on_action_progress
         self._on_motion_plan = on_motion_plan
         self._on_chassis_status = on_chassis_status
+        self._on_rgbd_frame = on_rgbd_frame
         self._last_motion_frame_s = float("-inf")
         self._frame_build_lock = threading.Lock()
         self._map_condition = threading.Condition()
@@ -181,7 +183,8 @@ class HermesAdapter:
                     camera_config = replace(
                         camera_config, serial_number=config.camera_serial
                     )
-                self._camera = camera_factory(camera_config)
+                self._camera = camera_factory(camera_config,
+                    on_capture=self._observe_camera_capture if on_rgbd_frame is not None else None)
             self._map_thread = threading.Thread(target=self._map_loop, name="hermes-map", daemon=True)
             self._map_thread.start()
             # 前向挡路检测依赖运动期间连续 RGB-D；是否开启 Rerun 不改变检测行为。
@@ -298,6 +301,13 @@ class HermesAdapter:
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         self.close()
+
+    def _observe_camera_capture(self, capture) -> None:
+        """逐个 RGB-D 包交给感知；远程包使用拍摄时同步位姿，不重读当前底盘位姿。"""
+        pose = capture.pose if isinstance(capture, RgbdPoseCapture) else self._client.get_pose()
+        self._on_rgbd_frame(rgb=capture.rgb, depth_m=capture.depth_m, intrinsics=capture.camera_intrinsics,
+            pose=pose, timestamp_s=capture.timestamp_s, extrinsics=self.config.camera_extrinsics_in_robot,
+            map_frame_id="slamtec_map")
 
     def _capture_frame(self) -> NavigationFrame:
         """读取最新相机包和地图快照；串行更新观察图，避免并发改写历史。"""

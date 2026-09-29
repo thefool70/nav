@@ -14,8 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
-from ..chassis import MotionPathUnknownError, RecoverableMotionError
-from ...core.path_validation import measure_unknown_path_length
+from ...core.geometry import measure_unknown_path_length
 from ...core.models import (
     CameraExtrinsics,
     CameraIntrinsics,
@@ -24,6 +23,7 @@ from ...core.models import (
     Pose2D,
     RelativePoseCommand,
 )
+from ..chassis import MotionPathUnknownError, RecoverableMotionError
 
 
 MotionFrameCallback = Callable[[NavigationFrame], None]
@@ -60,11 +60,13 @@ class HabitatChassisAdapter:
         config: HabitatConfig,
         on_motion_frame: Optional[MotionFrameCallback] = None,
         on_motion_plan: Optional[MotionPlanCallback] = None,
+        on_sensor_frame: Optional[MotionFrameCallback] = None,
     ) -> None:
         self._validate_config(config)
         self.config = config
         self._on_motion_frame = on_motion_frame
         self._on_motion_plan = on_motion_plan
+        self._on_sensor_frame = on_sensor_frame
         self._habitat_sim = self._import_habitat_sim()
         self._sim = None
         self._agent = None
@@ -88,7 +90,10 @@ class HabitatChassisAdapter:
         observations = self._sim.get_sensor_observations()
         pose = self._pose_from_agent_state(self._agent.get_state())
         self._update_observed_cells(pose)
-        return self._build_navigation_frame(observations, pose)
+        frame = self._build_navigation_frame(observations, pose)
+        if self._on_sensor_frame is not None:
+            self._on_sensor_frame(frame)
+        return frame
 
     def send_relative_pose(self, command: RelativePoseCommand) -> None:
         """沿 navmesh 逐步移动到相对目标，再转到命令指定朝向。"""
@@ -516,8 +521,12 @@ class HabitatChassisAdapter:
         observations = self._sim.step(action)
         pose = self._pose_from_agent_state(self._agent.get_state())
         self._update_observed_cells(pose)
-        if self._on_motion_frame is not None:
-            self._on_motion_frame(self._build_navigation_frame(observations, pose))
+        if self._on_sensor_frame is not None or self._on_motion_frame is not None:
+            frame = self._build_navigation_frame(observations, pose)
+            if self._on_sensor_frame is not None:
+                self._on_sensor_frame(frame)
+            if self._on_motion_frame is not None:
+                self._on_motion_frame(frame)
 
     def _report_motion_plan(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import math
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -39,7 +40,7 @@ class RgbdCamera:
 
     device_label = "RealSense"
 
-    def __init__(self, config: RgbdCameraConfig) -> None:
+    def __init__(self, config: RgbdCameraConfig, *, on_capture=None) -> None:
         _validate_config(config)
         try:
             self._rs = importlib.import_module("pyrealsense2")
@@ -54,14 +55,50 @@ class RgbdCamera:
         self._align: Optional[Any] = None
         self._depth_scale_m = 0.0
         self._started = False
+        self._on_capture = on_capture
+        self._condition = threading.Condition()
+        self._stop = threading.Event()
+        self._thread = None
+        self._latest = None
+        self._received_s = 0.0
+        self._error = None
         try:
             self._start()
+            if on_capture is not None:
+                self._thread = threading.Thread(target=self._capture_loop, name="d435i-receiver", daemon=True)
+                self._thread.start()
         except Exception:
             self.close()
             raise
 
 
     def capture(self, *, after_s: float = 0.0) -> RgbdCapture:
+        """开启逐帧回调时读取最新包；SDK 只由采集线程访问。"""
+        if self._thread is None:
+            return self._capture()
+        with self._condition:
+            ready = self._condition.wait_for(lambda: self._error is not None or self._stop.is_set()
+                or (self._latest is not None and self._received_s >= after_s), timeout=self.config.wait_timeout_s)
+            if self._error is not None:
+                raise RuntimeError(f"D435i 连续采集失败：{self._error}") from self._error
+            if self._stop.is_set() or not ready or time.monotonic() - self._received_s > self.config.wait_timeout_s:
+                raise RuntimeError("D435i 连续采集已停止或等待新帧超时")
+            return self._latest
+
+    def _capture_loop(self):
+        try:
+            while not self._stop.is_set():
+                capture = self._capture()
+                with self._condition:
+                    self._latest, self._received_s = capture, time.monotonic()
+                    self._condition.notify_all()
+                self._on_capture(capture)
+        except BaseException as exc:
+            with self._condition:
+                self._error = exc
+                self._condition.notify_all()
+
+    def _capture(self) -> RgbdCapture:
         """等待并返回一帧对齐 RGB-D；原始深度 0 保持为 0.0 无效值。"""
         # 本地 SDK 每次等待 frameset；调用发生在 after_s 指定的动作结束边界之后。
         pipeline = self._require_open()
@@ -101,6 +138,12 @@ class RgbdCamera:
 
     def close(self) -> None:
         """幂等停止相机数据流。"""
+        self._stop.set()
+        with self._condition:
+            self._condition.notify_all()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
         pipeline = self._pipeline
         started = self._started
         self._pipeline = None

@@ -1,4 +1,4 @@
-"""YOLO-World 模型边界：加载模型并返回检测框，不管理导航或分割策略。"""
+"""YOLOE-26s 模型边界：固定文本目标，返回检测框、原始置信度与同帧分割。"""
 
 from __future__ import annotations
 
@@ -19,45 +19,45 @@ from ..core.models import (
 )
 
 
-DEFAULT_YOLO_WORLD_MODEL_PATH = Path(
-    "data/models/yolo-world/yolov8s-world.pt"
-)
+DEFAULT_YOLOE_MODEL_PATH = Path("data/models/yoloe/yoloe-26s-seg.pt")
 
 
 @dataclass(frozen=True)
-class YoloWorldConfig:
-    """YOLOv8s-World 的本地推理参数。"""
+class YoloEConfig:
+    """文本只在模型启动时编码；每帧共用相同类别和推理参数。"""
 
     class_text: str
-    model_path: Path = DEFAULT_YOLO_WORLD_MODEL_PATH
+    model_path: Path = DEFAULT_YOLOE_MODEL_PATH
     device: str = "cuda"
     confidence_threshold: float = 0.25
     image_size: int = 640
-    max_detections: int = 3
+    max_detections: int = 10
 
 
-class YoloWorldDetector:
-    """只负责 YOLO 框检测，初始化与检测不依赖 SAM2。"""
+class YoloEDetector:
+    """固定文本目标的检测与分割。"""
 
-    def __init__(self, config: YoloWorldConfig, on_stage=None) -> None:
+    def __init__(self, config: YoloEConfig, on_stage=None) -> None:
         on_stage = on_stage or (lambda stage: None)
         model_path = Path(config.model_path)
         if not model_path.is_file():
-            raise RuntimeError(f"缺少 YOLO-World 模型文件：{model_path}")
+            raise RuntimeError(f"缺少 YOLOE-26 模型文件：{model_path}")
         on_stage("importing_yolo")
         try:
-            from ultralytics import YOLOWorld
+            from ultralytics import YOLOE
         except ImportError as exc:
             raise RuntimeError("当前 Python 环境未安装 ultralytics") from exc
 
         on_stage("loading_yolo")
-        self._model = YOLOWorld(str(model_path), verbose=False)
+        self._model = YOLOE(str(model_path), verbose=False)
         self._config = config
         on_stage("encoding_class_text")
         self._model.set_classes([config.class_text.strip()])
+        on_stage("warming_up")
+        self.detect_boxes(np.zeros((config.image_size, config.image_size, 3), dtype=np.uint8))
 
     def detect_boxes(self, rgb) -> Tuple[Tuple[TargetObservation, ...], int]:
-        """按置信度返回目标框；未检出返回空列表，不运行分割。"""
+        """按置信度返回框与原始 RGB 尺寸掩码；未检出返回空列表。"""
         rgb = _as_rgb_array(rgb)
         # Ultralytics 的 numpy 输入约定为 OpenCV BGR。
         bgr = np.ascontiguousarray(rgb[:, :, ::-1])
@@ -67,6 +67,8 @@ class YoloWorldDetector:
             imgsz=self._config.image_size,
             max_det=self._config.max_detections,
             device=self._config.device,
+            half=self._config.device.startswith("cuda") or self._config.device.isdigit(),
+            retina_masks=True,
             verbose=False,
         )
         if not results or results[0].boxes is None:
@@ -79,14 +81,19 @@ class YoloWorldDetector:
         if candidate_count == 0:
             return (), 0
 
+        masks = results[0].masks
+        masks = masks.data.cpu().numpy().astype(bool) if masks is not None else None
+        if masks is not None and masks.shape != (candidate_count, *rgb.shape[:2]):
+            raise ValueError("YOLOE 掩码与原始 RGB 尺寸或检测框数量不一致")
         observations = []
         for index in np.argsort(-confidences):
             bbox_norm = _normalized_box(normalized_boxes[int(index)])
-            if bbox_norm is None:
+            confidence = float(confidences[int(index)])
+            if bbox_norm is None or not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
                 continue
             observations.append(TargetObservation(
-                TargetVisibility.VISIBLE, bbox_norm=bbox_norm, source="yolo_world",
-                confidence=float(confidences[int(index)]),
+                TargetVisibility.VISIBLE, bbox_norm=bbox_norm, source="yoloe",
+                confidence=confidence, target_mask=masks[int(index)] if masks is not None else None,
             ))
         return tuple(observations), candidate_count
 
@@ -118,7 +125,7 @@ def _as_rgb_array(rgb: Any) -> np.ndarray:
 
 
 __all__ = [
-    "YoloWorldDetector",
-    "DEFAULT_YOLO_WORLD_MODEL_PATH",
-    "YoloWorldConfig",
+    "YoloEDetector",
+    "DEFAULT_YOLOE_MODEL_PATH",
+    "YoloEConfig",
 ]

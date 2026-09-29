@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import math
 
 import numpy as np
@@ -13,9 +12,7 @@ def render_observation_card(title, nodes, colors, font):
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
-        node = nodes[0]
-        with gzip.open(node["rgb_file"], "rb") as stream:
-            return np.frombuffer(stream.read(), dtype=np.uint8).reshape(node["height"], node["width"], 3)
+        return nodes[0]["thumbnail"]
 
     font = font or ImageFont.load_default()
     pad, gap, cell_width, image_height, line_height = 12, 12, 360, 240, 23
@@ -35,12 +32,7 @@ def render_observation_card(title, nodes, colors, font):
         color = colors[node["state"]]
         draw.rectangle((x, y, x + cell_width - 1, y + cell_height - 1), outline=color, width=2)
         draw.text((x + pad, y + 6), f"{node['label']}  |  {node['state']}", font=font, fill=color)
-        if "thumbnail" not in node:
-            with gzip.open(node["rgb_file"], "rb") as stream:
-                raw = Image.frombytes("RGB", (node["width"], node["height"]), stream.read())
-            raw.thumbnail((cell_width - 2 * pad, image_height))
-            node["thumbnail"] = raw
-        rgb = node["thumbnail"]
+        rgb = Image.fromarray(node["thumbnail"])
         image_top = y + line_height + pad
         image_x = x + (cell_width - rgb.width) // 2
         image_y = image_top + (image_height - rgb.height) // 2

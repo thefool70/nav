@@ -1,25 +1,24 @@
-"""语义目标搜索的单周期分派与公共输入检查。
+"""搜索决策入口：检查输入、接收感知增量、分派扫描／探索／目标处理及运动恢复。
 
-阅读入口是 :func:`navigate`。本模块只做三件事：校验公共输入、按
-``SearchState.phase`` 与搜索模式选择行为模块、把行为结果原样返回。
-具体行为按四类组织，正常推进与可恢复失败放在同一模块：
-
-- :mod:`~robot_nav.core.scan_behavior`：扫描与局部 Frontier 补查。
-- :mod:`~robot_nav.core.exploration`：探索候选选择与探索移动失败恢复。
-- :mod:`~robot_nav.core.backtracking`：逐层返回父节点与返回失败恢复。
-- :mod:`~robot_nav.core.object_approach` / :mod:`~robot_nav.core.scene_target`：
-  物体与场景目标处理。
-
-所有跨周期信息都显式保存在 ``SearchState`` 中，且只由本核心更新。
-"""
+从 navigate 阅读正常分派，从 apply_execution_result 阅读执行反馈。
+所有跨周期搜索信息保存在 SearchState；本模块不读设备、不请求模型或写文件。"""
 
 from __future__ import annotations
 
-from typing import Mapping, Optional
+import math
+from dataclasses import replace
+from typing import Optional, Tuple
 
-from .frontier import FrameFrontierCache
+from .exploration import (
+    FrameFrontierCache,
+    recover_frontier_motion,
+    refresh_frontier_regions,
+    wait_for_semantics_or_finish,
+    continue_backtracking,
+    select_exploration_target,
+    recover_backtrack_issue,
+)
 from .models import (
-    ActionKind,
     ActionExecutionResult,
     ActionOutcome,
     ActionPurpose,
@@ -27,12 +26,25 @@ from .models import (
     NavigationResult,
     NavigationStatus,
     ObjectLocalization,
-    SearchMode,
     SearchPhase,
     SearchState,
     TargetSearchGoal,
+    result,
+    ObservationView,
+    TargetClue,
 )
-from .navigation_io import invalid_result, result, validation_error
+from .scan import (
+    continue_scanning,
+    frontier_observation_points,
+    unobserved_observation_points,
+    reset_scan_after_move,
+    recover_scan_turn,
+)
+from .target import (
+    recover_object_motion,
+    continue_target_search,
+    discard_target_clue,
+)
 from .timing import TimingSpans
 
 
@@ -41,7 +53,6 @@ def navigate(
     goal: TargetSearchGoal,
     state: Optional[SearchState] = None,
     *,
-    frontier_scores: Optional[Mapping[str, float]] = None,
     object_localization: Optional[ObjectLocalization] = None,
     timings: Optional[TimingSpans] = None,
     frontier_cache: Optional[FrameFrontierCache] = None,
@@ -68,21 +79,11 @@ def navigate(
             "语义搜索已经结束，当前状态没有可继续的方向。",
         )
     # 目标线索优先于常规探索；处理期间继续既定线索，不被新 Frontier 插队。
-    if working_state.active_target_clue is not None:
-        from .target_clue import continue_target_clue
-        return continue_target_clue(frame, goal, working_state, object_localization)
-    if goal.search_mode is SearchMode.OBJECT:
-        from .object_approach import continue_object_history
-
-        history_result = continue_object_history(frame, working_state)
-        if history_result is not None:
-            return history_result
+    target_result = continue_target_search(frame, goal, working_state, object_localization)
+    if target_result is not None:
+        return target_result
     # 等待并非终态：新帧若出现可用方向，仍可重新进入扫描与探索。
     if working_state.phase is SearchPhase.WAITING_FOR_SEMANTICS:
-        from .frontier_regions import refresh_frontier_regions
-        from .observation_coverage import frontier_observation_points, unobserved_observation_points
-        from .scan_behavior import continue_scanning, reset_scan_after_move
-
         refreshed, frontiers = refresh_frontier_regions(
             frame, working_state, timings=timings, frontier_cache=frontier_cache,
         )
@@ -92,32 +93,51 @@ def navigate(
         )
         # 没有移动目标时，仍可原地观察新边界；已检查和待分析的覆盖不会重复采集。
         if frontiers.candidates or unchecked_points:
-            return continue_scanning(frame, goal, reset_scan_after_move(refreshed),
+            return continue_scanning(frame, reset_scan_after_move(refreshed),
                 timings=timings, frontier_cache=frontier_cache,
             )
-        from .backtracking import wait_for_semantics_or_finish
 
         return wait_for_semantics_or_finish(refreshed)
     if working_state.phase is SearchPhase.BACKTRACKING:
-        from .backtracking import continue_backtracking
-
         return continue_backtracking(frame, working_state,
             timings=timings, frontier_cache=frontier_cache,
         )
     if working_state.phase is SearchPhase.EXPLORING:
-        from .exploration import select_exploration_target
-
         return select_exploration_target(
             frame,
             working_state,
-            frontier_scores,
             timings=timings, frontier_cache=frontier_cache,
         )
 
-    from .scan_behavior import continue_scanning
-
-    return continue_scanning(frame, goal, working_state,
+    return continue_scanning(frame, working_state,
         timings=timings, frontier_cache=frontier_cache,
+    )
+
+
+def receive_perception(
+    state: SearchState, observed_views: Tuple[ObservationView, ...] = (),
+    *, pending: int, failed: int, pending_views: Tuple[ObservationView, ...],
+    clue: Optional[TargetClue] = None,
+) -> SearchState:
+    """只有分析成功的新增覆盖进入 observed_views；采集覆盖仍保持待分析。"""
+    # 接收是增量归并；相同拍摄时刻的覆盖只登记一次，pending 不冒充已检查。
+    timestamps = {view.timestamp_s for view in state.observed_views}
+    return replace(
+        state, asynchronous_perception=True,
+        observed_views=state.observed_views + tuple(
+            view for view in observed_views if view.timestamp_s not in timestamps),
+        pending_semantic_jobs=pending, failed_semantic_jobs=failed,
+        pending_observation_views=pending_views,
+        active_target_clue=state.active_target_clue if clue is None else clue,
+    )
+
+
+def target_handling_active(state: SearchState) -> bool:
+    """目标处理或终态期间暂停普通队列，不消费下一条线索。"""
+    return state.active_target_clue is not None or state.phase in (
+        SearchPhase.REVISITING_TARGET, SearchPhase.LOCALIZING_OBJECT,
+        SearchPhase.APPROACHING_OBJECT, SearchPhase.COMPLETE,
+        SearchPhase.FAILED, SearchPhase.STOPPED,
     )
 
 
@@ -125,12 +145,8 @@ def apply_execution_result(decision: NavigationResult, execution: ActionExecutio
     """解释同步执行反馈。不能恢复的动作返回 None，由运行层传播原始异常。"""
     if execution.outcome is ActionOutcome.SUCCEEDED:
         return decision
-    recovered = _recover_motion(decision, execution.reason,
-        stalled=execution.outcome is ActionOutcome.STALLED,
-        path_blocked=execution.outcome is ActionOutcome.PATH_BLOCKED,
-        rejected_path_world_xy=execution.rejected_path_world_xy)
+    recovered = _recover_motion(decision, execution)
     if recovered is not None and execution.outcome is ActionOutcome.PATH_UNKNOWN:
-        from dataclasses import replace
         recovered = replace(recovered, debug=replace(recovered.debug, details={
             **recovered.debug.details,
             "unknown_path_length_m": execution.unknown_length_m,
@@ -140,80 +156,62 @@ def apply_execution_result(decision: NavigationResult, execution: ActionExecutio
     return recovered
 
 
+def invalid_result(state: Optional[SearchState], reason: str) -> NavigationResult:
+    """构造非法输入结果，并把状态置为 FAILED。"""
+    failed_state = replace(state or SearchState(), phase=SearchPhase.FAILED)
+    return result(NavigationStatus.INVALID_INPUT, failed_state, "input", reason)
+
+
+def validation_error(
+    frame: NavigationFrame,
+    goal: TargetSearchGoal,
+    object_localization: Optional[ObjectLocalization],
+) -> Optional[str]:
+    """检查进入决策的物理数据；内部状态与字段类型遵循 dataclass 契约。"""
+    if not goal.target_text.strip():
+        return "目标文本必须为非空字符串"
+    if not math.isfinite(frame.timestamp_s):
+        return "frame.timestamp_s 必须为有限值"
+    if not all(math.isfinite(value) for value in (frame.pose.x_m, frame.pose.y_m, frame.pose.yaw_rad)):
+        return "frame.pose 必须为有限位姿"
+    for grid in (frame.obstacle_map, frame.visibility_map, frame.navigation_map):
+        if grid is None:
+            continue
+        if not math.isfinite(grid.resolution_m) or grid.resolution_m <= 0:
+            return "地图分辨率必须为正有限值"
+        if not all(math.isfinite(value) for value in (grid.origin.x_m, grid.origin.y_m, grid.origin.yaw_rad)):
+            return "地图原点必须为有限位姿"
+        if not grid.frame_id or grid.frame_id != frame.obstacle_map.frame_id:
+            return "地图必须使用同一非空坐标系"
+    if not math.isfinite(frame.navigation_clearance_m) or frame.navigation_clearance_m < 0:
+        return "导航净空必须为非负有限米数"
+    if object_localization is not None and object_localization.target_world_xy is not None:
+        if not all(math.isfinite(value) for value in object_localization.target_world_xy):
+            return "物体定位结果包含非法世界坐标"
+    return None
+
+
 def _recover_motion(
-    result_in: NavigationResult,
-    reason: str,
-    *,
-    stalled: bool,
-    path_blocked: bool = False,
-    rejected_path_world_xy: tuple = (),
+    decision: NavigationResult, execution: ActionExecutionResult,
 ) -> Optional[NavigationResult]:
-    """按失败动作的显式类型与方向语义分派恢复处理。"""
-    action = result_in.action
-    purpose = action.purpose if action is not None else ActionPurpose.OTHER
-    state = result_in.state
-
-    from .object_approach import recover_object_motion
-
-    object_recovery = recover_object_motion(
-        action.action if action is not None else ActionKind.MOVE_RELATIVE,
-        purpose, state, reason,
-    )
-    if object_recovery is not None:
-        return object_recovery
-
-    if purpose == ActionPurpose.SCAN_TURN:
-        from .scan_behavior import recover_scan_turn
-
-        return recover_scan_turn(state, reason)
-    if purpose in (ActionPurpose.REVISIT, ActionPurpose.REVISIT_TURN):
-        from .scene_target import discard_target_clue
-
-        return discard_target_clue(state, reason)
-    if purpose == ActionPurpose.BACKTRACK:
-        from .backtracking import recover_backtrack_issue
-
-        return recover_backtrack_issue(
-            state, reason,
-            issue_kind="stalled" if stalled else ("path_unknown" if rejected_path_world_xy else "failed"),
-            rejected_path_world_xy=rejected_path_world_xy,
-        )
-    if purpose not in (ActionPurpose.EXPLORE, ActionPurpose.RESUME):
+    """只按动作目的分派；各职责自行解释完整的执行反馈。"""
+    action = decision.action
+    if action is None:
         return None
-
-    candidate_id = action.candidate_id
-    node_id = action.node_id
-    if stalled:
-        from .exploration import stall_frontier_direction
-
-        return stall_frontier_direction(
-            state, reason,
-            candidate_id=candidate_id,
+    state, purpose = decision.state, action.purpose
+    if purpose in (ActionPurpose.APPROACH, ActionPurpose.FALLBACK, ActionPurpose.FALLBACK_TURN):
+        return recover_object_motion(purpose, state, execution.reason)
+    if purpose is ActionPurpose.SCAN_TURN:
+        return recover_scan_turn(state, execution.reason)
+    if purpose in (ActionPurpose.REVISIT, ActionPurpose.REVISIT_TURN):
+        return discard_target_clue(state, execution.reason)
+    if purpose is ActionPurpose.BACKTRACK:
+        return recover_backtrack_issue(
+            state, execution.reason,
+            issue_kind=("stalled" if execution.outcome is ActionOutcome.STALLED
+                        else "path_unknown" if execution.rejected_path_world_xy else "failed"),
+            rejected_path_world_xy=execution.rejected_path_world_xy,
         )
-
-    blocked_regions = state.blocked_frontier_regions
-    if rejected_path_world_xy or path_blocked:
-        from .models import BlockedFrontierRegion
-
-        region = next((region for region in state.frontier_regions
-                       if region.region_id == candidate_id), None)
-        if region is None:
-            # 缺少完整边界时不能退回点屏蔽，否则会再次进入换点重试循环。
-            return None
-        blocked_regions += (BlockedFrontierRegion(
-            region_id=region.region_id,
-            boundary_world_xy=region.boundary_world_xy,
-        ),)
-
-    from .exploration import reject_frontier_direction
-
-    return reject_frontier_direction(
-        state, reason,
-        candidate_id=str(candidate_id), node_id=node_id,
-        blocked_regions=blocked_regions,
-        block_region=bool(rejected_path_world_xy) or path_blocked,
-        rejected_path_world_xy=rejected_path_world_xy,
-    )
-
-
-__all__ = ["navigate", "apply_execution_result"]
+    if purpose in (ActionPurpose.EXPLORE, ActionPurpose.RESUME):
+        return recover_frontier_motion(state, action, execution)
+    return None

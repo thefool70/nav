@@ -1,14 +1,14 @@
 """导航算法内部数据契约，全部只依赖标准库。
 
 约定：长度单位为米，角度单位为弧度（逆时针为正）。除显式标注外，
-坐标系由使用处上下文（如 NavigationFrame.pose 的 map.frame_id）决定。
-"""
+坐标系由使用处上下文（如 NavigationFrame.pose 的 map.frame_id）决定。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Optional, Sequence, Tuple
+
 
 # 栅格数据：外层为行（y），内层为列（x），None 表示该格未知/无效。
 Grid = Sequence[Sequence[Optional[float]]]
@@ -122,12 +122,11 @@ class TargetSearchGoal:
 
 
 class TargetVisibility(Enum):
-    """可见性结果；UNCERTAIN 表示感知失败，PENDING 表示采集后等待分析。"""
+    """目标可见性结果；UNCERTAIN 表示没有确定结论，不表示未检出。"""
 
     VISIBLE = "visible"
     NOT_VISIBLE = "not_visible"
     UNCERTAIN = "uncertain"
-    PENDING = "pending"
 
 
 @dataclass(frozen=True)
@@ -151,7 +150,6 @@ class TargetConfirmation(Enum):
     """历史画面中 VLM 检测结论的诊断值，不触发到达后确认。"""
 
     CONFIRMED = "confirmed"
-    REJECTED = "rejected"
     UNCERTAIN = "uncertain"
 
 
@@ -165,6 +163,8 @@ class SemanticAnalysis:
     detection_error: str = ""
     scoring_error: str = ""
     interaction_id: Optional[int] = None
+    # 目标存在的置信度，与探索方向的 image_score 独立；缺失表示检测输出无效。
+    confidence: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -177,8 +177,11 @@ class TargetClue:
     map_frame_id: str
     job_id: Optional[int] = None
     view_id: Optional[int] = None
-    # 扫描时 VLM 对该快照给出的框；随线索消费，不在后续新图上复用。
+    # 通过置信度规则的历史目标框；只属于该快照，不在后续新图上复用。
     bbox_norm: Optional[Tuple[float, float, float, float]] = None
+    source: str = "vlm"
+    vlm_confidence: Optional[float] = None
+    yolo_confidence: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -222,18 +225,6 @@ class ObservationView:
     visible_world_xy: Tuple[Tuple[float, float], ...] = ()
     map_visible_world_xy: Tuple[Tuple[float, float], ...] = ()
     depth_coverage_available: bool = False
-
-
-@dataclass(frozen=True)
-class ScanEvidence:
-    """一次扫描中单个方向的采集证据。
-
-    场景模式不做逐帧目标检测，此时 NOT_VISIBLE 只表示该方向已经完成采集。
-    """
-
-    heading_world_rad: float
-    visibility: TargetVisibility
-    view: Optional[ObservationView] = None
 
 
 @dataclass(frozen=True)
@@ -284,9 +275,10 @@ class BlockedFrontierRegion:
 
 @dataclass(frozen=True)
 class FrontierScoreRequest:
-    """本轮允许参与语义评分的新 Frontier 候选，暂存旧方向不参与。"""
+    """同帧选点的候选快照：只查询 candidates 的评分，deferred 保持暂存顺序。"""
 
     candidates: Tuple[FrontierCandidate, ...]
+    deferred: Tuple[FrontierCandidate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -331,9 +323,8 @@ class SearchPhase(Enum):
 
 
 class SearchDirectionState(Enum):
-    """单个搜索方向的状态。"""
+    """一次实际探索移动的进度；尚未选择的方向由 FrontierRegion 暂存。"""
 
-    PENDING = "pending"
     COMMITTED = "committed"
     EXPLORED = "explored"
     INVALIDATED = "invalidated"
@@ -341,35 +332,29 @@ class SearchDirectionState(Enum):
 
 
 @dataclass(frozen=True)
-class SearchDirection:
-    """一次已记录的搜索方向。heading_world_rad 为世界坐标系下的朝向（弧度），
-    candidate_world_xy 为最终 Frontier，command_world_xy 为提交给底盘的位置（米）；
-    当前探索命令直接使用最终位置。
-    state 记录本次移动结果，execution_reason 保留执行异常原因。"""
-
-    direction_id: str
-    heading_world_rad: float
-    candidate_world_xy: Optional[Tuple[float, float]] = None
-    state: SearchDirectionState = SearchDirectionState.PENDING
-    command_world_xy: Optional[Tuple[float, float]] = None
-    execution_reason: str = ""
-
-
-@dataclass(frozen=True)
 class ObservationNode:
-    """一次探索移动的出发位置和实际目标；也是本轮暂存方向的父节点。"""
+    """一次探索移动：出发位置、选中目标和执行结果。
+
+    position_world_xy 也是本轮暂存方向的父节点位置；destination_world_xy
+    就是选中的 Frontier 点和底盘命令目标，两者不再各存一份。坐标单位为米。
+    heading_world_rad 为选点时的世界系朝向（弧度），用于历史显示。
+    """
 
     node_id: str
     position_world_xy: Tuple[float, float]
-    directions: Tuple[SearchDirection, ...]
+    candidate_id: str
+    destination_world_xy: Tuple[float, float]
+    heading_world_rad: float
+    state: SearchDirectionState = SearchDirectionState.COMMITTED
+    execution_reason: str = ""
 
 
 @dataclass(frozen=True)
 class SearchState:
     """语义目标搜索的周期状态。scan_headings_world_rad 为世界系扫描朝向
-    序列，next_scan_index 为下一个待扫描朝向的下标，observation_history
-    按时间顺序保存观测节点，scan_evidence 保存最近一次扫描的逐方向观测
-    证据；observed_views 只记录已完成语义检查的视角。
+    序列，scan_views 按采集顺序保存本轮固定画面的覆盖，长度就是下一个扫描
+    方向的下标；observation_history 按时间顺序保存实际探索移动。
+    observed_views 只记录已完成语义检查的视角。
     pending_observation_views 单独保存待分析覆盖，仅用于避免重复采集。
     pending_semantic_jobs 含在途、待接收结果、采样和排队线索，不是 HTTP 请求数。
     scan_observation_points 保存本轮局部待检查 Frontier 边界点，随扫描计划冻结；
@@ -386,9 +371,8 @@ class SearchState:
 
     phase: SearchPhase = SearchPhase.SCANNING
     scan_headings_world_rad: Tuple[float, ...] = ()
-    next_scan_index: int = 0
     observation_history: Tuple[ObservationNode, ...] = ()
-    scan_evidence: Tuple[ScanEvidence, ...] = ()
+    scan_views: Tuple[ObservationView, ...] = ()
     frontier_regions: Tuple[FrontierRegion, ...] = ()
     # 最近一次 Frontier 提取的孔洞过滤统计，每次刷新覆盖，不是累计屏蔽。
     frontier_hole_filter_applied: bool = False
@@ -519,3 +503,25 @@ class NavigationResult:
     debug: NavigationDebug
     state: SearchState
     frontier_score_request: Optional[FrontierScoreRequest] = None
+
+
+def result(
+    status: NavigationStatus,
+    state: SearchState,
+    stage: str,
+    message: str,
+    action: Optional[NavigationAction] = None,
+    details: Optional[Mapping[str, Any]] = None,
+    frontier_score_request: Optional[FrontierScoreRequest] = None,
+) -> NavigationResult:
+    """集中构造单周期结果，使各行为只描述状态变化与请求的动作。
+
+    ``stage`` 只用于日志说明；运行层按 ``action.action`` 执行，不解析该字符串。
+    """
+    return NavigationResult(
+        status=status,
+        action=action,
+        debug=NavigationDebug(stage=stage, message=message, details=details or {}),
+        state=state,
+        frontier_score_request=frontier_score_request,
+    )

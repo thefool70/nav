@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Mapping, Optional
 
-from ..adapters.perception import VlmInteraction
 from ..core.models import NavigationResult
+from ..perception.analyzer import VlmInteraction
 
 
 def request_path(request_id: int) -> str:
@@ -74,8 +74,8 @@ def context_text(context: Mapping[str, Any]) -> str:
         if marker.get("source_pixel_xy") is not None:
             u, v = marker["source_pixel_xy"]
             lines.append(f"  V{marker['view_id']} 原始 RGB 像素锚点=({u:.1f}, {v:.1f})，局部地面投影已核对深度。")
-    if context.get("snapshot"):
-        lines.append(f"快照目录: {context['snapshot']}")
+    if context.get("storage"):
+        lines.append(f"快照存储: {context['storage']}")
     lines.append("拍摄位姿是输入来源；结果返回时机器人可能已移动。F 编号只在本请求内有效。")
     return "\n".join(lines)
 
@@ -117,10 +117,9 @@ class VlmTraceHistory:
             self.latest_warning = str(event.get("reason", event.get("event", "")))
             return
         row = self.jobs.setdefault(job_id, {})
-        row.update(event)
+        row.update({key: value for key, value in event.items()
+                    if key not in ("image", "observation_frame", "observation")})
         row[f"{event['event']}_frame"] = frame_index
-        if event["event"] in ("snapshot_failed", "result_write_failed"):
-            self.latest_warning = str(event.get("reason", ""))
 
     def record_cycle(self, result: NavigationResult, frame_index: int) -> None:
         self.cycle_index += 1
@@ -162,7 +161,7 @@ class VlmTraceHistory:
                  f"FIFO next: {', '.join('J' + str(key) for key in sorted(queued)[:5]) or '-'}", "",
                  self.current_usage, ""]
         if self.queue_stopped:
-            lines.extend(["**Queue stopped. An in-flight HTTP request may still finish; pending snapshots remain on disk.**", ""])
+            lines.extend(["**Queue stopped. An in-flight HTTP request may still finish; pending memory snapshots are released.**", ""])
         latest = self.latest_response
         if latest is not None:
             job_id = latest["context"].get("job_id")
@@ -215,7 +214,7 @@ class VlmTraceHistory:
                       "| --- | --- | --- | --- |"])
         for job_id in sorted(self.jobs, reverse=True)[:8]:
             row = self.jobs[job_id]
-            status = "stopped" if "stopped_frame" in row else "failed" if "snapshot_failed_frame" in row else (
+            status = "stopped" if "stopped_frame" in row else (
                 "received" if "received_cycle" in row else "returned" if "completed_frame" in row
                 else "running" if "started_frame" in row else "queued"
             )

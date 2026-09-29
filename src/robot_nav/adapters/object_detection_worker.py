@@ -1,12 +1,12 @@
-"""常驻 YOLO 或 SAM2 子进程；标准输出传协议，日志保存阶段与卡顿时的调用栈。"""
+"""常驻 YOLOE 子进程；标准输出传协议，日志保存阶段与卡顿时的调用栈。"""
 
 from __future__ import annotations
 
-import argparse
+import base64
 from contextlib import redirect_stdout
 import faulthandler
-import gzip
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -15,23 +15,21 @@ import traceback
 
 def main() -> int:
     """持续接收单行 JSON 请求；模型首次请求时加载，此后复用并返回阶段事件和结果。"""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=("yolo", "sam2"), required=True)
-    kind = parser.parse_args().model
     model = None
-    encoded_image_file = None
     faulthandler.enable(file=sys.stderr)
-    for line in sys.stdin:
+    for line in sys.stdin.buffer:
         request = json.loads(line)
-        folder = Path(request["folder"])
+        rgb_bytes = sys.stdin.buffer.read(request["rgb_length"]) if "rgb_length" in request else None
+        if rgb_bytes is not None and len(rgb_bytes) != request["rgb_length"]:
+            raise EOFError("视频 RGB 管道提前结束")
         started = time.monotonic()
 
         def progress(stage):
+            if not request.get("initialize"):
+                return
             event = {"event": "progress", "stage": stage, "elapsed_s": time.monotonic() - started}
             _send(event)
-            with (folder / f"{kind}.progress.jsonl").open("a") as stream:
-                stream.write(json.dumps(event) + "\n")
-            print(f"{folder} {kind}: {stage}", file=sys.stderr, flush=True)
+            print(f"YOLOE: {stage}", file=sys.stderr, flush=True)
 
         # 长时间未返回时保留 Python 栈，以区分加载、图像编码和掩码推理。
         faulthandler.dump_traceback_later(20.0, repeat=True, file=sys.stderr)
@@ -40,57 +38,39 @@ def main() -> int:
             with redirect_stdout(sys.stderr):
                 progress("importing")
                 import numpy as np
-                with gzip.open(request["rgb_file"], "rb") as stream:
-                    rgb = np.frombuffer(stream.read(), dtype=np.uint8).reshape(
-                        request["height_px"], request["width_px"], 3,
-                    ).copy()
                 if model is None:
-                    model = _load_model(kind, request, progress)
+                    model = _load_model(request, progress)
                     progress("ready")
-                if kind == "yolo":
-                    progress("detecting")
-                    observations, count = model.detect_boxes(rgb)
-                    result = {"observations": [{
-                        "bbox_norm": item.bbox_norm, "confidence": item.confidence,
-                    } for item in observations], "candidate_count": count}
-                else:
-                    if request["rgb_file"] != encoded_image_file:
-                        progress("encoding_image")
-                        model.set_image(rgb)
-                        encoded_image_file = request["rgb_file"]
-                    else:
-                        progress("using_cached_image")
-                    progress("segmenting")
-                    mask = model.segment_box(tuple(request["bbox_norm"]))
-                    mask_file = None
-                    if mask is not None:
-                        mask_file = "mask.json.gz"
-                        with gzip.open(folder / mask_file, "wt", encoding="utf-8") as stream:
-                            json.dump(np.asarray(mask, dtype=bool).tolist(), stream)
-                    result = {"mask_file": mask_file}
+                if request.get("initialize"):
+                    _send({"event": "result", "result": {"ready": True}})
+                    continue
+                rgb = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape(
+                    request["height_px"], request["width_px"], 3)
+                observations, count = model.detect_boxes(rgb)
+                result = {"observations": [{
+                    "bbox_norm": item.bbox_norm, "confidence": item.confidence,
+                    "mask_bits": (base64.b64encode(np.packbits(item.target_mask).tobytes()).decode("ascii")
+                                  if item.target_mask is not None else None),
+                } for item in observations], "candidate_count": count}
                 progress("finished")
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             result = {"error": str(exc) or type(exc).__name__}
         finally:
             faulthandler.cancel_dump_traceback_later()
-        (folder / f"{kind}.result.json").write_text(json.dumps(result, ensure_ascii=False))
         _send({"event": "result", "result": result})
     return 0
 
 
-def _load_model(kind, request, progress):
-    if kind == "yolo":
-        from .yolo_world import YoloWorldConfig, YoloWorldDetector
-        return YoloWorldDetector(YoloWorldConfig(
-            class_text=request["class_text"], model_path=Path(request["yolo_model"]),
-            device=request["device"],
-        ), on_stage=progress)
-    from .sam2_segmenter import Sam2BoxSegmenter, Sam2Config
-    progress("loading_sam2")
-    return Sam2BoxSegmenter(Sam2Config(
-        checkpoint_path=Path(request["sam2_checkpoint"]), device=request["device"],
-    ))
+def _load_model(request, progress):
+    from .yoloe import YoloEConfig, YoloEDetector
+    model_path = Path(request["yolo_model"]).resolve()
+    # Ultralytics 在工作目录查找 mobileclip2_b.ts，避免切换运行目录时重下载。
+    os.chdir(model_path.parent)
+    return YoloEDetector(YoloEConfig(
+        class_text=request["class_text"], model_path=model_path,
+        device=request["device"], confidence_threshold=request["confidence_threshold"],
+    ), on_stage=progress)
 
 
 def _send(message):

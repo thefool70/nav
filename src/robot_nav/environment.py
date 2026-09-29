@@ -32,7 +32,8 @@ def validate_environment(args) -> None:
 
 
 def create_chassis(args, *, on_motion_frame=None,
-                   on_motion_plan=None, on_action_progress=print, on_chassis_status=None):
+                   on_motion_plan=None, on_action_progress=print, on_chassis_status=None,
+                   on_rgbd_frame=None, on_sensor_frame=None):
     """将环境参数与公共回调接到具体 Adapter；采样时机由设备实现决定。"""
     if args.adapter == "habitat":
         return HabitatChassisAdapter(
@@ -41,6 +42,7 @@ def create_chassis(args, *, on_motion_frame=None,
                           max_unknown_path_m=args.max_unknown_path_m),
             on_motion_frame=on_motion_frame,
             on_motion_plan=on_motion_plan,
+            on_sensor_frame=on_sensor_frame,
         )
     if args.adapter != "hermes":
         raise ValueError(f"未知 Adapter：{args.adapter}")
@@ -68,11 +70,12 @@ def create_chassis(args, *, on_motion_frame=None,
     )
     return HermesAdapter(
         config, on_motion_frame=on_motion_frame,
-        # 真机连续帧仅供可视化，不生成模型任务。
+        # 较低频率的导航帧供可视化；YOLOE 另从相机每个 RGB-D 包接收输入。
         on_continuous_frame=on_motion_frame,
         camera_factory=camera_factory(args),
         on_action_progress=on_action_progress, on_motion_plan=on_motion_plan,
         on_chassis_status=on_chassis_status,
+        on_rgbd_frame=on_rgbd_frame,
     )
 
 

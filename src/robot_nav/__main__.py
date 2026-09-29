@@ -13,15 +13,17 @@ from typing import Optional, Sequence
 
 from .cli import parse_arguments
 from .launch import run_entries
+from .adapters.ollama_warmup import is_local_qwen
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """解析运行环境并启动所选入口。"""
     parser, args = parse_arguments(argv)
 
-    # 预检和随机评分都不调用 VLM，因此无需模型凭据。
+    # 本机 Ollama 无需凭据，也不读取或转发终端中遗留的云端密钥。
     api_key = ""
-    if not args.preflight_only and not args.debug_random_score:
+    if (not args.preflight_only and not args.debug_random_score
+            and not is_local_qwen(args.vlm_endpoint, args.vlm_model, args.vlm_api_format)):
         api_key = _resolve_vlm_api_key()
         if not api_key:
             parser.error(

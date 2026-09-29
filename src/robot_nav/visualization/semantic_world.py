@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import gzip
-import json
 import math
-from pathlib import Path
 
 import numpy as np
 
@@ -28,7 +25,7 @@ JOB_SPACING_M = 0.45
 
 
 class SemanticWorldNodes:
-    """由 RerunVisualizer 持锁调用；只记录数据，文件读取仅用于已保存的 RGB。"""
+    """由 RerunVisualizer 持锁调用；直接接收画面；原图交给 Rerun 后只保留缩略图。"""
 
     def __init__(self, rr, log):
         self._rr, self._log = rr, log
@@ -75,20 +72,20 @@ class SemanticWorldNodes:
             path = interaction_node_path(event, event.get("view_id", 1))
             if path not in self._nodes:
                 return
-            self._local_paths[event["localization_directory"]] = path
+            self._local_paths[event["clue_id"]] = path
             self._active_local_path = path
             self._focus = path
             node = self._nodes[path]
             node.update(state="localizing", progress="starting", reason="")
             self._render(node)
         elif name == "object_progress":
-            path = self._local_paths.get(event["localization_directory"])
+            path = self._local_paths.get(event["clue_id"])
             if path in self._nodes:
                 node = self._nodes[path]
                 node["progress"] = f"{event['model']}: {event['stage']} ({event['elapsed_s']:.1f}s)"
                 self._render(node)
         elif name == "object_localized":
-            path = self._local_paths.get(event["localization_directory"])
+            path = self._local_paths.get(event["clue_id"])
             if path in self._nodes:
                 node = self._nodes[path]
                 node.update(state="localized" if event.get("target_world_xy") is not None else "failed",
@@ -204,26 +201,26 @@ class SemanticWorldNodes:
         self._dirty_groups.clear()
 
     def _register_job(self, event):
-        """读取快照元数据，为每个拍摄视角建立节点并关联 job/view 与线索 ID。"""
-        folder = Path(event["snapshot"])
-        metadata = json.loads((folder / "snapshot.json").read_text())
-        job_id = event["job_id"]
+        """从内存事件登记视角，原始 RGB 只上传一次，卡片使用小尺寸副本。"""
+        job_id, image = event["job_id"], event["image"]
+        view = event["views"][0]
         self._jobs[job_id] = []
         if self._focus is None:
             self._focus = self._job_path(job_id)
-        self._candidates[job_id] = {item["candidate_id"]: item for item in metadata["candidates"]}
-        for index, view in enumerate(metadata["views"], 1):
-            coverage = view["coverage"]
-            path = view_node_path(job_id, index)
-            self._register(path, {
-                "label": f"J{job_id}/V{index}", "kind": "view", "job_id": job_id, "view_id": index,
-                "pose": coverage["pose"], "heading": coverage["camera_heading_world_rad"],
-                "map_id": view["map_frame_id"], "timestamp_s": coverage["timestamp_s"],
-                "rgb_file": folder / f"view-{index}.rgb.gz", "width": view["width_px"],
-                "height": view["height_px"], "source": metadata["source"],
-            })
-            self._jobs[job_id].append(path)
-            self._clues[f"semantic:{job_id}:{index}"] = path
+        self._candidates[job_id] = {item["candidate_id"]: item for item in event["candidates"]}
+        rgb = np.frombuffer(image.rgb_bytes, dtype=np.uint8).reshape(image.height_px, image.width_px, 3)
+        step = max(1, math.ceil(image.width_px / 336), math.ceil(image.height_px / 240))
+        path = view_node_path(job_id, 1)
+        self._register(path, {
+            "label": f"J{job_id}/V1", "kind": "view", "job_id": job_id, "view_id": 1,
+            "pose": view["pose"], "heading": view["heading_world_rad"],
+            "map_id": view["map_frame_id"], "timestamp_s": view["timestamp_s"],
+            "rgb_bytes": image.rgb_bytes, "width": image.width_px, "height": image.height_px,
+            "thumbnail": rgb[::step, ::step].copy(), "source": event["source"],
+        })
+        self._nodes[path].pop("rgb_bytes", None)
+        self._jobs[job_id].append(path)
+        self._clues[f"semantic:{job_id}:1"] = path
 
     def _register(self, path, values):
         node = {"state": "queued", "scores": {}, "reason": "", "navigation": "pending",
@@ -294,8 +291,8 @@ class SemanticWorldNodes:
                 colors=[color], radii=0.009, show_labels=False,
             ))
         if not node["image_logged"]:
-            with gzip.open(node["rgb_file"], "rb") as stream:
-                rgb = np.frombuffer(stream.read(), dtype=np.uint8).reshape(node["height"], node["width"], 3)
+            rgb = (np.frombuffer(node["rgb_bytes"], dtype=np.uint8).reshape(node["height"], node["width"], 3)
+                   if "rgb_bytes" in node else node["thumbnail"])
             image = self._rr.Image(rgb)
             # 原图单独归档；V 节点的预览在批量刷新时更新为单图评分卡。
             self._log(node["path"] + "/rgb", [image.buffer, image.format])

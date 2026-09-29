@@ -8,11 +8,15 @@ from typing import Any, List, Mapping, Optional, Tuple
 
 import numpy as np
 
-from ..adapters.perception import VlmInteraction
-from ..core.actions import action_command
+from ..core.geometry import action_command
 from ..core.models import (
-    MaskImage, NavigationFrame, NavigationResult, SearchDirectionState, TargetObservation,
+    MaskImage,
+    NavigationFrame,
+    NavigationResult,
+    SearchDirectionState,
+    TargetObservation,
 )
+from ..perception.analyzer import VlmInteraction
 from .view_geometry import command_world_vector
 from .vlm_trace import context_text
 
@@ -218,7 +222,7 @@ def motion_status_text(
         if "standoff_distance_m" in planning:
             lines.append(f"planned distance to target={planning['standoff_distance_m']:.2f}m")
     if headings and "scan_mode" in result.debug.details:
-        scan_index = min(result.state.next_scan_index, len(headings) - 1)
+        scan_index = min(len(result.state.scan_views), len(headings) - 1)
         lines.append(
             f"scan {scan_index + 1}/{len(headings)} "
             f"yaw={math.degrees(headings[scan_index]):.1f}deg"
@@ -509,7 +513,7 @@ def _observation_status_lines(frame, observation):
         if observation.target_mask is not None:
             mask = target_mask_to_numpy(observation.target_mask)
             if mask is None:
-                lines.append("sam2 mask: invalid")
+                lines.append("yoloe mask: invalid")
             elif (
                 frame.rgb is not None
                 and len(frame.rgb) > 0
@@ -517,13 +521,13 @@ def _observation_status_lines(frame, observation):
                 and mask.shape != (len(frame.rgb), len(frame.rgb[0]))
             ):
                 lines.append(
-                    "sam2 mask: size mismatch, "
+                    "yoloe mask: size mismatch, "
                     f"mask={mask.shape[1]}x{mask.shape[0]}, "
                     f"rgb={len(frame.rgb[0])}x{len(frame.rgb)}"
                 )
             else:
                 lines.append(
-                    "sam2 mask: magenta overlay, "
+                    "yoloe mask: magenta overlay, "
                     f"size={mask.shape[1]}x{mask.shape[0]}, "
                     f"foreground={int(np.count_nonzero(mask))} px"
                 )
@@ -539,12 +543,10 @@ def _history_status_lines(result):
     details = result.debug.details
     direction_counts = {state.value: 0 for state in SearchDirectionState}
     for node in result.state.observation_history:
-        for direction in node.directions:
-            direction_counts[direction.state.value] += 1
+        direction_counts[node.state.value] += 1
     lines.append(
         "history: "
         f"nodes={len(result.state.observation_history)}, "
-        f"pending={direction_counts['pending']}, "
         f"committed={direction_counts['committed']}, "
         f"explored={direction_counts['explored']}, "
         f"invalidated={direction_counts['invalidated']}, "
@@ -566,18 +568,16 @@ def _history_status_lines(result):
         )
     latest_issue = next(
         (
-            (node.node_id, direction)
+            node
             for node in reversed(result.state.observation_history)
-            for direction in node.directions
-            if direction.execution_reason
+            if node.execution_reason
         ),
         None,
     )
     if latest_issue is not None:
-        node_id, direction = latest_issue
         lines.append(
-            f"last exploration issue: {node_id}, {direction.state.value}, "
-            f"{direction.execution_reason}"
+            f"last exploration issue: {latest_issue.node_id}, {latest_issue.state.value}, "
+            f"{latest_issue.execution_reason}"
         )
     if "destination_world_xy" in details:
         lines.append(f"exploration destination={details['destination_world_xy']}")
@@ -667,11 +667,7 @@ def _vlm_input_pil_image(font: object, interaction: VlmInteraction):
         outline=BBOX_RGB,
         width=line_width,
     )
-    label = (
-        "YOLO-World 候选"
-        if interaction.task == "target_confirmation"
-        else "VLM 目标定位"
-    )
+    label = "VLM 目标定位"
     label_box = draw.textbbox((0, 0), label, font=font)
     label_width = label_box[2] - label_box[0] + 8
     label_height = label_box[3] - label_box[1] + 6

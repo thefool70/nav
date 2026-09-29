@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
-import json
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -17,32 +17,44 @@ from uuid import uuid4
 
 import numpy as np
 
-from ..adapters.perception import VlmInteraction
-from ..core.actions import action_command
+from ..core.geometry import action_command
 from ..core.models import (
     DepthImage,
     Grid,
     MaskImage,
     NavigationFrame,
     NavigationResult,
-    Pose2D,
-    RelativePoseCommand,
     RgbImage,
     SearchDirectionState,
     TargetObservation,
 )
-from .vlm_trace import VlmTraceHistory, job_path, request_path
-from .semantic_world import SemanticWorldNodes
+from ..perception.analyzer import VlmInteraction
 from .panels import (
-    BBOX_RGB, ascii_only, frontier_table_text, load_panel_font, motion_status_text,
-    print_font_notice_once, render_status_image, render_vlm_interaction_card,
-    status_lines, target_mask_to_numpy, vlm_card_text,
+    BBOX_RGB,
+    ascii_only,
+    frontier_table_text,
+    load_panel_font,
+    motion_status_text,
+    print_font_notice_once,
+    render_status_image,
+    render_vlm_interaction_card,
+    status_lines,
+    target_mask_to_numpy,
+    vlm_card_text,
 )
+from .semantic_world import SemanticWorldNodes
 from .view_geometry import (
-    command_world_vector, dashed_line_segments, point_along_heading, robot_triangle_world,
-    world_to_map_pixel, world_to_view_point, world_to_view_vector,
-    world_yaw_to_map_vector, world_yaw_to_view_vector,
+    command_world_vector,
+    dashed_line_segments,
+    point_along_heading,
+    robot_triangle_world,
+    world_to_map_pixel,
+    world_to_view_point,
+    world_to_view_vector,
+    world_yaw_to_map_vector,
+    world_yaw_to_view_vector,
 )
+from .vlm_trace import VlmTraceHistory, job_path, request_path
 
 
 UNKNOWN_RGB = (90, 90, 90)
@@ -53,8 +65,8 @@ TRAJECTORY_RGB = (0, 120, 255)
 COMMAND_RGB = (255, 140, 0)
 MOTION_TARGET_RGB = (255, 70, 70)
 MOTION_PATH_RGB = (190, 90, 255)
-SAM2_MASK_RGB = (255, 60, 180)
-SAM2_MASK_ALPHA = 0.38
+YOLOE_MASK_RGB = (255, 60, 180)
+YOLOE_MASK_ALPHA = 0.38
 MAP_FRONTIER_RGB = (0, 220, 100)
 SELECTED_FRONTIER_RGB = (255, 210, 0)
 VLM_CAPTURE_RGB = (0, 220, 220)
@@ -67,7 +79,6 @@ SELECTED_FRONTIER_RADIUS_CELLS = 1
 FrontierMarker = Tuple[int, int, Tuple[int, int, int], int]
 
 DIRECTION_COLORS = {
-    SearchDirectionState.PENDING: (255, 210, 0),
     SearchDirectionState.COMMITTED: (0, 170, 255),
     SearchDirectionState.EXPLORED: (130, 130, 130),
     SearchDirectionState.INVALIDATED: (255, 70, 70),
@@ -228,6 +239,10 @@ class RerunVisualizer:
             self._begin_sample()
             self._vlm_trace.record_queue_event(event, self._sample_index)
             self._world_nodes.record_queue_event(event)
+            if event["event"] == "object_localized":
+                self._log_yoloe_result(event["observation_frame"], event["observation"])
+            event = {key: value for key, value in event.items()
+                     if key not in ("image", "observation_frame", "observation")}
             if event["event"].startswith("object_"):
                 previous = self._object_progress if event["event"] == "object_localized" else None
                 self._object_progress = {**(previous or {}), **event}
@@ -279,7 +294,7 @@ class RerunVisualizer:
             self._log_vlm_job(job_id)
         self._update_frontier_markers(result)
         self._log_rgb(frame, observation)
-        self._log_sam2_result(frame, observation)
+        self._log_yoloe_result(frame, observation)
         self._log_depth(frame)
         self._log_occupancy_map(frame)
         self._log_robot_pose(frame)
@@ -461,7 +476,7 @@ class RerunVisualizer:
         frame: NavigationFrame,
         observation: Optional[TargetObservation],
     ) -> None:
-        """记录 RGB，叠加 SAM2 掩码，并把检测框换算为像素框。"""
+        """记录 RGB，叠加 YOLOE 掩码，并把检测框换算为像素框。"""
         if frame.rgb is None or len(frame.rgb) == 0 or len(frame.rgb[0]) == 0:
             self._log("camera/rgb", self._rr.Clear(recursive=True))
             return
@@ -489,23 +504,23 @@ class RerunVisualizer:
             ),
         )
 
-    def _log_sam2_result(
+    def _log_yoloe_result(
         self,
         frame: NavigationFrame,
         observation: Optional[TargetObservation],
     ) -> None:
-        """单独保留最近一次 SAM2 成功结果，避免随后运动帧将其冲走。"""
+        """单独保留最近一次 YOLOE 成功结果，避免随后运动帧将其冲走。"""
         if observation is None:
             return
 
         status_lines = [
-            "SAM2 current observation",
+            "YOLOE current observation",
             f"visibility: {observation.visibility.value}",
         ]
         if observation.target_mask is None:
             status_lines.append("mask: not available in this observation")
             self._log(
-                "model/sam2/status",
+                "model/yoloe/status",
                 self._rr.TextDocument(
                     "\n".join(status_lines),
                     media_type="text/plain",
@@ -516,7 +531,7 @@ class RerunVisualizer:
         if frame.rgb is None or len(frame.rgb) == 0 or len(frame.rgb[0]) == 0:
             status_lines.append("mask: RGB image is unavailable")
             self._log(
-                "model/sam2/status",
+                "model/yoloe/status",
                 self._rr.TextDocument(
                     "\n".join(status_lines),
                     media_type="text/plain",
@@ -550,17 +565,17 @@ class RerunVisualizer:
                     "mask: success",
                     f"size: {mask.shape[1]}x{mask.shape[0]}",
                     f"foreground: {foreground} px",
-                    "display: magenta SAM2 mask, green detector box",
+                    "display: magenta YOLOE mask, green detector box",
                     "image: latest successful result is retained",
                 )
             )
             self._log(
-                "model/sam2/latest_success",
+                "model/yoloe/latest_success",
                 self._rr.Image(result_image),
             )
 
         self._log(
-            "model/sam2/status",
+            "model/yoloe/status",
             self._rr.TextDocument(
                 "\n".join(status_lines),
                 media_type="text/plain",
@@ -815,7 +830,7 @@ class RerunVisualizer:
                 radii=0.012,
             ),
         )
-        current_index = result.state.next_scan_index
+        current_index = min(len(result.state.scan_views), len(headings) - 1)
         current_heading = headings[current_index]
         self._log(
             "world/scan/current",
@@ -884,21 +899,13 @@ class RerunVisualizer:
         for node in result.state.observation_history:
             node_view_position = world_to_view_point(node.position_world_xy)
             node_positions.append(node_view_position)
-            for direction in node.directions:
-                if direction.command_world_xy is None:
-                    continue
-                color = DIRECTION_COLORS[direction.state]
-                candidate_view_position = world_to_view_point(
-                    direction.command_world_xy
-                )
-                candidate_positions.append(candidate_view_position)
-                candidate_colors.append(color)
-                segments = dashed_line_segments(
-                    node_view_position,
-                    candidate_view_position,
-                )
-                link_segments.extend(segments)
-                link_colors.extend([color] * len(segments))
+            color = DIRECTION_COLORS[node.state]
+            candidate_view_position = world_to_view_point(node.destination_world_xy)
+            candidate_positions.append(candidate_view_position)
+            candidate_colors.append(color)
+            segments = dashed_line_segments(node_view_position, candidate_view_position)
+            link_segments.extend(segments)
+            link_colors.extend([color] * len(segments))
 
         if node_positions:
             self._log(
@@ -1014,12 +1021,8 @@ def _send_default_blueprint(
         rrb.TextDocumentView(origin="/chassis/status", name="Chassis"),
         panel_view(origin="/navigation/status", name="Status"),
         rrb.Spatial2DView(
-            origin="/model/yolo_world/latest",
-            name="YOLO + SAM2",
-        ),
-        rrb.Spatial2DView(
-            origin="/model/sam2/latest_success",
-            name="SAM2 mask",
+            origin="/model/yoloe/latest_success",
+            name="YOLOE mask",
         ),
         rrb.TextDocumentView(origin="/model/vlm/summary", name="VLM summary"),
         panel_view(origin="/model/interaction", name="VLM full"),
@@ -1061,7 +1064,7 @@ def _rgb_to_numpy(rgb: RgbImage) -> np.ndarray:
 
 
 def _overlay_target_mask(image: np.ndarray, mask: MaskImage) -> np.ndarray:
-    """用半透明洋红色显示 SAM2 掩码；非法尺寸时保留原始 RGB。"""
+    """用半透明洋红色显示 YOLOE 掩码；非法尺寸时保留原始 RGB。"""
     mask_array = target_mask_to_numpy(mask)
     if mask_array is None or mask_array.shape != image.shape[:2]:
         return image
@@ -1070,10 +1073,10 @@ def _overlay_target_mask(image: np.ndarray, mask: MaskImage) -> np.ndarray:
 
     overlay = image.copy()
     foreground = overlay[mask_array].astype(np.float32)
-    mask_color = np.asarray(SAM2_MASK_RGB, dtype=np.float32)
+    mask_color = np.asarray(YOLOE_MASK_RGB, dtype=np.float32)
     overlay[mask_array] = np.rint(
-        foreground * (1.0 - SAM2_MASK_ALPHA)
-        + mask_color * SAM2_MASK_ALPHA
+        foreground * (1.0 - YOLOE_MASK_ALPHA)
+        + mask_color * YOLOE_MASK_ALPHA
     ).astype(np.uint8)
     return overlay
 
@@ -1083,7 +1086,7 @@ def _draw_bbox_outline(
     bbox_norm: Tuple[float, float, float, float],
     color: Tuple[int, int, int],
 ) -> None:
-    """在独立 SAM2 结果图上直接画 VLM 框，避免依赖视图叠加设置。"""
+    """在独立 YOLOE 结果图上直接画 VLM 框，避免依赖视图叠加设置。"""
     height, width = image.shape[:2]
     x_min, y_min, x_max, y_max = bbox_norm
     left = max(0, min(width - 1, int(math.floor(x_min * width))))

@@ -166,20 +166,23 @@ def _add_navigation_arguments(
         choices=tuple(mode.value for mode in SearchMode),
         help="搜索具体物体 object，或寻找目的场景 scene；默认 object",
     )
-    parser.add_argument("--object-class", help="接近阶段 YOLO 使用的简短类别；默认复用 --target")
+    parser.add_argument("--object-class", help="YOLOE 使用的简短英文类别；默认复用 --target")
     parser.add_argument(
         "--object-python",
-        help="接近阶段本地模型的 Python；默认复用 robot-nav 环境",
+        help="本地 YOLOE 模型的 Python；默认复用 robot-nav 环境",
     )
-    parser.add_argument("--object-device", help="接近阶段 YOLO/SAM2 设备，默认 cuda")
+    parser.add_argument("--object-device", help="YOLOE 设备，默认 cuda")
+    parser.add_argument("--vlm-high-confidence", type=_probability, help="VLM 独立命中的置信度门槛")
+    parser.add_argument("--yolo-high-confidence", type=_probability, help="YOLOE 独立命中的置信度门槛")
+    parser.add_argument("--vlm-joint-confidence", type=_probability, help="联合命中时 VLM 的最低置信度")
+    parser.add_argument("--yolo-joint-confidence", type=_probability, help="联合命中时 YOLOE 的最低置信度")
+    parser.add_argument("--detection-box-iou", type=_probability, help="联合命中时同帧两框的最小交并比")
     parser.add_argument(
         "--object-yolo-model",
         type=Path,
     )
-    parser.add_argument(
-        "--object-sam-checkpoint",
-        type=Path,
-    )
+    parser.add_argument("--yolo-frequency-hz", type=_positive_float,
+                        help="视频 YOLOE 检测频率上限，默认 10 Hz；始终取最新帧，扫描图另行检测")
     parser.add_argument(
         "--object-timeout-s",
         type=_positive_float,
@@ -249,6 +252,13 @@ def _finite_float(value: str) -> float:
     number = float(value)
     if not math.isfinite(number):
         raise argparse.ArgumentTypeError("必须是有限数")
+    return number
+
+
+def _probability(value: str) -> float:
+    number = _finite_float(value)
+    if not 0.0 < number <= 1.0:
+        raise argparse.ArgumentTypeError("必须在 (0, 1] 内")
     return number
 
 

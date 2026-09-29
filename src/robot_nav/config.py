@@ -23,8 +23,9 @@ FIELDS = {
     ),
     "perception": (
         "vlm_endpoint vlm_model vlm_api_format vlm_timeout_s vlm_max_output_tokens "
-        "object_class object_python object_device object_yolo_model object_sam_checkpoint "
-        "object_timeout_s"
+        "object_class object_python object_device object_yolo_model yolo_frequency_hz "
+        "object_timeout_s vlm_high_confidence yolo_high_confidence "
+        "vlm_joint_confidence yolo_joint_confidence detection_box_iou"
     ),
     "logging": "no_rerun rerun_viewer rerun_save run_log",
 }
@@ -34,7 +35,7 @@ NULLABLE = {
     "object_class", "object_python", "rerun_save", "run_log",
 }
 PATHS = {
-    "scene", "camera_calibration", "object_yolo_model", "object_sam_checkpoint",
+    "scene", "camera_calibration", "object_yolo_model",
     "rerun_save", "run_log",
 }
 BOOLS = {"debug_random_score", "debug_frontier", "no_rerun"}
