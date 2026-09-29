@@ -375,9 +375,9 @@
   查看 JSONL 中 `semantic_queue` 事件的 detection_error/scoring_error 或终端请求错误；
   仅有导航周期继续输出不代表模型成功，普通模型失败会继续几何探索。
 - Hermes 的 `MoveToAction` 在运动帧中检查底盘位姿：朝向剩余路径后连续停留在
-  0.5 m 半径内达到 `blocked_pose_duration_s` 时，先取消并确认动作结束，再建人工墙。
-  根配置 10s、随车配置 5s；扫描转向不计时，MoveTo 朝向路径偏差超过 25° 时重置计时，
-  平移达到 0.5 m 也重新开始。近深度只细化墙的位置，不参与触发判断。
+  0.25 m 半径内达到 `blocked_pose_duration_s` 时，先取消并确认动作结束，再建人工墙。
+  根配置与随车配置均为 5s；扫描转向不计时，MoveTo 朝向路径偏差超过 25° 时重置计时，
+  平移达到 0.25 m 也重新开始。近深度只细化墙的位置，不参与触发判断。
   “前向采样区未检出近障碍”指 0.1～`front_blockage_distance_m` 范围内无合格深度簇，
   不能据此判断目标深度缺失；目标定位看 `object_localized` 的 `mask_used/sample_count/reason`。
   `--action-stall-timeout-s` 只控制转向无进展上限。Action 轮询默认 0.2s，

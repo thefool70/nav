@@ -60,8 +60,8 @@
     "action_arrival_hold_s": 0.001,
     "motion_frame_interval_s": 0.5,
     "front_blockage_distance_m": 0.5,
-    "blocked_pose_radius_m": 0.5,
-    "blocked_pose_duration_s": 10.0,
+    "blocked_pose_radius_m": 0.25,
+    "blocked_pose_duration_s": 5.0,
     "position_tolerance_m": 0.03,
     "yaw_tolerance_deg": 5.0
   },

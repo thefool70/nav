@@ -85,8 +85,8 @@ class HermesConfig:
     max_unknown_path_m: float = 1.5
     motion_frame_interval_s: float = 0.5
     front_blockage_distance_m: float = 0.5
-    blocked_pose_radius_m: float = 0.5
-    blocked_pose_duration_s: float = 10.0
+    blocked_pose_radius_m: float = 0.25
+    blocked_pose_duration_s: float = 5.0
     minimum_localization_quality: int = 1
     position_tolerance_m: float = 0.03
     # 与 core 的扫描朝向容差一致，避免为已经可接受的微小误差再创建 Action。
