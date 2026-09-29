@@ -88,6 +88,7 @@ DIRECTION_COLORS = {
 COMMAND_HEADING_LENGTH_M = 0.6
 SCAN_HEADING_LENGTH_M = 1.2
 ROBOT_LINE_RADIUS_M = 0.035
+WORLD_FOLLOW_HALF_EXTENT_M = 6.0
 OCCUPANCY_THRESHOLD = 0.5
 
 
@@ -661,6 +662,11 @@ class RerunVisualizer:
     def _log_robot_pose(self, frame: NavigationFrame) -> None:
         """用朝向三角形在 world 和 map 中记录机器人实时位姿。"""
         world_position = (frame.pose.x_m, frame.pose.y_m)
+        # 视图原点随位姿平移，轴向保持世界方向；同一变换也用于录制回放。
+        view_x, view_y = world_to_view_point(world_position)
+        self._log("world/robot_view", self._rr.Transform3D(
+            translation=[view_x, view_y, 0.0],
+        ))
         triangle_world = robot_triangle_world(frame.pose)
         self._log(
             "world/robot",
@@ -1007,8 +1013,12 @@ def _send_default_blueprint(
     )
     world_views = rrb.Tabs(
         rrb.Spatial2DView(
-            origin="/world", name="World",
+            origin="/world/robot_view", name="World",
             contents=["/world/**", "- /world/observations/**", "- /world/history/**"],
+            visual_bounds=rrb.VisualBounds2D(
+                x_range=[-WORLD_FOLLOW_HALF_EXTENT_M, WORLD_FOLLOW_HALF_EXTENT_M],
+                y_range=[-WORLD_FOLLOW_HALF_EXTENT_M, WORLD_FOLLOW_HALF_EXTENT_M],
+            ),
         ),
         rrb.Spatial2DView(
             origin="/world", name="World history",

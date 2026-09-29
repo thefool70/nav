@@ -262,7 +262,8 @@ python -m robot_nav hermes --preflight-only
   规划路径，同时持续写入 `data/run_logs/rerun-*.rrd`。`--rerun-save <PATH>`
   可指定新文件路径；`--no-rerun` 同时关闭界面和录制。
   `VLM summary` 简要关联任务、请求与导航使用；`VLM full` 保留完整会话信息。
-  World 将占用图、机器人和任务标记放在一起，同次扫描只画一个点，邻近任务合并显示。
+  World 以机器人位置为中心跟随平移，保持地图方向，默认显示周围 12×12 m；
+  占用图、路径和任务标记共同显示，同次扫描只画一个点，邻近任务合并显示。
   扫描期间显示本轮全部计划朝向，并用箭头突出当前待执行方向；扫描计划结束后清除。
   右侧直接展示当前推理的 RGB 与评分；`Observations` 中点击 J 查看整组、V 查看
   单图评分卡，原图通过 raw 链接查看。完整点位保留在 `World history`。
