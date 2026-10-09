@@ -380,10 +380,45 @@ D435i 筛选后的算法地图，
 通过 `--rerun` 按需开启，允许开启时有更高延迟。
 `logging.rerun_viewer` 选择 `web`、`native` 或 `record`，可用 `--rerun-viewer` 临时覆盖。
 随车配置为 `native`：在笔记本桌面终端运行时自动启动 Rerun App，
-通过本机 9878 端口传输实时数据，无需浏览器。纯 SSH 终端没有桌面显示环境时，
-请改用 `--rerun-viewer web`。`record` 只写 RRD，不启动界面或实时服务。三种方式都保存 RRD。关闭 Rerun 会同时关闭界面与 RRD
+通过本机 9878 端口传输实时数据，无需浏览器。通过 SSH 启动并在随车屏幕显示时，
+使用下节的桌面启动脚本；在开发机查看时使用网页转发或离线回放。
+`record` 只写 RRD，不启动界面或实时服务。三种方式都保存 RRD。关闭 Rerun 会同时关闭界面与 RRD
 录制，但保留 JSONL 决策与计时日志；终端 Frontier 调试输出
 由 `--debug-frontier` 单独控制。比较延迟时应保持这些开关一致。
+
+### SSH 启动，在随车屏幕查看
+
+随车笔记本先登录 `hri` 的桌面；SSH 也使用同一用户。登录 SSH 后执行：
+
+```bash
+cd /home/hri/nav
+bash hardware/hermes/run_desktop.sh \
+  --target "椅子" --object-class chair \
+  --startup-forward-m 0 --enable-motion --max-cycles 100
+```
+
+脚本从当前用户的 systemd 环境读取桌面的显示地址和认证路径，自动开启
+`--rerun --rerun-viewer native`；无需手填重登后会变化的 `XAUTHORITY`。
+同时将项目 `.venv/bin` 加入本次进程的 `PATH`，供 Rerun SDK 查找已安装的查看器。
+这只为本次进程设置环境，不修改桌面权限或全局配置。Rerun 窗口显示在随车屏幕，
+终端输出保留在 SSH 中，RRD 和 JSONL 仍保存在随车 `data/run_logs/`。
+保持 SSH 终端开启；停止导航用 Ctrl+C，关闭 Rerun 窗口不代表停止导航。
+未登录桌面时脚本报错，不启动导航。该入口固定开启桌面显示，不能用于关闭可视化。
+
+也可以在开发机项目目录直接执行，无需先手动登录 SSH：
+
+```bash
+bash hardware/hermes/tunnel.sh --desktop \
+  --target "椅子" --object-class chair \
+  --startup-forward-m 0 --enable-motion --max-cycles 100
+```
+
+此方式只建立命令终端，不转发或下载可视化数据，也不需要 `ssh -X`。
+如果直接坐在随车笔记本前，在桌面终端执行
+同一条 `run_desktop.sh` 命令即可。若直接使用 Python 命令，先运行
+`source .venv/bin/activate`，再执行
+`python -m robot_nav hermes --target chair --object-class chair --startup-forward-m 0 --enable-motion --rerun --rerun-viewer native`。
+相机发布器仍按原方式启动，勿重复启动。
 
 ### 从开发机启动并自动转发
 

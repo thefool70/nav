@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 开发机运行：转发设备、实时导航，或随车录制后下载回放。
+# 开发机运行：转发设备、启动随车导航，或录制后下载回放。
 # 密码由 SSH 交互读取；也可以使用已有 SSH 公钥认证。
 mode="${1:-}"
 case "$mode" in
     "") ;;
-    --run|--record) shift ;;
+    --run|--record|--desktop) shift ;;
     -h|--help)
-        echo "用法: bash hardware/hermes/tunnel.sh [--run|--record <hermes 导航参数...>]"
+        echo "用法: bash hardware/hermes/tunnel.sh [--run|--record|--desktop <hermes 导航参数...>]"
         echo "无参数：转发相机和底盘，供开发机运行导航。"
         echo "--run：随车端运行导航，默认开启 Rerun 并转发到本机浏览器。"
         echo "--record：随车端仅录制，导航退出后下载 RRD 和 JSONL，并用本机 Rerun 打开。"
+        echo "--desktop：随车端运行导航，Rerun 窗口显示在随车笔记本已登录的桌面。"
         exit 0
         ;;
     *) echo "未知参数：$mode；使用 --help 查看用法。" >&2; exit 2 ;;
@@ -43,6 +44,16 @@ ssh_options+=(
     -o ServerAliveInterval=5
     -o ServerAliveCountMax=2
 )
+
+if [[ "$mode" == "--desktop" ]]; then
+    onboard_repo="${ROBOT_NAV_ONBOARD_REPO:-/home/hri/nav}"
+    printf -v remote_command 'exec bash %q' "$onboard_repo/hardware/hermes/run_desktop.sh"
+    if (($#)); then
+        printf -v navigation_args ' %q' "$@"
+        remote_command+="$navigation_args"
+    fi
+    exec ssh "${ssh_options[@]}" -t "$onboard_host" "$remote_command"
+fi
 
 if [[ "$mode" == "--run" || "$mode" == "--record" ]]; then
     onboard_repo="${ROBOT_NAV_ONBOARD_REPO:-/home/hri/nav}"
