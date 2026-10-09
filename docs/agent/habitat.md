@@ -374,10 +374,11 @@
   不要每次 HTTP 请求重新生成；User-Agent 保持 robot-nav 的真实标识。
   查看 JSONL 中 `semantic_queue` 事件的 detection_error/scoring_error 或终端请求错误；
   仅有导航周期继续输出不代表模型成功，普通模型失败会继续几何探索。
-- Hermes 的 `MoveToAction` 在运动帧中检查底盘位姿：朝向剩余路径后连续停留在
-  0.25 m 半径内达到 `blocked_pose_duration_s` 时，先取消并确认动作结束，再建人工墙。
-  根配置与随车配置均为 5s；扫描转向不计时，MoveTo 朝向路径偏差超过 25° 时重置计时，
-  平移达到 0.25 m 也重新开始。近深度只细化墙的位置，不参与触发判断。
+- Hermes `MoveToAction` 从首帧积累 `blocked_pose_duration_s`（3s）滑动窗口，无起步宽限。
+  窗口净位移不足 0.25m 即停滞，角差只记录；首次取消确认后重发原目标。
+  重发从首帧复查 3s，位移达到 0.25m 清除重试状态、恢复普通检测；
+  仍不足才取消确认并建墙。RotateTo 不检测；未知路径超限提前取消确认后直接建墙，不等待复查。
+  近深度只细化墙的位置，不参与触发判断。
   “前向采样区未检出近障碍”指 0.1～`front_blockage_distance_m` 范围内无合格深度簇，
   不能据此判断目标深度缺失；目标定位看 `object_localized` 的 `mask_used/sample_count/reason`。
   `--action-stall-timeout-s` 只控制转向无进展上限。Action 轮询默认 0.2s，
@@ -465,8 +466,17 @@
 - Arrow 表转 Python 对象前省略或转成整数的 `log_time`，避免没有 pandas 时
   纳秒时间戳转换失败。读取既有日志无需启动 Habitat 或请求 VLM。
 
-- Hermes 人工墙：`front_obstruction.update_path` 用剩余路径首个距机器人 ≥0.20m 的点判断
-  行进方向（暂无路径时使用目标）；朝向差 >25° 清空计时窗口。扫描 RotateTo 不启用该检测。
-  `_continuous_frame_loop` 仅发布阻塞事实，`_execute_monitored_action` 确认取消终态后调用
+- Hermes 人工墙：`front_obstruction.FrontObstructionDetector.observe` 用 `_poses` 保存
+  窗口内位姿及边界前最近的一帧，不依赖规划路径；动作结束清空。日志 `duration`
+  是实际比较时长，`translation` / `heading_change` 是两端净位移 / 最短角差。
+  `samples` 为最近窗口内实际保留的近障碍样本数。扫描 RotateTo 不启用该检测。
+  `_continuous_frame_loop` 发布停滞事实；首次由 `_RetryFrontObstructionError` 经过取消
+  确认后交给 `_execute_action` 重发。检测器 `_retrying` 记录重发复查阶段，有效运动
+  或动作结束时清除；停滞分支只有 `confirmed_after_retry` 才允许写墙。
+  未知路径超限由 `_commit_front_obstruction(unknown_path=True)` 在取消确认后调用
+  `wall_for_unknown_path(stopped_pose)`，复用窗口深度样本和原目标生成墙，不伪造重试确认。
+  保留 MotionPathUnknownError 供核心按原动作用途恢复；取消确认失败不写墙。
+  日志 phase 区分普通检测与重试复查。
+  `_execute_monitored_action` 对重试受阻确认取消终态后调用
   `_commit_front_obstruction`。`HermesObservedMap.navigation_map` 向完整图叠加同一份原始墙，
   `add_permanent_wall` 按停止后 REST 位姿检查净空并拒绝让膨胀墙覆盖当前格。

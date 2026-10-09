@@ -5,9 +5,11 @@ from __future__ import annotations
 import math
 import statistics
 import threading
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from ...core.geometry import wrap_angle
 from ...core.models import NavigationFrame, Pose2D
 
 
@@ -25,9 +27,7 @@ MAX_OBSTACLE_SPREAD_M = 0.45
 # 人工墙膨胀半径为 0.36 m；墙中心至少留在机器人当前位置前方 0.60 m。
 MIN_WALL_DISTANCE_FROM_ROBOT_M = 0.60
 WALL_BEFORE_OBSTACLE_M = 0.15
-# MoveTo 内部也可能先转向。朝向剩余路径首个有效点后才开始平移阻塞计时。
-TRANSLATION_HEADING_TOLERANCE_RAD = math.radians(25.0)
-PATH_HEADING_LOOKAHEAD_M = 0.20
+RETRY_BLOCKAGE_DURATION_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -39,18 +39,20 @@ class FrontObstruction:
     depth_m: Optional[float]
     duration_s: float
     sample_count: int
+    confirmed_after_retry: bool
 
 
 @dataclass(frozen=True)
 class FrontObstructionProgress:
-    """当前连续挡路候选，供动作日志显示计时是否正在累计。"""
+    """最近一次滑动窗口比较，供动作日志显示实际时长、位移和角差。"""
 
-    started_s: float
+    timestamp_s: float
+    retrying: bool
     duration_s: float
     depth_m: Optional[float]
     displacement_m: float
+    heading_change_rad: float
     sample_count: int
-    restart_reason: str
 
 
 @dataclass(frozen=True)
@@ -62,15 +64,9 @@ class _NearObservation:
 
 
 class FrontObstructionDetector:
-    """平移动作中确认底盘长时间没有离开指定半径。"""
+    """比较当前与一个时间窗口前的位姿，判断平移动作是否受阻。"""
 
-    def __init__(
-        self,
-        *,
-        maximum_depth_m: float,
-        duration_s: float,
-        movement_radius_m: float,
-    ) -> None:
+    def __init__(self, *, maximum_depth_m: float, duration_s: float, movement_radius_m: float) -> None:
         if not math.isfinite(maximum_depth_m) or maximum_depth_m <= MIN_DEPTH_M:
             raise ValueError("maximum_depth_m 必须大于最小有效深度")
         if not math.isfinite(duration_s) or duration_s <= 0.0:
@@ -83,170 +79,106 @@ class FrontObstructionDetector:
         self._lock = threading.Lock()
         self._active = False
         self._triggered = False
+        # 首次停滞后的原目标重发正在复查；有效平移或动作结束即清除。
+        self._retrying = False
+        # observe 更新；只保留窗口内位姿及窗口边界之前最近的一帧，动作结束清空。
+        self._poses: deque[Tuple[float, Pose2D]] = deque()
         self._samples: list[_NearObservation] = []
-        self._near_observation_count = 0
-        self._anchor_timestamp_s: Optional[float] = None
-        self._anchor_pose: Optional[Pose2D] = None
-        self._latest_timestamp_s: Optional[float] = None
-        self._latest_pose: Optional[Pose2D] = None
         self._target_world_xy: Optional[Tuple[float, float]] = None
-        self._restart_reason = ""
-        self._travel_heading_rad: Optional[float] = None
 
-    def start_translation(
-        self,
-        target_world_xy: Optional[Tuple[float, float]],
-    ) -> None:
-        """开始一次平移动作，按底盘位移启动新的阻塞观察窗口。"""
+    def start_translation(self, target_world_xy: Optional[Tuple[float, float]], *, retrying: bool = False) -> None:
+        """新平移动作从首帧积累检测窗口；首次与重试均无额外起步宽限。"""
         with self._lock:
             self._active = True
             self._triggered = False
+            self._retrying = retrying
+            self._poses.clear()
             self._samples.clear()
-            self._near_observation_count = 0
-            self._anchor_timestamp_s = None
-            self._anchor_pose = None
-            self._latest_timestamp_s = None
-            self._latest_pose = None
             self._target_world_xy = target_world_xy
-            self._restart_reason = ""
-            self._travel_heading_rad = None
 
     def stop_translation(self) -> None:
         with self._lock:
             self._active = False
+            self._retrying = False
+            self._poses.clear()
             self._samples.clear()
-            self._near_observation_count = 0
-            self._anchor_timestamp_s = None
-            self._anchor_pose = None
-            self._latest_timestamp_s = None
-            self._latest_pose = None
             self._target_world_xy = None
-            self._travel_heading_rad = None
-
-    def update_path(self, pose: Pose2D, remaining_path) -> None:
-        """动作监控线程提供底盘实际路径方向；不依赖不稳定的 stage 文本。"""
-        with self._lock:
-            if not self._active:
-                return
-            target = next((point for point in remaining_path
-                           if math.hypot(point[0] - pose.x_m, point[1] - pose.y_m)
-                           >= PATH_HEADING_LOOKAHEAD_M), self._target_world_xy)
-            self._travel_heading_rad = (math.atan2(target[1] - pose.y_m, target[0] - pose.x_m)
-                                        if target is not None else None)
 
     def observe(self, frame: NavigationFrame) -> Optional[FrontObstruction]:
-        """接收一帧；朝向路径、底盘在配置半径内停留满时长后返回一次墙中心。"""
+        """只按窗口净位移判停滞；转向仅记录，不作为脱困依据。"""
         with self._lock:
             if not self._active or self._triggered:
                 return None
-
-        timestamp_s = float(frame.timestamp_s)
-        near = _front_observation(frame, self._maximum_depth_m)
-        with self._lock:
-            if not self._active or self._triggered:
+            timestamp_s = float(frame.timestamp_s)
+            if self._poses and timestamp_s <= self._poses[-1][0]:
                 return None
-
-            # 初始调头和路径中的转弯都不算行进受阻。暂停即丢弃上一计时窗口，
-            # 朝向重新对齐后从零计时；整个 Action 仍受原有总超时约束。
-            heading = self._travel_heading_rad
-            error = (abs(math.atan2(math.sin(frame.pose.yaw_rad - heading),
-                                    math.cos(frame.pose.yaw_rad - heading))) if heading is not None else math.pi)
-            if error > TRANSLATION_HEADING_TOLERANCE_RAD:
-                self._anchor_timestamp_s = None
-                self._anchor_pose = None
-                self._samples.clear()
-                self._near_observation_count = 0
-                self._latest_timestamp_s = timestamp_s
-                self._latest_pose = frame.pose
-                self._restart_reason = "转向完成后重新计时"
-                return None
-
-            if self._anchor_timestamp_s is None or self._anchor_pose is None:
-                self._anchor_timestamp_s = timestamp_s
-                self._anchor_pose = frame.pose
-                self._latest_timestamp_s = timestamp_s
-                self._latest_pose = frame.pose
-                self._record_near_observation(timestamp_s, frame.pose, near)
-                return None
-
-            if self._latest_timestamp_s is not None and timestamp_s <= self._latest_timestamp_s:
-                return None
-            moved_m = math.hypot(
-                frame.pose.x_m - self._anchor_pose.x_m,
-                frame.pose.y_m - self._anchor_pose.y_m,
-            )
-            if moved_m >= self._movement_radius_m:
-                self._restart_reason = f"机器人平移达到 {moved_m:.3f}m"
-                self._samples.clear()
-                self._near_observation_count = 0
-                self._anchor_timestamp_s = timestamp_s
-                self._anchor_pose = frame.pose
-                self._latest_timestamp_s = timestamp_s
-                self._latest_pose = frame.pose
-                self._record_near_observation(timestamp_s, frame.pose, near)
-                return None
-
-            self._latest_timestamp_s = timestamp_s
-            self._latest_pose = frame.pose
+            self._poses.append((timestamp_s, frame.pose))
+            window_s = RETRY_BLOCKAGE_DURATION_S if self._retrying else self._duration_s
+            cutoff_s = timestamp_s - window_s
+            # 没有恰好窗口边界时刻的帧时取该时刻之前最近的帧，不插值猜测历史位姿。
+            while len(self._poses) > 1 and self._poses[1][0] <= cutoff_s:
+                self._poses.popleft()
+            self._samples = [item for item in self._samples if item.timestamp_s >= cutoff_s]
+            near = _front_observation(frame, self._maximum_depth_m)
             self._record_near_observation(timestamp_s, frame.pose, near)
-            duration_s = timestamp_s - self._anchor_timestamp_s
-            if duration_s < self._duration_s:
+            comparison = self._window_comparison()
+            moved = comparison.displacement_m >= self._movement_radius_m
+            if self._retrying and moved:
+                # 已产生有效平移，这次停滞结束；新位置重新积累普通窗口。
+                self._retrying = False
+                self._poses.clear()
+                self._poses.append((timestamp_s, frame.pose))
+                self._samples.clear()
+                self._record_near_observation(timestamp_s, frame.pose, near)
                 return None
-
+            if comparison.duration_s < window_s or moved:
+                return None
             self._triggered = True
             return _obstruction_from_window(
-                self._samples,
-                duration_s,
-                self._near_observation_count,
-                frame.pose,
-                self._target_world_xy,
+                self._samples, comparison.duration_s, comparison.sample_count,
+                frame.pose, self._target_world_xy, self._retrying,
             )
 
-    def _record_near_observation(
-        self,
-        timestamp_s: float,
-        pose: Pose2D,
-        near: Optional[Tuple[float, Tuple[float, float]]],
-    ) -> None:
-        """深度只细化墙的位置；看不到近障碍不影响位姿停滞计时。"""
+    def progress(self) -> Optional[FrontObstructionProgress]:
+        """返回窗口两端的比较结果；不额外维护一份位姿或计时状态。"""
+        with self._lock:
+            if not self._active or self._triggered or not self._poses:
+                return None
+            return self._window_comparison()
+
+    def wall_for_unknown_path(self, stopped_pose: Pose2D) -> FrontObstruction:
+        """路径超限已取消确认后，复用当前深度样本和原目标生成墙；不要求停滞。"""
+        with self._lock:
+            duration_s = self._poses[-1][0] - self._poses[0][0] if self._poses else 0.0
+            return _obstruction_from_window(
+                self._samples, duration_s, len(self._samples),
+                stopped_pose, self._target_world_xy, False,
+            )
+
+    def _window_comparison(self) -> FrontObstructionProgress:
+        """调用方持锁；同一计算同时用于受阻判断和日志。"""
+        started_s, previous = self._poses[0]
+        timestamp_s, current = self._poses[-1]
+        return FrontObstructionProgress(
+            timestamp_s=timestamp_s, retrying=self._retrying,
+            duration_s=timestamp_s - started_s,
+            depth_m=self._samples[-1].depth_m if self._samples else None,
+            displacement_m=math.hypot(current.x_m - previous.x_m, current.y_m - previous.y_m),
+            heading_change_rad=abs(wrap_angle(current.yaw_rad - previous.yaw_rad)),
+            sample_count=len(self._samples),
+        )
+
+    def _record_near_observation(self, timestamp_s, pose, near) -> None:
+        """只保留窗口内同一片近障碍的有效样本；深度不决定是否触发。"""
         if near is None:
             return
         depth_m, obstacle_world_xy = near
-        self._near_observation_count += 1
         if self._samples:
             first_xy = self._samples[0].obstacle_world_xy
-            if math.hypot(
-                obstacle_world_xy[0] - first_xy[0],
-                obstacle_world_xy[1] - first_xy[1],
-            ) > MAX_OBSTACLE_SPREAD_M:
+            if math.hypot(obstacle_world_xy[0] - first_xy[0],
+                          obstacle_world_xy[1] - first_xy[1]) > MAX_OBSTACLE_SPREAD_M:
                 return
-        self._samples.append(
-            _NearObservation(timestamp_s, depth_m, obstacle_world_xy, pose)
-        )
-
-    def progress(self) -> Optional[FrontObstructionProgress]:
-        """返回当前候选的累计时间；不参与检测决策。"""
-        with self._lock:
-            if (
-                not self._active
-                or self._triggered
-                or self._anchor_timestamp_s is None
-                or self._anchor_pose is None
-            ):
-                return None
-            if self._latest_timestamp_s is None or self._latest_pose is None:
-                return None
-            return FrontObstructionProgress(
-                started_s=self._anchor_timestamp_s,
-                duration_s=self._latest_timestamp_s - self._anchor_timestamp_s,
-                depth_m=self._samples[-1].depth_m if self._samples else None,
-                displacement_m=math.hypot(
-                    self._latest_pose.x_m - self._anchor_pose.x_m,
-                    self._latest_pose.y_m - self._anchor_pose.y_m,
-                ),
-                sample_count=self._near_observation_count,
-                restart_reason=self._restart_reason,
-            )
+        self._samples.append(_NearObservation(timestamp_s, depth_m, obstacle_world_xy, pose))
 
 
 def _front_observation(
@@ -353,6 +285,7 @@ def _obstruction_from_window(
     sample_count: int,
     robot_pose: Pose2D,
     target_world_xy: Optional[Tuple[float, float]],
+    confirmed_after_retry: bool,
 ) -> FrontObstruction:
     depth_m = None
     if samples:
@@ -393,6 +326,7 @@ def _obstruction_from_window(
         depth_m=depth_m,
         duration_s=duration_s,
         sample_count=sample_count,
+        confirmed_after_retry=confirmed_after_retry,
     )
 
 

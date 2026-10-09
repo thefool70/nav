@@ -325,7 +325,7 @@ def _add_hermes_tuning(parser):
     parser.add_argument(
         "--blocked-pose-duration-s",
         type=_positive_float,
-        help="朝向行进路径后持续留在阻塞半径内多久后建立人工墙，当前默认 5 秒",
+        help="首次停滞的净位移窗口，默认 3 秒；重发后复查固定 3 秒，无额外起步等待",
     )
     parser.add_argument("--position-tolerance-m", type=_positive_float)
     parser.add_argument("--yaw-tolerance-deg", type=_positive_float)

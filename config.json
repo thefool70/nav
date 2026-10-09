@@ -41,8 +41,8 @@
       "action_arrival_hold_s": "满足到达条件后需保持的时长（秒）；实际确认还受轮询间隔影响。",
       "motion_frame_interval_s": "运动中采集导航帧的间隔（秒），不是相机发布帧率。",
       "front_blockage_distance_m": "用于细化人工墙位置的最远近深度（米）；不参与阻塞触发判断。",
-      "blocked_pose_radius_m": "底盘位姿阻塞判定半径（米）；离开该范围后从新位置重新计时。",
-      "blocked_pose_duration_s": "底盘持续停留在阻塞半径内多久后建立永久人工墙（秒）。",
+      "blocked_pose_radius_m": "滑动时间窗口两端的净位移门槛（米）；达到该距离就不判阻塞。",
+      "blocked_pose_duration_s": "首次停滞的净位移比较窗口（秒）；无额外起步等待，重试复查固定 3 秒。",
       "position_tolerance_m": "判断是否需要下发平移动作的距离容差（米）。",
       "yaw_tolerance_deg": "转向到位及是否需要修正朝向的角度容差（度）。"
     },
@@ -61,7 +61,7 @@
     "motion_frame_interval_s": 0.5,
     "front_blockage_distance_m": 0.5,
     "blocked_pose_radius_m": 0.25,
-    "blocked_pose_duration_s": 5.0,
+    "blocked_pose_duration_s": 3.0,
     "position_tolerance_m": 0.03,
     "yaw_tolerance_deg": 5.0
   },
