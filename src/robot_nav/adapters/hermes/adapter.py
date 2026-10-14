@@ -26,6 +26,7 @@ from ..chassis import (
 from ..realsense import D435iCapture
 from ..realsense.d435i_camera import D435iCamera, D435iConfig
 from .front_obstruction import FrontObstruction, FrontObstructionDetector, FrontObstructionProgress
+from .laser_map import HermesLaserMap
 from .observed_map import HERMES_OBSTACLE_INFLATION_RADIUS_M, HermesObservedMap
 from .remote.wire import RgbdPoseCapture
 from .rest_client import (
@@ -47,9 +48,6 @@ MotionPlanCallback = Callable[
     ],
     None,
 ]
-
-# Hermes 地图是无符号字节：0 未知，1..127 自由，128..255 占用。
-_OCCUPANCY_VALUES = (None,) + (0.0,) * 127 + (1.0,) * 128
 
 
 class RgbdCamera(Protocol):
@@ -131,6 +129,7 @@ class HermesAdapter:
         camera_factory: Callable[..., RgbdCamera] = D435iCamera,
         on_chassis_status: Optional[Callable[[str, Mapping[str, Any]], None]] = None,
         on_rgbd_frame=None,
+        reset_maps: bool = False,
     ) -> None:
         _validate_config(config)
         self.config = config
@@ -143,8 +142,9 @@ class HermesAdapter:
         self._last_motion_frame_s = float("-inf")
         self._frame_build_lock = threading.Lock()
         self._map_condition = threading.Condition()
-        # 地图线程发布完整转换结果；相机与地图独立更新，不宣称两者同时采集。
+        # 地图线程发布实时激光历史图；相机与激光独立更新，不宣称同时采集。
         self._latest_map = None
+        self._laser_map = HermesLaserMap()
         self._map_updated_s = 0.0
         self._map_thread = None
         self._camera_after_s = 0.0
@@ -176,6 +176,19 @@ class HermesAdapter:
         )
         self._action_names = action_names
         try:
+            if reset_maps:
+                # 先确认激光接口可用，避免不支持接口的设备被清图后才发现无法导航。
+                self._client.get_laser_scan()
+                current = self._client.get_current_action()
+                if current:
+                    action_id = current.get("action_id")
+                    if isinstance(action_id, bool) or not isinstance(action_id, int):
+                        raise RuntimeError("清图前无法确认当前 Hermes Action ID")
+                    self._client.abort_current_action()
+                    self._client.wait_for_action(action_id, config.request_timeout_s,
+                                                 config.action_poll_interval_s, require_success=False)
+                self._client.clear_maps_and_start_mapping()
+                self._report_action_progress("Hermes 底盘地图已清空；项目地图从本次实时激光重新累积。")
             if config.camera is not None:
                 camera_config = config.camera
                 if config.camera_serial is not None:
@@ -372,10 +385,11 @@ class HermesAdapter:
         return replace(frame, acquisition_timings=tuple(timings))
 
     def _map_loop(self) -> None:
-        """独立请求并转换完整地图，发布成功结果；失败不沿用旧图掩盖故障。"""
+        """读取格网几何和实时激光，发布历史图；失败不回退概率地图。"""
         while not self._continuous_frame_stop.is_set():
             try:
-                navigation_map = _to_obstacle_map(self._client.get_explore_map())
+                geometry = _map_geometry(self._client.get_explore_map())
+                navigation_map = self._laser_map.update(geometry, self._client.get_laser_scan())
                 with self._map_condition:
                     self._latest_map = navigation_map
                     self._map_updated_s = time.monotonic()
@@ -1024,16 +1038,11 @@ def _build_navigation_frame(
     )
 
 
-def _to_obstacle_map(source: HermesExploreMap) -> ObstacleMap:
-    """转换 Hermes 6.3 栅格值和边界原点为项目统一占用图。"""
-    rows = []
-    for row_index in range(source.height):
-        offset = row_index * source.width
-        raw_row = source.cells[offset : offset + source.width]
-        rows.append(tuple(map(_OCCUPANCY_VALUES.__getitem__, raw_row)))
+def _map_geometry(source: HermesExploreMap) -> ObstacleMap:
+    """只取底盘格网几何；概率值不进入项目地图。原点转为首格中心。"""
     half_cell = 0.5 * source.resolution_m
     return ObstacleMap(
-        occupancy=tuple(rows),
+        occupancy=((None,) * source.width,) * source.height,
         resolution_m=source.resolution_m,
         origin=Pose2D(
             x_m=source.origin_x_m + half_cell,

@@ -1,4 +1,4 @@
-"""仅在 RGB-D 相机当前理论水平 FOV 内刷新 Hermes 地图，视场外保留历史占用值。"""
+"""仅在 RGB-D 相机当前理论水平 FOV 内公开实时激光历史图，视场外保留历史值。"""
 
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ class HermesObservedMap:
         return obstacle_map, visibility_map
 
     def navigation_map(self, source: ObstacleMap) -> ObstacleMap:
-        """完整底盘图叠加同一份原始人工墙；停靠规划自行计算净空，不重复膨胀。"""
+        """完整激光历史图叠加原始人工墙；停靠规划自行计算净空，不重复膨胀。"""
         self._prepare_map_geometry(source)
         if not self._artificial_wall_keys:
             return source

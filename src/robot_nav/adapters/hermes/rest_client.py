@@ -26,14 +26,21 @@ class HermesActionError(RuntimeError):
 
 @dataclass(frozen=True)
 class HermesExploreMap:
-    """Robot Agent 栅格图原始数据；origin 是首格左下角而非格中心。"""
+    """Robot Agent 格网几何；origin 是首格左下角，不保存概率占用值。"""
 
     origin_x_m: float
     origin_y_m: float
     width: int
     height: int
     resolution_m: float
-    cells: bytes
+
+
+@dataclass(frozen=True)
+class HermesLaserScan:
+    """扫描时的地图系底盘位姿，以及有效测距（米、相对前方的弧度）。"""
+
+    pose: Pose2D
+    points: Tuple[Tuple[float, float], ...]
 
 
 @dataclass(frozen=True)
@@ -108,11 +115,40 @@ class HermesRestClient:
         return value
 
     def get_explore_map(self) -> HermesExploreMap:
-        """读取并解析当前激光探索栅格图。"""
+        """读取探索图的格网几何；概率数据只校验长度，不保留。"""
         payload = self._request_bytes(
             "GET", "/api/core/slam/v1/maps/explore"
         )
         return parse_explore_map(payload)
+
+    def get_laser_scan(self) -> HermesLaserScan:
+        """读取当前激光帧；无效点不代表自由空间，不参与射线清除。"""
+        payload = _require_mapping(self._request_json(
+            "GET", "/api/core/system/v1/laserscan"), "激光帧")
+        pose = _require_mapping(payload.get("pose"), "激光帧位姿")
+        robot_pose = Pose2D(*(_finite_number(pose, name) for name in ("x", "y", "yaw")))
+        raw_points = payload.get("laser_points")
+        if not isinstance(raw_points, list):
+            raise RuntimeError("Hermes 激光帧缺少 laser_points 数组")
+        points = []
+        for item in raw_points:
+            point = _require_mapping(item, "激光点")
+            if not _boolean_field(point, "valid"):
+                continue
+            distance = _finite_number(point, "distance")
+            angle = _finite_number(point, "angle")
+            if distance <= 0.0:
+                raise RuntimeError("Hermes 有效激光点距离必须为正数")
+            points.append((distance, angle))
+        return HermesLaserScan(robot_pose, tuple(points))
+
+    def clear_maps_and_start_mapping(self) -> None:
+        """删除底盘全部地图并启用建图；失败时不允许继续导航。"""
+        self._request_bytes("DELETE", "/api/core/slam/v1/maps")
+        if self._request_json("PUT", "/api/core/slam/v1/mapping/:enable", {"enable": True}) is not True:
+            raise RuntimeError("Hermes 清图后启用建图失败")
+        if not self.get_slam_state().mapping_enabled:
+            raise RuntimeError("Hermes 清图后未进入建图模式")
 
     def get_slam_state(self) -> HermesSlamState:
         """读取建图/定位开关和质量，明确区分两种工作模式。"""
@@ -395,7 +431,6 @@ def parse_explore_map(payload: bytes) -> HermesExploreMap:
         width=width,
         height=height,
         resolution_m=float(resolution),
-        cells=payload[36:],
     )
 
 

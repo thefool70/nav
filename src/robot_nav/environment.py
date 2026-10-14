@@ -76,6 +76,7 @@ def create_chassis(args, *, on_motion_frame=None,
         on_action_progress=on_action_progress, on_motion_plan=on_motion_plan,
         on_chassis_status=on_chassis_status,
         on_rgbd_frame=on_rgbd_frame,
+        reset_maps=not args.preflight_only,
     )
 
 
