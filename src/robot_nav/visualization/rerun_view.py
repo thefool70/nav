@@ -245,6 +245,11 @@ class RerunVisualizer:
             self._world_nodes.record_queue_event(event)
             if event["event"] == "object_localized":
                 self._log_yoloe_result(event["observation_frame"], event["observation"])
+            if event["event"] == "scene_view":
+                image = event["image"]
+                rgb = np.frombuffer(image.rgb_bytes, dtype=np.uint8).reshape(
+                    image.height_px, image.width_px, 3)
+                self._log(f"model/scene/views/V{event['view_id']}", self._rr.Image(rgb))
             event = {key: value for key, value in event.items()
                      if key not in ("image", "observation_frame", "observation")}
             if event["event"].startswith("object_"):

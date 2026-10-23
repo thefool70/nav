@@ -296,13 +296,15 @@
   `_pending_coverage` 在结果被主循环接收前一直保留；失败后移除，不冒充已检查。
   `pending_semantic_jobs` 还含快照准备、待接收结果和排队线索，不是 HTTP 数。
 - `TargetClue.pose` 是拍摄时机器人位姿，`job_id/view_id` 关联同帧 RGB-D。
-  场景由 `core/target.py::continue_scene_target` 返回并恢复朝向；位置误差 ≤0.25m、
-  朝向误差 ≤5° 时返回 COMPLETE / target.revisit_complete。
+  两种模式均由 `core/target.py::continue_target_search` 执行物体定位与接近。
+  场景只在停靠成功后请求 NEEDS_SCENE_CONFIRMATION，进入 CONFIRMING_SCENE；
+  `app.py::_confirm_scene_at_target` 顺序执行原地一圈、停稳采图和一次编号网格合图确认。
+  场景尾处理不进入暂停的普通 FIFO；转向失败经 SCENE_TURN → discard_object_clue 恢复。
   物体由 `core/target.py::continue_target_search` 处理 LOCALIZING_OBJECT → APPROACHING_OBJECT
   → COMPLETE。接近分支以停靠命令成功执行为依据，记录
   `completion_basis=standoff_command_completed`，不记录到达后重新测量的目标距离。
   `destination` 在停靠发出时写入，运动失败由 `recover_object_motion` 清空；下一周期
-  接近状态仍有目的地即表示命令已成功执行，直接完成，不再调用模型。
+  接近状态仍有目的地即表示命令已成功执行；object 直接完成，scene 转入环视确认。
   单条历史失败保留 `ObjectApproachState.fallback_clue/history_localized`，继续
   其他历史线索。`continue_object_history` 在 WAITING_FOR_SEMANTICS 原地排空
   已采集队列；全部不能定位才经 REVISITING_TARGET 保底返回，最终 STOPPED。
@@ -313,8 +315,8 @@
   `snapshot_store.clue_frame` 保留当前帧地图；未采集深度时 `depth=None`，不能借用新帧深度。
   `object_localization_started.timestamp_s` 是拍摄时间，`map_timestamp_s` 是当前导航帧时间。
   `SemanticPerception.begin_cycle` 按 FIFO 入队，物体按 job/view 保留每张不同快照；
-  场景仍按位姿去重且不重新排序，批次按 FIFO。`core/target.py::discard_target_clue` 返回无命令状态，
-  场景返回失败以 target.revisit_failed、物体线索失败以 object.clue_failed
+  scene 的普通检测也使用物体语义与固定类别清单，线索同样按单图任务去重、可用顺序交付。
+  两种模式的线索失败均通过 `core/target.py::discard_object_clue` 返回 object.clue_failed，
   让下一周期优先取下一条，COMPLETE 与 STOPPED 不再取线索。
   `navigate` 的 active_target_clue 分支优先于普通视觉处理；`app.py` 跳过线索
   处理期间的普通目标观测，物体定位只响应 NEEDS_OBJECT_LOCALIZATION。
@@ -480,3 +482,9 @@
   `_execute_monitored_action` 对重试受阻确认取消终态后调用
   `_commit_front_obstruction`。`HermesObservedMap.navigation_map` 向完整图叠加同一份原始墙，
   `add_permanent_wall` 按停止后 REST 位姿检查净空并拒绝让膨胀墙覆盖当前格。
+
+- 场景前处理在 `launch.py::_build_perception` 生成 3–5 类固定清单，失败重试一次。
+  `_goal.object_classes` 传入 YOLOE 和 Qwen；`class_text` 随框贯通，联合融合及掩码匹配要求同类。
+  场景否决后的实例记录属于感知队列；同地图、同类且 0.5m 内的世界位置对应被排除线索。
+  `scene_objects_rejected.unlocalized_objects` 表示入镜检测未能定位，不能可靠跨图排除。
+  `scene_view` 留存各方向图，`scene_confirmation` VLM 请求显示实际合图；只看普通 FIFO 无法复盘尾处理。

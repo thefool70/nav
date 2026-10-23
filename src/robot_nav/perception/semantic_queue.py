@@ -45,10 +45,12 @@ from ..core.scan import (
     frontier_observation_points,
     CaptureContext,
     preview_capture_frontiers,
+    horizontal_camera_view,
 )
 from ..core.timing import TimingSpans, measure_stage
 from .analyzer import VlmInputImage, SemanticAnalyzer, DetectionThresholds, TargetMatch, match_target, box_iou
 from .object_localizer import localize_object
+from .scene import scene_contact_sheet
 from .snapshot_store import (
     buffer_scan_image, freeze_depth, CapturedView, BufferedScanImage,
     clue_frame, snapshot_bytes, view_trace,
@@ -61,6 +63,8 @@ MAX_VIDEO_SNAPSHOTS = 64
 MAX_VIDEO_CONFIRMATIONS = 32
 # 准备中的 NavigationFrame 还持有地图和 Python 元组，不属于紧凑图像预算。
 MAX_SCAN_PREPARATIONS = 32
+# 仅关联同地图、同类别、邻近位置的被否决实例，不屏蔽整片场景。
+REJECTED_OBJECT_RADIUS_M = 0.5
 
 
 @dataclass(frozen=True)
@@ -108,7 +112,11 @@ class SemanticPerception:
         self._snapshot_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic-snapshot")
         self._closed = False
         self._worker_error: Optional[Exception] = None
-        self._goal = goal  # 本次导航的固定目标，在线程启动前确定。
+        # 场景仅包住物体流程；中间检测与评分始终使用物体语义。
+        classes = goal.object_classes or ((object_config.class_text if object_config else "") or goal.target_text,)
+        self._goal = replace(goal, search_mode=SearchMode.OBJECT, object_classes=classes)
+        # 本轮被环视否决的具体物体位置，地图系或类别不同不相互排除。
+        self._rejected_objects = []
         self._jobs: Deque[Tuple[int, Tuple[FrontierCandidate, ...]]] = deque()
         # 快照由队列持有：未命中立即释放，命中保留至主线程定位完成。
         self._snapshots: Dict[int, CapturedView] = {}
@@ -142,7 +150,7 @@ class SemanticPerception:
             self._yolo = ObjectModelProcess(object_config.python_executable,
                                             self.directory / "models", object_config.timeout_s)
             self._yolo_payload = {
-                "class_text": object_config.class_text or goal.target_text,
+                "class_texts": classes,
                 "yolo_model": str(object_config.yolo_model.resolve()), "device": object_config.device,
                 "confidence_threshold": thresholds.yolo_joint,
             }
@@ -198,12 +206,7 @@ class SemanticPerception:
                     views.append(view)
                     timestamps.add(view.timestamp_s)
                 if item.match.found:
-                    # 物体线索按单图任务去重；场景线索仍按拍摄位置和朝向去重。
-                    key = (
-                        (item.map_frame_id, view.timestamp_s)
-                        if self._goal.search_mode is SearchMode.OBJECT
-                        else _vantage_key(item.map_frame_id, view.pose)
-                    )
+                    key = (item.map_frame_id, view.timestamp_s)
                     if key not in self._clue_vantages:
                         self._clue_vantages.add(key)
                         clue = TargetClue(
@@ -211,10 +214,12 @@ class SemanticPerception:
                             job_id=item.job_id, view_id=1, bbox_norm=item.match.bbox_norm,
                             source=item.match.source, vlm_confidence=item.match.vlm_confidence,
                             yolo_confidence=item.match.yolo_confidence,
+                            class_text=item.match.class_text,
                         )
-                        self._clues.append(clue)
-                        job_clues = (clue.clue_id,)
-            if not job_clues or self._goal.search_mode is not SearchMode.OBJECT:
+                        if not self._is_rejected_clue(clue, frame):
+                            self._clues.append(clue)
+                            job_clues = (clue.clue_id,)
+            if not job_clues:
                 with self._condition:
                     self._snapshots.pop(item.job_id, None)
             self._received_jobs.append({
@@ -334,13 +339,14 @@ class SemanticPerception:
         if view.map_frame_id != frame.obstacle_map.frame_id:
             return ObjectLocalization(reason="历史图像与当前地图坐标系不同，继续下一条线索。")
         observation_frame = clue_frame(view, frame)
-        matching = max(view.yolo_observations,
+        matching = max((item for item in view.yolo_observations if item.class_text == clue.class_text),
                        key=lambda item: box_iou(clue.bbox_norm, item.bbox_norm), default=None)
         overlap = box_iou(clue.bbox_norm, matching.bbox_norm) if matching is not None else 0.0
         mask = (matching.target_mask if matching is not None
                 and overlap >= self._thresholds.box_iou else None)
         context = {
             "clue_id": clue.clue_id, "job_id": clue.job_id, "view_id": clue.view_id,
+            "class_text": clue.class_text,
             "source": "object_snapshot",
             "detector_source": clue.source, "vlm_confidence": clue.vlm_confidence,
             "yolo_confidence": clue.yolo_confidence,
@@ -372,6 +378,90 @@ class SemanticPerception:
                 "yolo_video_replaced": self._video_replaced,
                 "yolo_video_admission_skipped": self._video_admission_skipped,
             }
+
+    def capture_scene_view(self, frame: NavigationFrame, index: int) -> CapturedView:
+        """停稳后的环视快照；与普通任务共用模型，直接采集以避开暂停队列。"""
+        image = buffer_scan_image(frame)
+        offset, fov = horizontal_camera_view(frame)
+        coverage = ObservationView(frame.pose, frame.pose.yaw_rad + offset, fov, frame.timestamp_s)
+        view = CapturedView(image, coverage, frame.obstacle_map.frame_id,
+            freeze_depth(frame.depth, image.width_px, image.height_px), source="scene",
+            yolo_observations=self._detect_yolo(image))
+        self._emit({"event": "scene_view", "image": image,
+                    **view_trace(view), "view_id": index,
+                    "objects": tuple({"class_text": item.class_text, "bbox_norm": item.bbox_norm,
+                                      "confidence": item.confidence} for item in view.yolo_observations)})
+        return view
+
+    def confirm_scene(self, views, goal: TargetSearchGoal, clue: TargetClue) -> SemanticAnalysis:
+        """一次合图请求，不改变物体模式的普通推理队列。"""
+        return self._analyzer.analyze_view(scene_contact_sheet(views),
+            replace(goal, object_classes=()), trace_context={
+                "source": "scene_confirmation", "clue_id": clue.clue_id,
+                "views": tuple({**view_trace(view), "view_id": index}
+                               for index, view in enumerate(views, 1))})
+
+    def scene_confirmed(self, analysis: SemanticAnalysis) -> bool:
+        return bool(analysis.found and analysis.confidence >= self._thresholds.vlm_high)
+
+    def check_scene_snapshot_budget(self, views) -> None:
+        """环视与暂停队列共用已有图像预算，不为尾处理另开一份 2 GiB 缓存。"""
+        with self._condition:
+            ordinary = tuple(self._snapshots.values())
+            reserved = sum(view.image.width_px * view.image.height_px *
+                           (3 + 4 + YoloEConfig.max_detections) for view in ordinary)
+            if (len(ordinary) + len(views) > MAX_SNAPSHOTS
+                    or reserved + sum(snapshot_bytes(view) for view in views) > MAX_SNAPSHOT_BYTES):
+                raise RuntimeError("环视与已有队列图像超过现有快照预算")
+
+    def reject_scene_objects(self, views, frame: NavigationFrame) -> None:
+        """保存环视入镜实例位置，并清掉队列中对应线索；新结果交付时继续过滤。"""
+        unresolved = []
+        for view in views:
+            for item in view.yolo_observations:
+                location = self._locate_view_object(view, frame, item.bbox_norm, item.class_text)
+                if location is None:
+                    unresolved.append({"class_text": item.class_text, "bbox_norm": item.bbox_norm,
+                                       "timestamp_s": view.coverage.timestamp_s})
+                    continue
+                record = (view.map_frame_id, item.class_text, location)
+                if not any(old_map == record[0] and old_class == record[1]
+                           and math.dist(old_xy, location) <= REJECTED_OBJECT_RADIUS_M
+                           for old_map, old_class, old_xy in self._rejected_objects):
+                    self._rejected_objects.append(record)
+        excluded = []
+        remaining = deque()
+        for clue in self._clues:
+            if self._is_rejected_clue(clue, frame):
+                excluded.append(clue.clue_id)
+                with self._condition:
+                    self._snapshots.pop(clue.job_id, None)
+            else:
+                remaining.append(clue)
+        self._clues = remaining
+        self._emit({"event": "scene_objects_rejected", "objects": tuple(
+            {"map_frame_id": map_id, "class_text": name, "world_xy": xy}
+            for map_id, name, xy in self._rejected_objects), "clue_ids": tuple(excluded),
+            "unlocalized_objects": tuple(unresolved), "association_radius_m": REJECTED_OBJECT_RADIUS_M})
+
+    def _is_rejected_clue(self, clue: TargetClue, frame: NavigationFrame) -> bool:
+        candidates = [xy for map_id, name, xy in self._rejected_objects
+                      if map_id == clue.map_frame_id and name == clue.class_text]
+        if not candidates:
+            return False
+        with self._condition:
+            view = self._snapshots.get(clue.job_id)
+        if view is None or view.map_frame_id != frame.obstacle_map.frame_id:
+            return False
+        location = self._locate_view_object(view, frame, clue.bbox_norm, clue.class_text)
+        return location is not None and any(math.dist(location, xy) <= REJECTED_OBJECT_RADIUS_M for xy in candidates)
+
+    def _locate_view_object(self, view, frame, bbox, class_text):
+        observations = (item for item in view.yolo_observations if item.class_text == class_text)
+        matching = max(observations, key=lambda item: box_iou(bbox, item.bbox_norm), default=None)
+        mask = matching.target_mask if matching is not None and box_iou(bbox, matching.bbox_norm) >= self._thresholds.box_iou else None
+        return localize_object(clue_frame(view, frame), bbox_norm=bbox, source="yoloe", mask=mask,
+            context={}, on_event=lambda event: None).target_world_xy
 
     def wait_for_result(self, timeout_s: float = 1.0) -> None:
         """无完成结果时短暂等待通知；后台异常在等待前后传回导航线程。"""
@@ -465,8 +555,7 @@ class SemanticPerception:
                 captured = CapturedView(buffered, coverage, map_frame_id,
                     freeze_depth(depth_m, image.width_px, image.height_px), source="video",
                     yolo_observations=observations)
-                direct = (match_target(SemanticAnalysis(None), observations, self._thresholds,
-                                       self._goal.search_mode) if high else None)
+                direct = match_target(SemanticAnalysis(None), observations, self._thresholds) if high else None
                 if self._enqueue_snapshot(captured, (), direct_match=direct):
                     self._video_vantages.add(key)
         # 先发布命中，再记录耗时，避免日志/可视化延迟阻塞高分交付。
@@ -538,7 +627,8 @@ class SemanticPerception:
                     image.height_px, image.width_px).astype(bool)
                 mask.flags.writeable = False
             observations.append(TargetObservation(TargetVisibility.VISIBLE, bbox_norm=tuple(item["bbox_norm"]),
-                                confidence=item["confidence"], source="yoloe", target_mask=mask))
+                                confidence=item["confidence"], source="yoloe", target_mask=mask,
+                                class_text=item["class_text"]))
         return tuple(observations)
 
     def _scan_work_done(self, future):
@@ -623,7 +713,7 @@ class SemanticPerception:
                     "markers": tuple({"label": f"F{index}", "candidate_id": f"snapshot:{job_id}:{index}",
                                       "region_id": item.candidate_id, "world_xy": item.world_xy, "view_id": 1}
                                      for index, item in enumerate(candidates, 1))})
-            matched = match_target(job_result, view.yolo_observations, self._thresholds, self._goal.search_mode)
+            matched = match_target(job_result, view.yolo_observations, self._thresholds)
             ready_s = time.monotonic()
             with self._condition:
                 self._active_job = None
@@ -633,7 +723,7 @@ class SemanticPerception:
                 if not self._closed:
                     self._completed.append(_CompletedAnalysis(job_id, job_result, view.map_frame_id,
                         view.coverage, candidates, matched, view.source))
-                if not matched.found or self._goal.search_mode is not SearchMode.OBJECT or self._closed:
+                if not matched.found or self._closed:
                     self._snapshots.pop(job_id, None)
                 self._condition.notify_all()
             result_record = {**asdict(job_result), "found": matched.found, "bbox_norm": matched.bbox_norm,

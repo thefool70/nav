@@ -47,7 +47,7 @@
         <mxCell id="subtitle" value="Habitat / Hermes 共用主流程 · 状态框保留 SearchPhase 原名；同名 A/B/C/D 端口表示跨区连接" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=17;fontColor=#334155;fontStyle=0;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="40" y="85" width="2520" height="40" />
         </mxCell>
-        <mxCell id="start" value="&lt;b&gt;启动与装配&lt;/b&gt;&lt;br&gt;读取并校验配置 → 创建感知 → 创建设备&lt;br&gt;YOLOE / 已选本地 Qwen 预热；Hermes 启动前移&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;launch.py::_assemble_and_run / environment.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="start" value="&lt;b&gt;启动与装配&lt;/b&gt;&lt;br&gt;校验配置；scene 先由 Qwen 生成固定物体清单&lt;br&gt;共用 YOLOE / Qwen 预热与设备准备&lt;br&gt;launch.py::_assemble_and_run" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="95" y="280" width="440" height="120" />
         </mxCell>
         <mxCell id="frame" value="&lt;b&gt;取帧与接收结果 · 接口 D&lt;/b&gt;&lt;br&gt;位姿 + RGB-D + 地图；接收后台增量&lt;br&gt;更新 SearchState，优先领取下一条目标线索&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;app.py::run_navigation_cycle / _prepare_state&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#eaf2ff;strokeColor=#628ac4;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
@@ -94,7 +94,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="recovery" value="&lt;b&gt;动作失败的恢复规则&lt;/b&gt;&lt;br&gt;扫描转向：按真实朝向重建扫描&lt;br&gt;探索失败：排除尝试点；未知超限/阻塞屏蔽区域&lt;br&gt;回退失败：跳过返回节点、释放其暂存方向&lt;br&gt;场景返回失败：丢弃线索；物体停靠失败：换点" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="recovery" value="&lt;b&gt;动作失败恢复&lt;/b&gt;&lt;br&gt;扫描失败重建方向；探索失败排除尝试点&lt;br&gt;回退失败跳过父节点；物体停靠失败换点&lt;br&gt;场景环视转向失败：放弃当前线索" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="95" y="1440" width="440" height="185" />
         </mxCell>
         <mxCell id="wall" value="&lt;b&gt;Hermes 阻塞处理&lt;/b&gt;&lt;br&gt;3 秒净位移不足 0.25 m → 取消确认并重发原目标&lt;br&gt;重试后 3 秒仍无有效平移／未知路径超限 → 人工墙&lt;br&gt;取消并确认终态后反馈 PATH_BLOCKED / PATH_UNKNOWN&lt;br&gt;墙在本次运行持续生效，限制后续路径&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;adapters/hermes/adapter.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
@@ -190,16 +190,16 @@
         <mxCell id="aport" value="&lt;b&gt;A ↔ B · 目标处理优先&lt;/b&gt;&lt;br&gt;每周期先取线索；执行中的动作先同步结束&lt;br&gt;目标处理结束后，按其结果完成、停止或恢复探索" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f3f5f8;strokeColor=#9ba8b8;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;arcSize=50;dashed=1;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="715" y="1840" width="430" height="115" />
         </mxCell>
-        <mxCell id="B" value="&lt;b&gt;B · 激活目标线索&lt;/b&gt;&lt;br&gt;保留拍摄位姿、历史 RGB-D 与目标框&lt;br&gt;scene → 场景返回；object → 历史定位" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;arcSize=50;dashed=1;" vertex="1" parent="1">
+        <mxCell id="B" value="&lt;b&gt;B · 激活目标线索&lt;/b&gt;&lt;br&gt;保存拍摄位姿、历史 RGB-D、类别与框&lt;br&gt;object / scene 共用历史定位与接近" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;arcSize=50;dashed=1;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1350" y="280" width="530" height="95" />
         </mxCell>
-        <mxCell id="scene" value="&lt;b&gt;REVISITING_TARGET · 场景返回&lt;/b&gt;&lt;br&gt;返回拍摄点并对齐原朝向（≤ 0.25 m / ≤ 5°）&lt;br&gt;到位 → COMPLETE；无须再次调用 VLM&lt;br&gt;返回失败 / 坐标系不符 → 下一线索，耗尽回 A&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;target.py::continue_scene_target&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="scene" value="&lt;b&gt;CONFIRMING_SCENE · 场景尾处理&lt;/b&gt;&lt;br&gt;停靠后原地一圈、分方向停稳采图&lt;br&gt;编号网格合图 → Qwen 综合判断&lt;br&gt;通过 → COMPLETE；否决 → 排除入镜线索并继续&lt;br&gt;app.py::_confirm_scene_at_target" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1350" y="440" width="530" height="125" />
         </mxCell>
         <mxCell id="localize" value="&lt;b&gt;LOCALIZING_OBJECT · 历史定位&lt;/b&gt;&lt;br&gt;复用置信度融合认可的历史框&lt;br&gt;YOLOE 掩码 → 框内深度 → 地图障碍射线&lt;br&gt;得到目标坐标才规划停靠；不再请求 VLM&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;target.py / perception/object_localizer.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1350" y="650" width="530" height="145" />
         </mxCell>
-        <mxCell id="approach" value="&lt;b&gt;APPROACHING_OBJECT · 规划并接近&lt;/b&gt;&lt;br&gt;选择目标附近可达、有净空的停靠点并对准目标&lt;br&gt;命令成功 → COMPLETE，无到达后视觉复查&lt;br&gt;运动失败换点：每条线索最多 3 次停靠&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;target.py::plan_approach&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="approach" value="&lt;b&gt;APPROACHING_OBJECT · 规划并接近&lt;/b&gt;&lt;br&gt;选择可达、有净空的停靠点并对准目标&lt;br&gt;成功：object 完成；scene 进入环视确认&lt;br&gt;运动失败换点，每条线索最多三次停靠&lt;br&gt;target.py::plan_approach" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1350" y="870" width="530" height="135" />
         </mxCell>
         <mxCell id="history" value="&lt;b&gt;当前线索失败 → 继续历史&lt;/b&gt;&lt;br&gt;无法定位 / 无停靠点 / 三次停靠失败&lt;br&gt;保持当前位置，取下一条线索 → 历史定位&lt;br&gt;线索暂时用完但仍有任务：恢复已有队列并等待&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;discard_object_clue / continue_object_history&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fff4e3;strokeColor=#c99740;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
@@ -214,13 +214,13 @@
         <mxCell id="stopped" value="&lt;b&gt;STOPPED · 停止但未完成&lt;/b&gt;&lt;br&gt;物体保底流程结束；CLI 退出码 3" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#fceeed;strokeColor=#bc706d;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1350" y="1645" width="530" height="80" />
         </mxCell>
-        <mxCell id="complete" value="&lt;b&gt;COMPLETE · 搜索成功&lt;/b&gt;&lt;br&gt;场景返回到位 / 物体停靠命令成功&lt;br&gt;CLI 退出码 0" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="complete" value="&lt;b&gt;COMPLETE · 搜索成功&lt;/b&gt;&lt;br&gt;物体停靠成功 / 停靠后场景环视确认通过&lt;br&gt;CLI 退出码 0" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#e9f6ef;strokeColor=#52966c;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="1350" y="1850" width="530" height="105" />
         </mxCell>
-        <mxCell id="b1" value="scene" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="B" target="scene">
+        <mxCell id="b1" value="scene 停靠成功" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="approach" target="scene">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
-        <mxCell id="b2" value="object" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="B" target="localize">
+        <mxCell id="b2" value="共用物体流程" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="B" target="localize">
           <mxGeometry as="geometry" relative="1">
             <Array as="points">
               <mxPoint x="1310" y="327" />
@@ -259,7 +259,7 @@
         <mxCell id="b9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#60758d;fontColor=#60758d;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="fallback" target="stopped">
           <mxGeometry as="geometry" relative="1" />
         </mxCell>
-        <mxCell id="b10" value="场景到位" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#52966c;fontColor=#52966c;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="scene" target="complete">
+        <mxCell id="b10" value="场景确认通过" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#52966c;fontColor=#52966c;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="scene" target="complete">
           <mxGeometry as="geometry" relative="1">
             <Array as="points">
               <mxPoint x="1945" y="502" />
@@ -267,7 +267,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="b11" value="停靠成功" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#52966c;fontColor=#52966c;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="approach" target="complete">
+        <mxCell id="b11" value="object 停靠成功" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#52966c;fontColor=#52966c;fontSize=13;fontFamily=Microsoft YaHei;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="approach" target="complete">
           <mxGeometry as="geometry" relative="1">
             <Array as="points">
               <mxPoint x="1330" y="937" />
@@ -281,7 +281,7 @@
         <mxCell id="snapshot" value="&lt;b&gt;串行快照准备&lt;/b&gt;&lt;br&gt;RGB 打包、同帧深度复制到内存&lt;br&gt;准备一张即进入模型 FIFO&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;semantic_queue.py / snapshot_store.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="2075" y="450" width="450" height="105" />
         </mxCell>
-        <mxCell id="vlm" value="&lt;b&gt;单图 VLM 分析&lt;/b&gt;&lt;br&gt;物体：score + 框 + confidence；场景：found + confidence&lt;br&gt;逐项校验：检测失败与有效未命中分开&lt;br&gt;本地 Qwen：关闭思考 + JSON Schema&lt;br&gt;&lt;font color=&quot;#64748b&quot; style=&quot;font-size:12px&quot;&gt;openai_compatible.py / perception/analyzer.py&lt;/font&gt;" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="vlm" value="&lt;b&gt;单图 VLM 分析&lt;/b&gt;&lt;br&gt;共用物体输出：score + 类别 + 框 + confidence&lt;br&gt;逐项校验，失败与未命中分开&lt;br&gt;场景尾处理另用合图判断 found + confidence&lt;br&gt;openai_compatible.py / perception/analyzer.py" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry as="geometry" x="2075" y="625" width="450" height="125" />
         </mxCell>
         <mxCell id="cache" value="&lt;b&gt;保存结果，等待主循环接收&lt;/b&gt;&lt;br&gt;图像分数赋给同图可见候选；首次有效分保留&lt;br&gt;高分单路 / 中等分同框联合：保留目标框与深度&lt;br&gt;有效扫描检测才登记已检查覆盖；失败单独记录" style="rounded=1;arcSize=12;whiteSpace=wrap;html=1;fillColor=#f1ecfb;strokeColor=#9675bd;strokeWidth=1.5;fontColor=#20324a;fontFamily=Microsoft YaHei;fontSize=16;spacing=12;align=center;verticalAlign=middle;" vertex="1" parent="1">
@@ -321,6 +321,9 @@
               <mxPoint x="2545.0" y="875.0" />
             </Array>
           </mxGeometry>
+        </mxCell>
+        <mxCell id="scene_rejected" value="未确认：继续线索 / 探索" source="scene" target="history" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#bc8a49;fontSize=13;labelBackgroundColor=#ffffff;">
+          <mxGeometry as="geometry" relative="1" />
         </mxCell>
       </root>
     </mxGraphModel>

@@ -61,7 +61,7 @@ ChassisInterface ──► NavigationFrame
 - `app.py` 负责导航循环与单周期编排，并把可恢复的运动结果送回状态机。
 - 搜索核心按完整职责组织：`core/scan.py`（扫描规划、采集进度与覆盖复用）、
   `core/exploration.py`（Frontier 生成、选点、历史与分支回退）、
-  `core/target.py`（目标线索、场景返回、物体接近与停靠）。
+  `core/target.py`（目标线索、物体接近与停靠、场景确认）。
 - `perception/` 组织取帧、视觉队列、语义判定与历史物体定位；不直接控制底盘，
   也不修改搜索状态。
 - `adapters/` 负责设备协议、坐标转换、地图归一化和视觉模型请求。
@@ -100,7 +100,7 @@ ChassisInterface ──► NavigationFrame
 | 模式 | 发现目标 | VLM 的作用 | 后续行为 |
 | --- | --- | --- | --- |
 | 物体搜索 | YOLOE 逐视频帧检测，扫描图及视频候选由 VLM 分析 | 单图评分、框选与置信度；与同帧 YOLOE 融合 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
-| 场景搜索 | 后台检查前沿扫描采集的固定画面 | 同一次请求判断场景与评分 Frontier | 返回拍摄位置并对齐朝向，搜索完成 |
+| 场景搜索 | Qwen 先生成固定物体清单，复用物体搜索 | 物体判别和方向评分；停靠后综合环视合图确认场景 | 确认通过才完成；否决后排除入镜线索并继续物体流程 |
 
 两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，到位后
 再观察和选择下一目标。新出现的 Frontier 优先探索，未选方向暂存；新候选耗尽
@@ -113,13 +113,13 @@ ChassisInterface ──► NavigationFrame
 返回节点未完成时保留实际位置，跳过该返回节点并重新检查有效方向，不直接结束搜索。
 
 命令行默认使用异步 FIFO 视觉队列。扫描每采集一张图片就提交分析，不等待整轮收齐。
-模型直接查看原图，返回图片评分、目标框和置信度（场景模式返回是否已进入场景及置信度），不标注前沿点。
+普通队列直接查看原图，返回图片评分、目标框和置信度；场景任务额外返回清单内的物体类别，不标注前沿点。
 同图视场内、地图视线可见的候选共用图片评分。YOLOE-26s 默认以 10 Hz 上限检测最新视频帧，
 包括移动和转向期间；中等分候选送同帧给 VLM 确认，高分可直接形成目标线索。
 初始门槛为 VLM ≥ 0.90 或 YOLOE ≥ 0.70；或 VLM ≥ 0.60、YOLOE ≥ 0.30 且同帧框 IoU ≥ 0.30。
 两路置信度不求平均，方向评分不参与命中判定；阈值尚未统计校准，可在 `config.json` 调整。
 缺少语义分时按几何分继续走，评分只在下一次决策生效。
-后台按结果可用顺序交付目标线索，当前动作完成后才处理。场景模式返回拍摄位置并对齐朝向后完成，不进行到场视觉复查。
+后台按结果可用顺序交付目标线索，当前动作完成后才处理。场景模式沿用物体接近，停靠后原地旋转一圈、分方向停稳拍照，组成带编号网格图交给 Qwen 确认。
 物体模式仅用通过门槛的目标框在同帧历史 RGB-D 上定位；优先复用同帧匹配的 YOLOE 掩码，
 没有对应掩码或掩码测距失败时使用框内深度。无法用深度定位时，沿框中心方向查询地图中的首个障碍，
 将障碍表面作为目标位置假设。
@@ -220,6 +220,9 @@ VLM 默认使用随车 Ollama 的 `qwen3.5:4b`，接口为
 `--rerun-viewer record` 临时覆盖，三种方式均保存 RRD。
 在开发机用 `bash hardware/hermes/tunnel.sh --run <hermes 导航参数...>` 启动随车导航，
 会默认开启 Rerun 网页并自动转发到本机；[命令与访问地址](docs/hermes.md#从开发机启动并自动转发)。
+若希望窗口直接显示在随车屏幕，改用 `tunnel.sh --desktop <hermes 导航参数...>`；
+也可登录 SSH 后执行 `bash hardware/hermes/run_desktop.sh <hermes 导航参数...>`，
+见 [随车桌面启动](docs/hermes.md#ssh-启动在随车屏幕查看)。
 
 配置布尔值可临时覆盖：`--rerun` / `--no-rerun`、`--debug-random-score` /
 `--no-debug-random-score`、`--debug-frontier` / `--no-debug-frontier`。
@@ -288,7 +291,7 @@ python -m robot_nav hermes --preflight-only
 | `app.py`、`core/navigator.py` | 取帧与执行编排；输入检查、感知归并、行为分派与反馈 |
 | `core/scan.py` | 扫描规划、转向采集推进、候选快照上下文与覆盖复用 |
 | `core/exploration.py` | 前沿提取与关联、评分选点、历史暂存、移动恢复与分支回退 |
-| `core/target.py` | 目标线索、场景返回、物体接近与停靠选点 |
+| `core/target.py` | 共用物体线索、接近与停靠；场景确认出口 |
 | `core/models.py` | 输入输出、搜索状态与结果构造 |
 | `core/geometry.py` | 坐标与角度计算、动作转换、路径未知长度 |
 | `core/timing.py` | 共用阶段计时，不读取或写入文件 |
@@ -306,8 +309,9 @@ python -m robot_nav hermes --preflight-only
 YOLOE 随导航启动预热，直接复用其分割结果；退出导航释放进程，默认使用已有
 `robot-nav` 模型环境。可用
 `--object-python` 指定已安装 PyTorch、ultralytics 的解释器，
-`--yolo-frequency-hz 10` 设置视频检测上限，`--object-class` 指定 YOLOE 简短英文类别，`--object-device` 选择设备；场景模式和
-随机评分模式不启动本地模型。详细流程与阈值见 [算法说明](docs/algorithm.md)。
+`--yolo-frequency-hz 10` 设置视频检测上限，`--object-class` 指定物体模式的简短类别，`--object-device` 选择设备。
+场景模式启动同一个 YOLOE 进程，类别由 Qwen 生成并固定；只有随机评分模式不启动本地模型。
+场景清单生成失败重试一次，仍失败则结束任务。详细流程与阈值见 [算法说明](docs/algorithm.md)。
 
 这是算法原型，不是功能安全系统。核心输出高层相对位姿，实际路径规划、避障和
 执行反馈由 Adapter 后面的仿真器或底盘负责。真机运行必须有人能够立即急停；

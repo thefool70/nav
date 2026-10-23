@@ -23,6 +23,7 @@ from ..perception.analyzer import (
     semantic_analysis_schema,
     VlmInputImage,
     VlmInteraction,
+    _extract_json_mapping,
 )
 
 
@@ -69,19 +70,24 @@ class OpenAICompatibleTargetObserver:
         self._on_vlm_interaction = on_vlm_interaction
         self._interaction_index = 0
         self._interaction_lock = threading.Lock()
+        self._request_lock = threading.Lock()
 
     def analyze_view(
         self, image: VlmInputImage, goal: TargetSearchGoal,
         *, trace_context: Optional[Mapping[str, Any]] = None,
     ) -> SemanticAnalysis:
         """单张原图一次请求，同时给出方向分和目标框；快照关联不发送给模型。"""
-        prompt = build_semantic_analysis_prompt(goal.target_text, goal.search_mode)
-        interaction = self._begin_interaction("semantic_analysis", prompt, image, context=trace_context)
+        prompt = build_semantic_analysis_prompt(goal.target_text, goal.search_mode, goal.object_classes)
+        task = "scene_confirmation" if goal.search_mode is SearchMode.SCENE else "semantic_analysis"
+        if goal.search_mode is SearchMode.SCENE:
+            prompt += " The numbered grid shows different directions from ONE stationary position. Consider all tiles together."
+        interaction = self._begin_interaction(task, prompt, image, context=trace_context)
         assistant_text, response_json = "", ""
         try:
-            payload, response_json = self._request_model(prompt, image, goal.search_mode)
+            payload, response_json = self._request_model(prompt, image, goal.search_mode,
+                schema=semantic_analysis_schema(goal.search_mode, goal.object_classes))
             assistant_text = self._response_text(payload)
-            parsed = parse_semantic_analysis_response(assistant_text, goal.search_mode)
+            parsed = parse_semantic_analysis_response(assistant_text, goal.search_mode, goal.object_classes)
         except (_ModelRequestError, OSError, ValueError) as exc:
             self._finish_interaction(interaction, assistant_text, response_json, error=_exception_text(exc))
             return SemanticAnalysis(None, detection_error=_failure_reason("单图分析失败", exc),
@@ -94,16 +100,42 @@ class OpenAICompatibleTargetObserver:
         )
         return result
 
+    def generate_scene_objects(self, scene: str) -> Tuple[str, ...]:
+        """场景前处理的一次纯文本请求；重试与任务结束由启动层负责。"""
+        prompt = (
+            f'Scene: {json.dumps(scene, ensure_ascii=False)}. '
+            'List 3-5 distinctive, visually detectable object categories strongly associated with this scene. '
+            'Avoid generic tables or chairs. Use short English category names suitable for YOLOE. '
+            'Return JSON only: {"objects":["category one","category two","category three"]}.'
+        )
+        schema = {"type": "object", "properties": {"objects": {
+            "type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 5}},
+            "required": ["objects"], "additionalProperties": False}
+        try:
+            payload, _ = self._request_model(prompt, None, SearchMode.OBJECT, schema=schema)
+            objects = _extract_json_mapping(self._response_text(payload)).get("objects")
+            if not isinstance(objects, list) or not 3 <= len(objects) <= 5:
+                raise ValueError("场景清单必须包含 3–5 个物体类别")
+            if any(not isinstance(item, str) or not item.strip() or len(item.strip()) > 80 for item in objects):
+                raise ValueError("场景清单包含无效类别名称")
+            classes = tuple(item.strip() for item in objects)
+            if len({item.casefold() for item in classes}) != len(classes):
+                raise ValueError("场景清单包含重复类别")
+            return classes
+        except (_ModelRequestError, OSError, ValueError) as exc:
+            raise RuntimeError(_failure_reason("场景物体清单生成失败", exc)) from exc
+
     def _request_model(
         self,
         prompt: str,
-        image: VlmInputImage,
+        image: Optional[VlmInputImage],
         search_mode: SearchMode,
+        *, schema: Optional[Mapping[str, Any]] = None,
     ) -> Tuple[Any, str]:
         """发送带图请求，并保留未经提取的完整 JSON 回应。"""
-        image_url = _packed_rgb_to_png_data_url(image)
+        image_url = _packed_rgb_to_png_data_url(image) if image is not None else None
         if self._config.api_format is OpenAIApiFormat.CHAT_COMPLETIONS:
-            payload = _chat_completions_payload(self._config, prompt, image_url, search_mode)
+            payload = _chat_completions_payload(self._config, prompt, image_url, search_mode, schema=schema)
         elif self._config.api_format is OpenAIApiFormat.RESPONSES:
             payload = _responses_payload(self._config, prompt, image_url)
         else:
@@ -113,7 +145,9 @@ class OpenAICompatibleTargetObserver:
                 image_url,
             )
 
-        response_payload = self._post_json(payload)
+        # 环视确认可与暂停前已发出的请求相遇；同一服务仍串行请求。
+        with self._request_lock:
+            response_payload = self._post_json(payload)
         response_json = json.dumps(
             response_payload,
             ensure_ascii=False,
@@ -229,8 +263,9 @@ class OpenAICompatibleTargetObserver:
 def _chat_completions_payload(
     config: OpenAICompatibleConfig,
     prompt: str,
-    image_url: str,
+    image_url: Optional[str],
     search_mode: SearchMode,
+    *, schema: Optional[Mapping[str, Any]] = None,
 ) -> Mapping[str, Any]:
     """构造 Chat Completions 多模态请求。"""
     payload = {
@@ -240,10 +275,10 @@ def _chat_completions_payload(
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt},
-                    {
+                    *([{
                         "type": "image_url",
                         "image_url": {"url": image_url},
-                    },
+                    }] if image_url is not None else []),
                 ],
             }
         ],
@@ -259,7 +294,7 @@ def _chat_completions_payload(
         payload["response_format"] = {
             "type": "json_schema",
             "json_schema": {"name": "navigation_view", "strict": True,
-                            "schema": semantic_analysis_schema(search_mode)},
+                            "schema": schema if schema is not None else semantic_analysis_schema(search_mode)},
         }
         payload["max_tokens"] = config.max_output_tokens
     return payload
@@ -268,7 +303,7 @@ def _chat_completions_payload(
 def _responses_payload(
     config: OpenAICompatibleConfig,
     prompt: str,
-    image_url: str,
+    image_url: Optional[str],
 ) -> Mapping[str, Any]:
     """构造 Responses API 多模态请求。"""
     payload = {
@@ -278,7 +313,7 @@ def _responses_payload(
                 "role": "user",
                 "content": [
                     {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": image_url},
+                    *([{"type": "input_image", "image_url": image_url}] if image_url is not None else []),
                 ],
             }
         ],
@@ -294,10 +329,14 @@ def _responses_payload(
 def _anthropic_messages_payload(
     config: OpenAICompatibleConfig,
     prompt: str,
-    image_url: str,
+    image_url: Optional[str],
 ) -> Mapping[str, Any]:
     """构造 Anthropic Messages 多模态请求，并显式关闭 thinking。"""
-    media_type, image_base64 = _image_data_url_parts(image_url)
+    image_content = []
+    if image_url is not None:
+        media_type, image_base64 = _image_data_url_parts(image_url)
+        image_content = [{"type": "image", "source": {
+            "type": "base64", "media_type": media_type, "data": image_base64}}]
     return {
         "model": config.model.strip(),
         "max_tokens": config.max_output_tokens,
@@ -306,14 +345,7 @@ def _anthropic_messages_payload(
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": image_base64,
-                        },
-                    },
+                    *image_content,
                     {"type": "text", "text": prompt},
                 ],
             }

@@ -119,6 +119,8 @@ class TargetSearchGoal:
 
     target_text: str
     search_mode: SearchMode = SearchMode.OBJECT
+    # 场景前处理的固定清单；空元组时仍是原单物体目标。
+    object_classes: Tuple[str, ...] = ()
 
 
 class TargetVisibility(Enum):
@@ -144,6 +146,7 @@ class TargetObservation:
     reason: str = ""
     source: str = ""
     confidence: Optional[float] = None
+    class_text: str = ""
 
 
 class TargetConfirmation(Enum):
@@ -165,6 +168,7 @@ class SemanticAnalysis:
     interaction_id: Optional[int] = None
     # 目标存在的置信度，与探索方向的 image_score 独立；缺失表示检测输出无效。
     confidence: Optional[float] = None
+    class_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -182,6 +186,7 @@ class TargetClue:
     source: str = "vlm"
     vlm_confidence: Optional[float] = None
     yolo_confidence: Optional[float] = None
+    class_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -317,6 +322,7 @@ class SearchPhase(Enum):
     REVISITING_TARGET = "revisiting_target"
     LOCALIZING_OBJECT = "localizing_object"
     APPROACHING_OBJECT = "approaching_object"
+    CONFIRMING_SCENE = "confirming_scene"
     STOPPED = "stopped"
     COMPLETE = "complete"
     FAILED = "failed"
@@ -404,6 +410,7 @@ class NavigationStatus(Enum):
     NEEDS_SCAN_CAPTURE = "needs_scan_capture"
     NEEDS_FRONTIER_SCORES = "needs_frontier_scores"
     NEEDS_OBJECT_LOCALIZATION = "needs_object_localization"
+    NEEDS_SCENE_CONFIRMATION = "needs_scene_confirmation"
     MISSING_DATA = "missing_data"
 
 
@@ -433,8 +440,7 @@ class ActionPurpose(Enum):
     EXPLORE = "explore.move"
     RESUME = "explore.resume"
     BACKTRACK = "backtrack.return"
-    REVISIT = "target.revisit"
-    REVISIT_TURN = "target.revisit_turn"
+    SCENE_TURN = "scene.turn"
     APPROACH = "object.approach"
     FALLBACK = "object.fallback_return"
     FALLBACK_TURN = "object.fallback_turn"

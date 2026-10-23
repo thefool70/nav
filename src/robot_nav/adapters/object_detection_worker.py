@@ -49,6 +49,7 @@ def main() -> int:
                 observations, count = model.detect_boxes(rgb)
                 result = {"observations": [{
                     "bbox_norm": item.bbox_norm, "confidence": item.confidence,
+                    "class_text": item.class_text,
                     "mask_bits": (base64.b64encode(np.packbits(item.target_mask).tobytes()).decode("ascii")
                                   if item.target_mask is not None else None),
                 } for item in observations], "candidate_count": count}
@@ -68,7 +69,7 @@ def _load_model(request, progress):
     # Ultralytics 在工作目录查找 mobileclip2_b.ts，避免切换运行目录时重下载。
     os.chdir(model_path.parent)
     return YoloEDetector(YoloEConfig(
-        class_text=request["class_text"], model_path=model_path,
+        class_texts=tuple(request["class_texts"]), model_path=model_path,
         device=request["device"], confidence_threshold=request["confidence_threshold"],
     ), on_stage=progress)
 

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from functools import partial
 from time import monotonic
@@ -30,7 +31,7 @@ from .adapters.chassis import (
     RecoverableMotionError,
 )
 from .core.exploration import FrameFrontierCache, complete_frontier_selection
-from .core.geometry import action_command
+from .core.geometry import action_command, shortest_turn_to_heading
 from .core.models import (
     ActionConstraint,
     ActionPurpose,
@@ -51,7 +52,9 @@ from .core.navigator import (
     receive_perception,
     target_handling_active,
 )
-from .core.scan import capture_context, record_scanned_direction
+from .core.scan import capture_context, record_scanned_direction, horizontal_camera_view
+from .core.target import (scene_turn, finish_scene_confirmation, discard_object_clue,
+                          TURN_TOLERANCE_RAD)
 from .core.timing import TimingSpans, measure_stage
 from .perception.semantic_queue import SemanticPerception
 from .run_log import (
@@ -119,6 +122,7 @@ def run_navigation(
             NavigationStatus.NEEDS_SCAN_CAPTURE,
             NavigationStatus.NEEDS_FRONTIER_SCORES,
             NavigationStatus.NEEDS_OBJECT_LOCALIZATION,
+            NavigationStatus.NEEDS_SCENE_CONFIRMATION,
         }:
             # 扫描后的缓存评分已在本周期处理；其他未满足的感知请求交给下一帧。
             continue
@@ -155,12 +159,18 @@ def run_navigation_cycle(
     with measure_stage(timings, "cycle.navigate"):
         decision = navigate(frame, goal, working_state, timings=timings, frontier_cache=frontier_cache)
     # 核心只提出感知请求；运行层取得结果后，仍由核心决定下一步。
-    if decision.status is NavigationStatus.NEEDS_OBJECT_LOCALIZATION:
+    if decision.status in (NavigationStatus.NEEDS_OBJECT_LOCALIZATION,
+                            NavigationStatus.NEEDS_SCENE_CONFIRMATION):
         chassis.stop()  # 历史定位可能等待模型，不让上一动作在此期间继续运行。
     with measure_stage(timings, "cycle.supply_perception"):
         decision = _supply_perception(frame, goal, decision, perception,
             timings=timings, frontier_cache=frontier_cache,
         )
+    if decision.status is NavigationStatus.NEEDS_SCENE_CONFIRMATION and perception is not None:
+        chassis.stop()
+        _sync_perception_pause(decision.state, perception)
+        frame, decision = _confirm_scene_at_target(chassis, frame, goal, decision, perception,
+                                                  on_cycle=on_cycle)
     if perception is not None:
         _sync_perception_pause(decision.state, perception)
         decision = _merge_perception_diagnostics(decision, perception)
@@ -169,6 +179,56 @@ def run_navigation_cycle(
                           on_cycle=on_cycle, on_timing=on_timing)
     # 先记录将要执行的决策，再同步运动；可恢复失败在返回前交给核心解释。
     return _execute_action(chassis, decision, frame)
+
+
+def _confirm_scene_at_target(chassis, frame, goal, decision, perception, *, on_cycle):
+    """物体停靠后的顺序尾处理：一圈采图、一次确认，再交回物体搜索。"""
+    from .perception.semantic_queue import MAX_SNAPSHOTS
+
+    state = decision.state
+    clue = state.active_target_clue
+    _, fov = horizontal_camera_view(frame)
+    # 相邻画面有重叠，单次转向不超过 90°；最后返回初始朝向完成整圈。
+    count = max(4, math.ceil(2 * math.pi / (0.8 * fov)))
+    if count > MAX_SNAPSHOTS:
+        raise RuntimeError("相机视场过小，完整环视会超过现有快照上限")
+    initial_heading = frame.pose.yaw_rad
+    map_id = frame.obstacle_map.frame_id
+    views = []
+    for index in range(count + 1):
+        if index:
+            heading = initial_heading + index * (2 * math.pi / count)
+            turn = shortest_turn_to_heading(frame.pose.yaw_rad, heading)
+            decision = scene_turn(state, turn, index, count)
+            if on_cycle is not None:
+                on_cycle(frame, None, decision)
+            decision = _execute_action(chassis, decision, frame)
+            if decision.state.phase is not SearchPhase.CONFIRMING_SCENE:
+                return frame, decision
+            frame = chassis.read_frame()
+            if frame.obstacle_map.frame_id != map_id:
+                return frame, discard_object_clue(state, "环视期间地图坐标系改变，放弃当前线索。")
+            error = abs(shortest_turn_to_heading(frame.pose.yaw_rad, heading))
+            if error > TURN_TOLERANCE_RAD:
+                return frame, discard_object_clue(state, "环视转向未到达预期朝向，放弃当前线索。",
+                                                  heading_error_rad=error)
+        if index == count:
+            break
+        view = perception.capture_scene_view(frame, index + 1)
+        views.append(view)
+        perception.check_scene_snapshot_budget(views)
+
+    chassis.stop()
+    analysis = perception.confirm_scene(views, goal, clue)
+    if analysis.found is None:
+        raise RuntimeError(analysis.detection_error or "环视场景确认失败，未获得有效判断")
+    confirmed = perception.scene_confirmed(analysis)
+    if analysis.found is False:
+        perception.reject_scene_objects(views, frame)
+    return frame, finish_scene_confirmation(state, confirmed,
+        clue_id=clue.clue_id, class_text=clue.class_text,
+        interaction_id=analysis.interaction_id, scene_found=analysis.found,
+        scene_confidence=analysis.confidence, view_count=len(views))
 
 
 def _prepare_state(

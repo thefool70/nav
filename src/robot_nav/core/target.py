@@ -1,4 +1,4 @@
-"""目标处理：线索分派、场景返回、物体接近与失败恢复。
+"""目标处理：共用物体接近与失败恢复，场景只增加停靠后的确认出口。
 
 continue_target_search 是入口；定位由运行层提供，停靠选点在本文件末尾。"""
 
@@ -35,7 +35,6 @@ from .models import (
 from .scan import reset_scan_after_move
 
 
-BACKTRACK_ARRIVAL_M = 0.25
 TURN_TOLERANCE_RAD = math.radians(5.0)
 CAPTURE_ARRIVAL_M = 0.25
 MAX_APPROACH_MOVES = 3
@@ -55,14 +54,15 @@ def continue_target_search(
     返回 None 表示没有待处理目标，导航入口可以继续扫描或探索。
     """
     if state.active_target_clue is None:
-        return continue_object_history(frame, state) if goal.search_mode is SearchMode.OBJECT else None
-    if goal.search_mode is SearchMode.SCENE:
-        return continue_scene_target(frame, state)
+        return continue_object_history(frame, state)
     clue = state.active_target_clue
     if state.object_approach.fallback_clue is None:
         state = replace(state, object_approach=replace(state.object_approach, fallback_clue=clue))
     if clue.map_frame_id != frame.obstacle_map.frame_id:
         return discard_object_clue(state, "物体线索与当前地图坐标系不同。")
+    if state.phase is SearchPhase.CONFIRMING_SCENE:
+        return object_result(state, "scene.confirm", "等待到场环视确认。",
+                             status=NavigationStatus.NEEDS_SCENE_CONFIRMATION)
     if state.phase is SearchPhase.REVISITING_TARGET:
         return _return_to_capture(frame, state)
     if state.phase is SearchPhase.APPROACHING_OBJECT:
@@ -70,6 +70,12 @@ def continue_target_search(
             return plan_approach(frame, state)
         # 上一周期的停靠命令已同步执行完成；运动失败会清空 destination。
         context = state.object_approach
+        if goal.search_mode is SearchMode.SCENE:
+            return object_result(
+                replace(state, phase=SearchPhase.CONFIRMING_SCENE),
+                "scene.confirm", "物体停靠已完成，环视确认后才能完成场景任务。",
+                status=NavigationStatus.NEEDS_SCENE_CONFIRMATION,
+            )
         return object_result(
             replace(state, phase=SearchPhase.COMPLETE, active_target_clue=None),
             "object.complete", "停靠命令已执行完成，结束物体搜索。",
@@ -91,79 +97,6 @@ def continue_target_search(
             state.object_approach, target=localization, destination=None,
             history_localized=True,
         )),
-    )
-
-
-def continue_scene_target(frame: NavigationFrame, state: SearchState) -> NavigationResult:
-    """场景线索返回拍摄位置并对齐朝向，到位即完成。"""
-    clue = state.active_target_clue
-    if clue.map_frame_id != frame.obstacle_map.frame_id:
-        return discard_target_clue(state, "目标线索与当前地图坐标系不同。")
-    distance = math.hypot(frame.pose.x_m - clue.pose.x_m, frame.pose.y_m - clue.pose.y_m)
-    if state.phase is SearchPhase.REVISITING_TARGET and distance > BACKTRACK_ARRIVAL_M:
-        return discard_target_clue(state, f"返回线索位置的动作结束后仍相距 {distance:.3f} m。")
-    if distance > BACKTRACK_ARRIVAL_M:
-        return result(
-            NavigationStatus.OK,
-            replace(state, phase=SearchPhase.REVISITING_TARGET, backtrack_node_id=None),
-            "target.revisit",
-            "后台检测到目标，返回当时的拍摄位置与朝向。",
-            NavigationAction(
-                ActionKind.MOVE_TO_POSE,
-                destination=clue.pose,
-                constraint=ActionConstraint.REQUIRE_KNOWN_PATH,
-                purpose=ActionPurpose.REVISIT,
-            ),
-            {
-                "clue_id": clue.clue_id,
-                "capture_timestamp_s": clue.timestamp_s,
-                "destination_world_xy": (clue.pose.x_m, clue.pose.y_m),
-            },
-        )
-    turn = shortest_turn_to_heading(frame.pose.yaw_rad, clue.pose.yaw_rad)
-    if abs(turn) > TURN_TOLERANCE_RAD:
-        return result(
-            NavigationStatus.OK,
-            replace(state, phase=SearchPhase.REVISITING_TARGET, backtrack_node_id=None),
-            "target.revisit_turn",
-            "已回到拍摄位置，对齐检测画面当时的朝向。",
-            NavigationAction(
-                ActionKind.TURN_IN_PLACE,
-                command=RelativePoseCommand(yaw_rad=turn),
-                purpose=ActionPurpose.REVISIT_TURN,
-            ),
-            {"clue_id": clue.clue_id},
-        )
-
-    return result(
-        NavigationStatus.OK,
-        replace(reset_scan_after_move(state), phase=SearchPhase.COMPLETE),
-        "target.revisit_complete",
-        "已返回目标场景画面的拍摄位置与朝向，搜索完成。",
-        details={
-            "clue_id": clue.clue_id,
-            "capture_timestamp_s": clue.timestamp_s,
-            "destination_world_xy": (clue.pose.x_m, clue.pose.y_m),
-            "destination_yaw_rad": clue.pose.yaw_rad,
-            "distance_to_capture_m": distance,
-            "heading_error_rad": turn,
-        },
-    )
-
-
-def discard_target_clue(state: SearchState, reason: str) -> NavigationResult:
-    """结束本条线索且不发命令，让下一周期优先取下一条；列表耗尽后恢复探索。"""
-    clue = state.active_target_clue
-
-    return result(
-        NavigationStatus.OK,
-        reset_scan_after_move(state),
-        "target.revisit_failed",
-        "未能返回本条线索的拍摄位姿，保留实际位置并尝试下一条；线索耗尽后继续探索。",
-        details={
-            "clue_id": clue.clue_id if clue is not None else None,
-            "reason": reason,
-        },
     )
 
 
@@ -206,7 +139,7 @@ def plan_approach(frame: NavigationFrame, state: SearchState) -> NavigationResul
         replace(state, phase=SearchPhase.APPROACHING_OBJECT, object_approach=replace(
             context, destination=destination, tried_positions=context.tried_positions + (position,),
         )),
-        "object.approach", "一次前往目标附近的可达停靠点并对准目标，命令执行成功后完成搜索。",
+        "object.approach", "一次前往目标附近的可达停靠点并对准目标。",
         action=NavigationAction(
             ActionKind.MOVE_TO_POSE,
             destination=destination,
@@ -234,6 +167,22 @@ def discard_object_clue(state: SearchState, reason: str, **details) -> Navigatio
         "object.clue_failed", "本条线索未完成，保持当前位置，继续下一条历史线索。",
         failed_clue_id=clue.clue_id if clue is not None else None, reason=reason, **details,
     )
+
+
+def scene_turn(state: SearchState, turn_rad: float, index: int, count: int) -> NavigationResult:
+    """环视只复用原地转向动作；可恢复失败仍走放弃当前物体线索。"""
+    return object_result(state, "scene.turn", "停靠后原地环视，停稳采图。",
+        action=NavigationAction(ActionKind.TURN_IN_PLACE,
+            command=RelativePoseCommand(yaw_rad=turn_rad), purpose=ActionPurpose.SCENE_TURN),
+        view_index=index, view_count=count)
+
+
+def finish_scene_confirmation(state: SearchState, confirmed: bool, **details) -> NavigationResult:
+    """场景唯一成功出口；未确认时回到原物体线索恢复流程。"""
+    if confirmed:
+        return object_result(replace(state, phase=SearchPhase.COMPLETE, active_target_clue=None),
+            "scene.complete", "到场环视确认通过，场景搜索完成。", **details)
+    return discard_object_clue(state, "到场环视未确认目标场景，继续物体搜索。", **details)
 
 
 def recover_object_motion(
@@ -268,6 +217,7 @@ def object_result(state, stage, message, action=None, status=NavigationStatus.OK
         status, state, stage, message, action,
         {
             "clue_id": clue.clue_id if clue is not None else None,
+            "class_text": clue.class_text if clue is not None else "",
             "approach_attempts": len(state.object_approach.tried_positions),
             **details,
         },

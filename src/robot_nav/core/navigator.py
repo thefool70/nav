@@ -43,7 +43,7 @@ from .scan import (
 from .target import (
     recover_object_motion,
     continue_target_search,
-    discard_target_clue,
+    discard_object_clue,
 )
 from .timing import TimingSpans
 
@@ -137,6 +137,7 @@ def target_handling_active(state: SearchState) -> bool:
     return state.active_target_clue is not None or state.phase in (
         SearchPhase.REVISITING_TARGET, SearchPhase.LOCALIZING_OBJECT,
         SearchPhase.APPROACHING_OBJECT, SearchPhase.COMPLETE,
+        SearchPhase.CONFIRMING_SCENE,
         SearchPhase.FAILED, SearchPhase.STOPPED,
     )
 
@@ -203,8 +204,8 @@ def _recover_motion(
         return recover_object_motion(purpose, state, execution.reason)
     if purpose is ActionPurpose.SCAN_TURN:
         return recover_scan_turn(state, execution.reason)
-    if purpose in (ActionPurpose.REVISIT, ActionPurpose.REVISIT_TURN):
-        return discard_target_clue(state, execution.reason)
+    if purpose is ActionPurpose.SCENE_TURN:
+        return discard_object_clue(state, execution.reason)
     if purpose is ActionPurpose.BACKTRACK:
         return recover_backtrack_issue(
             state, execution.reason,

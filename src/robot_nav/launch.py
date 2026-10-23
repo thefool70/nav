@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 from uuid import uuid4
@@ -98,7 +98,7 @@ def _build_run_logger(args: argparse.Namespace) -> NavigationRunLogger:
     configuration.update(
         config_file=str(args.config), perception="queued_vlm",
         rerun_enabled=not args.no_rerun,
-        object_local_models=not args.debug_random_score and args.search_mode == SearchMode.OBJECT.value,
+        object_local_models=not args.debug_random_score,
         object_class=args.object_class or args.target,
     )
     try:
@@ -143,6 +143,21 @@ def _build_perception(
     object_config = _object_config(args)
     # analyzer 封装模型请求；perception 管理快照、队列和结果交付。
     analyzer = _build_analyzer(args, api_key, visualization.on_vlm_interaction)
+    if goal.search_mode is SearchMode.SCENE and not args.debug_random_score:
+        for attempt in range(1, 3):
+            try:
+                classes = analyzer.generate_scene_objects(goal.target_text)
+            except RuntimeError as exc:
+                on_event({"event": "scene_objects_failed", "attempt": attempt, "reason": str(exc)})
+                if attempt == 2:
+                    raise
+                print(f"{exc}；重新生成一次。", flush=True)
+            else:
+                goal = replace(goal, object_classes=classes)
+                on_event({"event": "scene_objects_generated", "scene": goal.target_text,
+                          "object_classes": classes})
+                print(f"场景线索物体：{', '.join(classes)}", flush=True)
+                break
     return SemanticPerception(analyzer, goal, on_event=on_event, object_config=object_config,
         thresholds=DetectionThresholds(args.vlm_high_confidence, args.yolo_high_confidence,
                                        args.vlm_joint_confidence, args.yolo_joint_confidence, args.detection_box_iou))
@@ -181,8 +196,8 @@ def _build_analyzer(
 
 
 def _object_config(args) -> Optional[ObjectModelConfig]:
-    # 场景搜索和随机评分不需要启动 YOLOE 进程。
-    if args.debug_random_score or args.search_mode != SearchMode.OBJECT.value:
+    # 两种正式任务共用同一个 YOLOE 进程；场景类别由前处理生成。
+    if args.debug_random_score:
         return None
     return ObjectModelConfig(
         python_executable=args.object_python, class_text=args.object_class or "", device=args.object_device,

@@ -26,7 +26,7 @@ DEFAULT_YOLOE_MODEL_PATH = Path("data/models/yoloe/yoloe-26s-seg.pt")
 class YoloEConfig:
     """文本只在模型启动时编码；每帧共用相同类别和推理参数。"""
 
-    class_text: str
+    class_texts: Tuple[str, ...]
     model_path: Path = DEFAULT_YOLOE_MODEL_PATH
     device: str = "cuda"
     confidence_threshold: float = 0.25
@@ -52,7 +52,8 @@ class YoloEDetector:
         self._model = YOLOE(str(model_path), verbose=False)
         self._config = config
         on_stage("encoding_class_text")
-        self._model.set_classes([config.class_text.strip()])
+        self._classes = config.class_texts
+        self._model.set_classes(list(self._classes))
         on_stage("warming_up")
         self.detect_boxes(np.zeros((config.image_size, config.image_size, 3), dtype=np.uint8))
 
@@ -77,6 +78,7 @@ class YoloEDetector:
         boxes = results[0].boxes.cpu().numpy()
         normalized_boxes = np.asarray(boxes.xyxyn, dtype=np.float64)
         confidences = np.asarray(boxes.conf, dtype=np.float64)
+        classes = np.asarray(boxes.cls, dtype=np.int64)
         candidate_count = len(confidences)
         if candidate_count == 0:
             return (), 0
@@ -94,6 +96,7 @@ class YoloEDetector:
             observations.append(TargetObservation(
                 TargetVisibility.VISIBLE, bbox_norm=bbox_norm, source="yoloe",
                 confidence=confidence, target_mask=masks[int(index)] if masks is not None else None,
+                class_text=self._classes[int(classes[int(index)])],
             ))
         return tuple(observations), candidate_count
 

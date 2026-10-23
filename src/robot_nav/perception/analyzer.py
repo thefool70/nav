@@ -55,6 +55,8 @@ class SemanticAnalyzer(Protocol):
         *, trace_context: Optional[Mapping[str, Any]] = None,
     ) -> SemanticAnalysis: ...
 
+    def generate_scene_objects(self, scene: str) -> Tuple[str, ...]: ...
+
 
 @dataclass(frozen=True)
 class DetectionThresholds:
@@ -85,32 +87,31 @@ class TargetMatch:
     yolo_confidence: Optional[float] = None
     box_iou: float = 0.0
     reason: str = ""
+    class_text: str = ""
 
 
 def match_target(
     vlm: SemanticAnalysis, yolo: Tuple[TargetObservation, ...],
-    thresholds: DetectionThresholds, search_mode: SearchMode,
+    thresholds: DetectionThresholds,
 ) -> TargetMatch:
-    """单路高分即可命中；中等分要求同帧的有效框重合。场景仅由 VLM 判断。"""
+    """单路高分即可命中；中等分要求同帧、同类别且有效框重合。"""
     confidence = vlm.confidence if vlm.found is not None else None
     best = max(yolo, key=lambda item: item.confidence, default=None)
     yolo_confidence = best.confidence if best is not None else 0.0
-    if search_mode is SearchMode.SCENE:
-        accepted = None if vlm.found is None else bool(vlm.found and confidence >= thresholds.vlm_high)
-        return TargetMatch(accepted, source="vlm", vlm_confidence=confidence,
-                           reason="vlm_high" if accepted else "scene_below_threshold")
     if vlm.found and vlm.bbox_norm is not None and confidence >= thresholds.vlm_high:
-        return TargetMatch(True, vlm.bbox_norm, "vlm", confidence, yolo_confidence, reason="vlm_high")
+        return TargetMatch(True, vlm.bbox_norm, "vlm", confidence, yolo_confidence,
+                           reason="vlm_high", class_text=vlm.class_text)
     if best is not None and yolo_confidence >= thresholds.yolo_high:
-        return TargetMatch(True, best.bbox_norm, "yoloe", confidence, yolo_confidence, reason="yolo_high")
+        return TargetMatch(True, best.bbox_norm, "yoloe", confidence, yolo_confidence,
+                           reason="yolo_high", class_text=best.class_text)
     if vlm.found and vlm.bbox_norm is not None and confidence >= thresholds.vlm_joint:
         # 同图可有多个同类物体；不能只比较最高分框，否则会错配不同实例。
         matches = [(box_iou(vlm.bbox_norm, item.bbox_norm), item) for item in yolo
-                   if item.confidence >= thresholds.yolo_joint]
+                   if item.confidence >= thresholds.yolo_joint and item.class_text == vlm.class_text]
         overlap, paired = max(matches, key=lambda pair: (pair[0], pair[1].confidence), default=(0.0, None))
         if paired is not None and overlap >= thresholds.box_iou:
             return TargetMatch(True, paired.bbox_norm, "vlm+yoloe", confidence,
-                               paired.confidence, overlap, "joint")
+                               paired.confidence, overlap, "joint", paired.class_text)
     return TargetMatch(None if vlm.found is None else False,
                        vlm_confidence=confidence, yolo_confidence=yolo_confidence,
                        reason="below_threshold_or_box_mismatch")
@@ -125,7 +126,8 @@ def box_iou(first, second) -> float:
     return intersection / (area_first + area_second - intersection)
 
 
-def build_semantic_analysis_prompt(target_text: str, search_mode: SearchMode) -> str:
+def build_semantic_analysis_prompt(target_text: str, search_mode: SearchMode,
+                                   object_classes: Tuple[str, ...] = ()) -> str:
     """每张原图独立评分；物体框使用 Qwen 的 0–1000 相对坐标，不要求输出编号。"""
     target = json.dumps(target_text, ensure_ascii=False)
     scoring = (
@@ -139,6 +141,15 @@ def build_semantic_analysis_prompt(target_text: str, search_mode: SearchMode) ->
             'confidence: 0-1 certainty the camera is inside that scene. '
             'Return JSON only: {"score":0.5,"found":false,"confidence":0.0}.'
         )
+    if len(object_classes) > 1:
+        return (
+            f'Acceptable object classes: {json.dumps(object_classes, ensure_ascii=False)}. '
+            'Find the best matching object of ANY listed class. '
+            'Return JSON only: {"score":0.5,"class_text":null,"bbox_2d":null,"confidence":0.0}. '
+            'class_text: exact listed class name for the box, null if absent. '
+            'bbox_2d: [xmin,ymin,xmax,ymax], normalized 0-1000; null if absent. '
+            'confidence: 0-1 certainty the box is that class; 0 if absent. ' + scoring
+        )
     return (
         f'Target: {target}. Return JSON only: {{"score":0.5,"bbox_2d":null,"confidence":0.0}}. '
         "bbox_2d: best matching object's [xmin,ymin,xmax,ymax], normalized 0-1000; null if absent. "
@@ -147,13 +158,16 @@ def build_semantic_analysis_prompt(target_text: str, search_mode: SearchMode) ->
     )
 
 
-def semantic_analysis_schema(search_mode: SearchMode) -> Mapping[str, Any]:
+def semantic_analysis_schema(search_mode: SearchMode,
+                             object_classes: Tuple[str, ...] = ()) -> Mapping[str, Any]:
     """Ollama 的输出结构约束；数值范围及框顺序仍由解析器校验。"""
     properties = {"score": {"type": "number", "minimum": 0, "maximum": 1}}
     properties["confidence"] = {"type": "number", "minimum": 0, "maximum": 1}
     if search_mode is SearchMode.SCENE:
         properties["found"] = {"type": "boolean"}
     else:
+        if len(object_classes) > 1:
+            properties["class_text"] = {"enum": [None, *object_classes]}
         properties["bbox_2d"] = {"anyOf": [
             {"type": "null"},
             {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 1000},
@@ -163,7 +177,8 @@ def semantic_analysis_schema(search_mode: SearchMode) -> Mapping[str, Any]:
             "required": list(properties), "additionalProperties": False}
 
 
-def parse_semantic_analysis_response(text: str, search_mode: SearchMode) -> SemanticAnalysis:
+def parse_semantic_analysis_response(text: str, search_mode: SearchMode,
+                                     object_classes: Tuple[str, ...] = ()) -> SemanticAnalysis:
     """独立校验方向分与检测；错误不伪装为无线索，有效框在此转换为 0–1。"""
     payload = _extract_json_mapping(text)
     raw_score = payload.get("score")
@@ -199,7 +214,14 @@ def parse_semantic_analysis_response(text: str, search_mode: SearchMode) -> Sema
         if search_mode is SearchMode.OBJECT and found is False and confidence != 0:
             found, confidence = None, None
             detection_error = "没有目标框时 confidence 必须为 0"
-    return SemanticAnalysis(found, score, bbox, detection_error, scoring_error, confidence=confidence)
+    class_text = object_classes[0] if len(object_classes) == 1 else ""
+    if search_mode is SearchMode.OBJECT and len(object_classes) > 1 and found:
+        class_text = payload.get("class_text")
+        if class_text not in object_classes:
+            found, class_text = None, ""
+            detection_error = "class_text 必须是固定清单中的类别"
+    return SemanticAnalysis(found, score, bbox, detection_error, scoring_error,
+                            confidence=confidence, class_text=class_text)
 
 
 def _extract_json_mapping(text: str) -> Mapping[str, Any]:
