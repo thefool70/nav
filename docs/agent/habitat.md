@@ -483,7 +483,7 @@
   `_commit_front_obstruction`。`HermesObservedMap.navigation_map` 向完整图叠加同一份原始墙，
   `add_permanent_wall` 按停止后 REST 位姿检查净空并拒绝让膨胀墙覆盖当前格。
 
-- 场景前处理在 `launch.py::_build_perception` 生成 3–5 类固定清单，失败重试一次。
+- 场景前处理在 `launch.py::_build_perception` 先读 9 个常用场景预设，其余由 Qwen 生成 3–5 类固定清单，生成失败重试一次。预设与文本提示词映射在 `adapters/yoloe_targets.json`。
   `_goal.object_classes` 传入 YOLOE 和 Qwen；`class_text` 随框贯通，联合融合及掩码匹配要求同类。
   场景否决后的实例记录属于感知队列；同地图、同类且 0.5m 内的世界位置对应被排除线索。
   `scene_objects_rejected.unlocalized_objects` 表示入镜检测未能定位，不能可靠跨图排除。

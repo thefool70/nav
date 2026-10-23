@@ -24,4 +24,4 @@ robot-nav = "robot_nav.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-robot_nav = ["chassis_gui.html"]
+robot_nav = ["chassis_gui.html", "adapters/yoloe_targets.json"]

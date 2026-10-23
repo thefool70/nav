@@ -27,6 +27,7 @@ from .core.models import SearchMode, TargetSearchGoal
 from .environment import create_chassis, prepare_navigation, run_preflight, validate_environment
 from .perception.analyzer import SemanticAnalyzer, DetectionThresholds
 from .adapters.object_model_process import ObjectModelConfig
+from .adapters.yoloe_targets import predefined_scene_objects
 from .perception.semantic_queue import SemanticPerception
 from .run_log import NavigationRunLogger, default_run_log_path, optional_callback
 
@@ -144,20 +145,22 @@ def _build_perception(
     # analyzer 封装模型请求；perception 管理快照、队列和结果交付。
     analyzer = _build_analyzer(args, api_key, visualization.on_vlm_interaction)
     if goal.search_mode is SearchMode.SCENE and not args.debug_random_score:
-        for attempt in range(1, 3):
-            try:
-                classes = analyzer.generate_scene_objects(goal.target_text)
-            except RuntimeError as exc:
-                on_event({"event": "scene_objects_failed", "attempt": attempt, "reason": str(exc)})
-                if attempt == 2:
-                    raise
-                print(f"{exc}；重新生成一次。", flush=True)
-            else:
-                goal = replace(goal, object_classes=classes)
-                on_event({"event": "scene_objects_generated", "scene": goal.target_text,
-                          "object_classes": classes})
-                print(f"场景线索物体：{', '.join(classes)}", flush=True)
-                break
+        classes = predefined_scene_objects(goal.target_text)
+        source = "predefined" if classes is not None else "qwen"
+        if classes is None:
+            for attempt in range(1, 3):
+                try:
+                    classes = analyzer.generate_scene_objects(goal.target_text)
+                    break
+                except RuntimeError as exc:
+                    on_event({"event": "scene_objects_failed", "attempt": attempt, "reason": str(exc)})
+                    if attempt == 2:
+                        raise
+                    print(f"{exc}；重新生成一次。", flush=True)
+        goal = replace(goal, object_classes=classes)
+        on_event({"event": "scene_objects_generated", "scene": goal.target_text,
+                  "object_classes": classes, "source": source})
+        print(f"场景线索物体（{source}）：{', '.join(classes)}", flush=True)
     return SemanticPerception(analyzer, goal, on_event=on_event, object_config=object_config,
         thresholds=DetectionThresholds(args.vlm_high_confidence, args.yolo_high_confidence,
                                        args.vlm_joint_confidence, args.yolo_joint_confidence, args.detection_box_iou))

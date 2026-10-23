@@ -6,7 +6,6 @@ import base64
 from contextlib import redirect_stdout
 import faulthandler
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -42,7 +41,7 @@ def main() -> int:
                     model = _load_model(request, progress)
                     progress("ready")
                 if request.get("initialize"):
-                    _send({"event": "result", "result": {"ready": True}})
+                    _send({"event": "result", "result": {"ready": True, "selection": model.selection}})
                     continue
                 rgb = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape(
                     request["height_px"], request["width_px"], 3)
@@ -66,8 +65,6 @@ def main() -> int:
 def _load_model(request, progress):
     from .yoloe import YoloEConfig, YoloEDetector
     model_path = Path(request["yolo_model"]).resolve()
-    # Ultralytics 在工作目录查找 mobileclip2_b.ts，避免切换运行目录时重下载。
-    os.chdir(model_path.parent)
     return YoloEDetector(YoloEConfig(
         class_texts=tuple(request["class_texts"]), model_path=model_path,
         device=request["device"], confidence_threshold=request["confidence_threshold"],

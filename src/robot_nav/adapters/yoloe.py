@@ -1,8 +1,9 @@
-"""YOLOE-26s 模型边界：固定文本目标，返回检测框、原始置信度与同帧分割。"""
+"""YOLOE 文本模型边界：固定目标提示词，输出原任务类别与同帧分割。"""
 
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -12,6 +13,8 @@ from typing import (
 )
 
 import numpy as np
+
+from .yoloe_targets import text_prompts
 
 from ..core.models import (
     TargetObservation,
@@ -24,7 +27,7 @@ DEFAULT_YOLOE_MODEL_PATH = Path("data/models/yoloe/yoloe-26s-seg.pt")
 
 @dataclass(frozen=True)
 class YoloEConfig:
-    """文本只在模型启动时编码；每帧共用相同类别和推理参数。"""
+    """文本在启动时编码一次，每帧复用固定类别和推理参数。"""
 
     class_texts: Tuple[str, ...]
     model_path: Path = DEFAULT_YOLOE_MODEL_PATH
@@ -35,13 +38,14 @@ class YoloEConfig:
 
 
 class YoloEDetector:
-    """固定文本目标的检测与分割。"""
+    """固定提示词只影响检测器，输出类别仍与 Qwen 使用的任务类别一致。"""
 
     def __init__(self, config: YoloEConfig, on_stage=None) -> None:
         on_stage = on_stage or (lambda stage: None)
-        model_path = Path(config.model_path)
+        prompts = text_prompts(config.class_texts)
+        model_path = Path(config.model_path).resolve()
         if not model_path.is_file():
-            raise RuntimeError(f"缺少 YOLOE-26 模型文件：{model_path}")
+            raise RuntimeError(f"缺少 YOLOE 文本模型文件：{model_path}")
         on_stage("importing_yolo")
         try:
             from ultralytics import YOLOE
@@ -49,11 +53,24 @@ class YoloEDetector:
             raise RuntimeError("当前 Python 环境未安装 ultralytics") from exc
 
         on_stage("loading_yolo")
+        # 在权重目录查找 mobileclip2_b.ts，避免切换运行目录时重下载。
+        os.chdir(model_path.parent)
         self._model = YOLOE(str(model_path), verbose=False)
+        if hasattr(self._model.model.model[-1], "lrpc"):
+            raise ValueError(f"当前检测使用文本提示，请配置非 PF 权重：{model_path}")
         self._config = config
         on_stage("encoding_class_text")
-        self._classes = config.class_texts
-        self._model.set_classes(list(self._classes))
+        self._model.set_classes(list(prompts))
+        self._classes = dict(enumerate(config.class_texts))
+        self.selection = {
+            "mode": "text",
+            "model_path": str(model_path),
+            "reason": "本轮目标使用固定文本提示词，未收录目标保留原文",
+            "class_mapping": [
+                {"target": target, "text_prompt": prompt}
+                for target, prompt in zip(config.class_texts, prompts)
+            ],
+        }
         on_stage("warming_up")
         self.detect_boxes(np.zeros((config.image_size, config.image_size, 3), dtype=np.uint8))
 
@@ -89,6 +106,9 @@ class YoloEDetector:
             raise ValueError("YOLOE 掩码与原始 RGB 尺寸或检测框数量不一致")
         observations = []
         for index in np.argsort(-confidences):
+            class_id = int(classes[int(index)])
+            if class_id not in self._classes:
+                continue
             bbox_norm = _normalized_box(normalized_boxes[int(index)])
             confidence = float(confidences[int(index)])
             if bbox_norm is None or not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
@@ -96,8 +116,10 @@ class YoloEDetector:
             observations.append(TargetObservation(
                 TargetVisibility.VISIBLE, bbox_norm=bbox_norm, source="yoloe",
                 confidence=confidence, target_mask=masks[int(index)] if masks is not None else None,
-                class_text=self._classes[int(classes[int(index)])],
+                class_text=self._classes[class_id],
             ))
+            if len(observations) >= self._config.max_detections:
+                break
         return tuple(observations), candidate_count
 
 

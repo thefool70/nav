@@ -159,6 +159,9 @@ class SemanticPerception:
                     lambda model, stage, elapsed: print(f"YOLOE 初始化：{stage} ({elapsed:.1f}s)", flush=True))
                 if loaded.get("error"):
                     raise RuntimeError(loaded["error"])
+                selection = loaded["selection"]
+                self._emit({"event": "yolo_model_selected", **selection})
+                print(f"YOLOE 检测版本：{selection['mode']}；{selection['reason']}；{selection['model_path']}", flush=True)
             except BaseException:
                 self._yolo.close()
                 self._snapshot_worker.shutdown(wait=True)
