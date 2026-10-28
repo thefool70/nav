@@ -19,6 +19,126 @@ CLI 子命令均为 `hermes`。默认在本机采集 USB RGB-D；
 导航参数统一在根目录 `config.json`，命令行可以临时覆盖；规则见
 [统一运行配置](../README.md#统一运行配置)。底盘 GUI 和 SSH 脚本仍使用各自的参数。
 
+## 随车使用速查
+
+以下命令用于已部署的随车笔记本。导航、YOLOE 和 Qwen 均在小车端运行；
+Windows / WSL 可以仅作为远程终端和回放端。
+
+### 准备与只读预检
+
+在小车终端操作，或从开发机登录：
+
+```bash
+ssh hri@10.113.45.27
+cd /home/hri/nav
+source .venv/bin/activate
+systemctl --user is-active nav-vlm.service
+pgrep -af '[r]gbd_pose_publisher.py'
+python -m robot_nav hermes --preflight-only
+```
+
+模型服务应显示 `active`，相机发布器应只有一个实例。若模型服务未启动，执行
+`systemctl --user start nav-vlm.service`。若发布器未运行，在小车另一个终端启动并保持该终端开启：
+
+```bash
+cd /home/hri/data_publisher
+/home/hri/miniconda3/envs/map1/bin/python rgbd_pose_publisher.py
+```
+
+预检读取底盘与相机，不发运动命令、不清图，也不验证 YOLOE / Qwen 推理。
+底盘须供电、有线链路连通，D435i 由上述发布器独占采集。
+
+### 搜索物体或场景
+
+完成预检后，在 `/home/hri/nav` 且已激活 `.venv` 的终端中，按本次任务选择一条：
+
+```bash
+# 找垃圾桶：中文目标自动映射到固定英文检测提示词
+python -m robot_nav hermes --search-mode object --target "垃圾桶" \
+  --startup-forward-m 0 --enable-motion --rerun --rerun-viewer record
+
+# 找客厅：读取预生成线索，复用物体搜索，停靠后环视确认
+python -m robot_nav hermes --search-mode scene --target "客厅" \
+  --startup-forward-m 0 --enable-motion --rerun --rerun-viewer record
+```
+
+`--enable-motion` 会启用实际运动。每次正式导航会清空底盘地图并重新建图；
+`--startup-forward-m 0` 只跳过默认 1 米的启动前移，后续探索、接近和环视仍会运动。
+同一时间只启动一个导航任务。用 Ctrl+C 停止，等待终端完成动作取消与资源收尾后再启动下一次。
+关闭 Rerun 窗口不代表停止导航。
+
+### 目标名称与预设触发
+
+常用物体已收录中文、英文及明确同义词，例如 `垃圾桶`、`trash can`、`waste bin`
+均映射为 `waste container`。当前仍加载文本提示版 YOLOE，只编码本轮目标；
+PF 词表仅用于统一名称，不加载 PF 权重，也不把整张词表送入检测器。
+未收录的名称保留原文，因此未收录的中文或长描述建议显式给出简短英文类别，例如：
+
+```bash
+python -m robot_nav hermes --search-mode object --target "办公室里的雨伞" \
+  --object-class umbrella --startup-forward-m 0 --enable-motion --no-rerun
+```
+
+场景模式用 `--search-mode scene` 触发；仅输入 `--target "客厅"` 仍是默认的物体模式。
+预设按完整名称或已列出的别名匹配，忽略英文大小写与多余空白：
+
+| 场景 | 可用名称 / 别名 | 预生成线索 |
+| --- | --- | --- |
+| 客厅 | 客厅、living room | 沙发、茶几、电视、电视柜 |
+| 卧室 | 卧室、bedroom | 床、衣柜、床头灯 |
+| 厨房 | 厨房、kitchen | 冰箱、燃气灶、厨房水槽、微波炉 |
+| 用餐区 | 用餐区、餐厅、dining area、dining room | 餐桌、餐椅、餐边柜 |
+| 卫生间 | 卫生间、洗手间、浴室、bathroom、restroom | 马桶、洗手台、淋浴喷头、浴室镜 |
+| 书房 | 书房、study、study room | 书桌、书架、电脑椅 |
+| 阳台 | 阳台、balcony | 晾衣架、室内盆栽、户外椅 |
+| 玄关 | 玄关、entryway、entrance hall | 鞋柜、衣帽架、换鞋凳 |
+| 洗衣区 | 洗衣区、洗衣房、laundry area、laundry room | 洗衣机、干衣机、洗衣篮 |
+
+`帮我找一下客厅`、`带落地窗的客厅` 等完整输入不会命中上述预设，而是交给 Qwen
+生成 3–5 个线索类别。预设只省去生成清单的请求，后续物体判别和环视确认仍会调用 Qwen。
+找到任一可靠线索后沿用物体定位与接近；停靠后旋转一圈、分方向拍照，由 Qwen 综合确认场景。
+否决后排除这次环视中能定位的具体线索物体，继续搜索；不会排除所有同类别物体。
+全部线索都无法定位时，沿用返回首条线索拍摄位姿并停止的保底，不能视为场景已确认。
+
+### 查看画面与保存日志
+
+上面的 `record` 命令只录制。需要在小车屏幕实时查看时，登录 `hri` 的桌面并改用：
+
+```bash
+cd /home/hri/nav
+bash hardware/hermes/run_desktop.sh --search-mode scene --target "客厅" \
+  --startup-forward-m 0 --enable-motion
+```
+
+需要从开发机 WSL 启动、结束后下载并回放时，在 WSL 执行：
+
+```bash
+cd /home/lzc/nav
+export ROBOT_NAV_SSH_IDENTITY=/home/lzc/.ssh/nav_onboard_ed25519
+bash hardware/hermes/tunnel.sh --record --search-mode scene --target "客厅" \
+  --startup-forward-m 0 --enable-motion
+```
+
+该方式要求 WSL 有 Rerun 查看器与桌面显示环境。导航退出并收尾后，本次 JSONL 与 RRD
+下载到开发机 `/home/lzc/nav/data/run_logs/onboard/run-*/`，随后打开回放。
+
+| 内容 | 小车端位置 / 查看方式 |
+| --- | --- |
+| 决策、模型映射、场景结果 | `/home/hri/nav/data/run_logs/hermes-*.jsonl` |
+| Rerun 录制（需显式开启） | `/home/hri/nav/data/run_logs/*.rrd` |
+| 相机采集与位姿同步诊断 | `/home/hri/data_publisher/logs/rgbd-publisher-*.jsonl` |
+| Qwen 服务日志 | `journalctl --user -u nav-vlm.service -n 50 --no-pager` |
+
+终端的 `场景线索物体（predefined）` 表示命中预设，`qwen` 表示临时生成；
+JSONL 中的 `scene_objects_generated` 记录该来源，`yolo_model_selected` 的
+`class_mapping` 记录实际检测提示词。这些启动记录不能证明任务已经成功。
+不需要录制时将 Rerun 参数换成 `--no-rerun`，仍保留 JSONL；随车配置默认关闭 Rerun。
+
+若相机断流，同时检查发布器日志的采集状态与 `skip_reasons`：底盘位姿请求失败也会使
+同步 RGB-D 无法发布。若底盘通信报错，先检查有线链路与底盘供电，再对照同一时间的
+导航、发布器和系统日志。模型报错则检查 `nav-vlm.service`，不要用
+`--debug-random-score` 判断识别效果，该参数会绕过真实检测。
+
 ## 首次安装
 
 ```bash
@@ -144,7 +264,11 @@ data/models/yoloe/mobileclip2_b.ts
 
 两个文件都来自 `ultralytics/assets` 的 `v8.4.0` 发布；不要使用不支持自定义文本类别的 `-pf.pt`。
 模型子进程固定在该目录读取编码器，类别在启动时编码一次，CUDA 使用 FP16 推理。
-目标用中文描述时，建议用 `--object-class "door"` 等提供对应的简短英文类别；VLM 仍使用原始目标描述。
+已收录的中文和英文别名自动映射到固定提示词，例如 `垃圾桶`、`trash can` 和
+`waste bin` 均使用 `waste container`；检测结果仍使用原任务类别与 Qwen 融合。
+未收录的中文或带限定的长描述，建议用 `--object-class "door"` 等提供简短英文类别；
+VLM 仍使用原始目标描述。预设保存在 `src/robot_nav/adapters/yoloe_targets.json`，
+只编码本轮目标，不加载 PF 模型或全词表检测。
 模型文件部署不代表推理或导航已验收；实际检测频率和延迟需要查看运行日志。
 
 导航状态机、Frontier、地图处理与快照编码在 CPU 上执行；`--object-device`
@@ -162,10 +286,13 @@ hardware/hermes/run.sh \
   --max-cycles 100
 ```
 
-场景模式不加载 YOLOE。前沿扫描画面逐张进入 FIFO 队列，VLM
-在同一次请求中检查目的场景与评分 Frontier。缺少分数时按几何分继续探索；
-旧图检测到目标场景后返回拍摄位置并对齐朝向，到位即结束。未选方向暂存，新候选耗尽后
-逐个返回父节点，遇到有效方向再按原顺序恢复；返回父节点本身不额外扫描。
+场景模式先读取常用场景的预生成线索；未命中完整名称或别名时，由 Qwen 生成
+3–5 个相关物体。随后加载同一文本版 YOLOE，复用物体模式的检测、Qwen 判别、
+方向评分、定位、接近和失败恢复。命中一条可靠线索即可接近，不要求多个类别同时出现。
+停靠后原地环视一圈，把分方向画面组成带编号合图交给 Qwen；确认通过才完成场景任务。
+确认否决时只排除环视入镜且能定位的具体线索，再继续物体搜索。
+全部历史线索都无法定位时，仍按物体模式返回首条拍摄位姿并停止，这不等于场景确认通过。
+完整流程与边界见 [场景模式说明](scene-mode-design.md)。
 
 当前 VLM 默认使用随车 Ollama 的 `qwen3.5:4b`，请求地址为
 `http://127.0.0.1:11434/v1/chat/completions`，格式为 `chat_completions`。
@@ -603,7 +730,7 @@ Web Viewer 默认内存上限为 2.5 GB（约 2.33 GiB），WebSocket 服务缓�
 固定安装外参沿用开发机配置，YOLOE 和 CLIP 权重保存在随车目录。
 无需开发机相机或底盘转发；发布器按原方式启动，勿重复启动。
 
-随车笔记本通过 Wi-Fi 访问云端模型，有线连接用于底盘。底盘 DHCP 提供的
+随车笔记本默认使用本地 Qwen；Wi-Fi 用于远程访问和联网，有线连接用于底盘。底盘 DHCP 提供的
 `192.168.11.1` 不接受 DNS 查询，因此有线连接 `Wired connection 1` 已设置
 `ipv4.ignore-auto-dns=yes` 和 `ipv6.ignore-auto-dns=yes`，域名由 Wi-Fi DNS 解析。
 若重新创建有线连接后出现 `Temporary failure in name resolution`，检查
