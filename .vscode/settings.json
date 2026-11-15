@@ -1,7 +1,0 @@
-{
-    "remote.portsAttributes": {
-        "11448": { "onAutoForward": "ignore" },
-        "18765": { "onAutoForward": "ignore" }
-    },
-    "remote.restoreForwardedPorts": false
-}

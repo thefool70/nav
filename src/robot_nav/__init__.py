@@ -1,1 +1,1 @@
-"""机器人语义搜索；算法入口见 core.navigator，运行循环见 app。"""
+"""机器人语义搜索；算法入口见 navigation.navigator，运行循环见 pipeline.navigation_loop。"""

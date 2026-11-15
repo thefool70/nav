@@ -1,328 +1,50 @@
 # robot-nav
 
-面向算法研究的机器人语义搜索项目。算法接收位姿、RGB-D 和占用图，输出相对
-位姿命令；仿真器和真底盘的差异全部收在 Adapter 中。
+零样本目标导航研究项目：给定一个物体或场景名称，让机器人通过观察和探索寻找目标。
+使用 YOLOE 和视觉语言模型理解画面，结合地图选择探索方向、定位目标并接近。
 
-当前支持两种任务：
+目前支持 **Habitat 仿真**和**思岚 Hermes + D435i 真机**，两者共用导航算法。
+新底盘通过适配层接入；V550 尚未实现。
 
-- `object`：寻找一个具体物体。
-- `scene`：寻找一个目的场景，例如洗手间或电梯厅。
-
-## 从哪里开始读
-
-建议按下面的顺序阅读：
-
-1. `src/robot_nav/__main__.py`：启动分派；参数定义见 `cli.py`。
-2. `src/robot_nav/launch.py`：两种环境共用的组件装配；环境创建与准备见 `environment.py`。
-3. `src/robot_nav/app.py`：完整运行循环，以及单周期的输入、感知、决策和运动。
-4. `src/robot_nav/core/navigator.py`：输入检查、感知结果归并、行为分派与执行反馈。
-5. `src/robot_nav/core/models.py`：算法输入、输出和跨周期状态。
-6. 当前使用的 Adapter：Habitat 或 Hermes + D435i。
-
-启动、配置和主要算法模块按“入口 → 主要步骤 → 内部辅助实现”阅读；
-Adapter 先列公共操作，再列内部实现。数据类型仍先于使用它们的函数定义。`launch.py` 的
-`_assemble_and_run` 展示组件连接，`app.py` 从 `run_navigation` 总循环读到
-`run_navigation_cycle` 单周期；日志、终端输出和显示回调集中在 `run_log.py`。
-函数前缀 `_` 表示模块内部接口，不表示它是否属于算法计算。
-行为入口保留重要分支和恢复规则，计算函数直接表达具体算法；不为未使用的
-调用方式维护通用选项或转发接口。深度定位只保留当前导航使用的正深度采样与
-中位数估计，背景过滤和假定距离回退不再作为 Python 参数提供。
-
-算法细节见 [算法说明](docs/algorithm.md)，坐标和接口约定见
-[底盘接口标准](docs/chassis-interface.md)。
-核心运行逻辑先看 [核心算法流程图（draw.io XML）](docs/diagrams/navigation-main-states.drawio)；
-图中展示探索主线、逐图入队推理，以及评分与目标线索的返回路径。
-函数步骤、后台队列与恢复细节见 [完整流程图](docs/diagrams/navigation-state-machine.drawio)。
-
-## 架构
+## 项目目录
 
 ```text
-设备 / 仿真器
-    │
-    ▼
-ChassisInterface ──► NavigationFrame
-                           │
-    SemanticPerception ───►感知结果 / 语义判定 / 历史定位
-                           │
-                           ▼
-                run_navigation_cycle()      （app.py：单周期编排）
-                           │
-                           ▼
-                      navigate()            （core/navigator.py：行为分派）
-                           │
-                           ▼
-                  NavigationAction          （显式动作类型 + 约束）
-                           │
-                           ▼
-                  ChassisInterface
+nav/
+├── src/robot_nav/   导航算法、感知、设备适配与运行流程
+├── configs/         运行配置
+├── deployment/      环境安装与启动脚本
+├── docs/            架构、算法和使用说明
+├── data/            场景、模型、标定与运行记录
+└── archive/         归档材料
 ```
 
-- `core/` 只做算法计算，不读取设备、不请求模型、不发送控制命令。
-- `app.py` 负责导航循环与单周期编排，并把可恢复的运动结果送回状态机。
-- 搜索核心按完整职责组织：`core/scan.py`（扫描规划、采集进度与覆盖复用）、
-  `core/exploration.py`（Frontier 生成、选点、历史与分支回退）、
-  `core/target.py`（目标线索、物体接近与停靠、场景确认）。
-- `perception/` 组织取帧、视觉队列、语义判定与历史物体定位；不直接控制底盘，
-  也不修改搜索状态。
-- `adapters/` 负责设备协议、坐标转换、地图归一化和视觉模型请求。
-- `visualization/` 与 `run_log.py` 只记录过程，不参与决策。
-  `rerun_view.py` 组织 Rerun 记录，`panels.py` 生成状态文本与模型卡片，
-  `view_geometry.py` 计算显示坐标、机器人轮廓与路径线段。
+## 阅读入口
 
-理解算法先读 `app.py::run_navigation_cycle` 和 `core/navigator.py::navigate`，
-再进入扫描、探索或目标处理文件。每个文件包含该职责的推进、恢复与专用计算，
-入口在前，细节在后：
-
-| 职责 | 主要入口与数据去向 |
+| 想了解什么 | 从这里开始 |
 | --- | --- |
-| 扫描 | `continue_scanning` 规划转向／采集；`record_scanned_direction` 登记实际采集的覆盖并推进扫描 |
-| 探索 | `select_exploration_target` 生成候选；需要评分时，`complete_frontier_selection` 用缓存分数直接完成本轮选择 |
-| 回退与恢复 | `begin_backtracking` 逐层返回；探索失败交给 `recover_frontier_motion`，返回失败交给 `recover_backtrack_issue` |
-| 目标处理 | `continue_target_search` 处理线索、定位结果与停靠反馈，也决定历史线索耗尽后的去向 |
+| 代码分为哪些部分、如何协作 | [架构说明](docs/architecture.md) |
+| 没找到目标时往哪走、找到线索后怎么办 | [算法说明](docs/algorithm.md) |
+| 在思岚底盘运行 | [Hermes 使用说明](docs/hermes.md) |
+| 在仿真中运行 | [Habitat 使用说明](docs/habitat.md) |
+| 接入新的底盘 | [底盘接口](docs/chassis-interface.md) |
 
-跨职责仍共用同一套规则：扫描从探索模块取得完整 Frontier 边界，物体停靠共用
-可达区计算；它们通过普通函数调用，不复制算法。数据定义放在 `models.py`，
-坐标、动作转换与路径长度放在 `geometry.py`；独立的 `timing.py` 只向调用方
-提供的列表追加耗时，使算法和设备层都能计时而不依赖日志写盘。
+## 安装入口
 
-感知按数据流阅读：`snapshot_store.py` 固定和保存单帧 RGB-D，
-`semantic_queue.py` 管理 FIFO、评分缓存和线索交付，`analyzer.py` 定义单图
-输入、提示词及输出解析。`object_localizer.py` 复用已通过置信度融合的历史目标框与掩码，
-进行深度与障碍射线计算，不在定位时另行检测。内存快照由扫描队列与历史定位共用，模型请求通过 Adapter。
-线程和关闭顺序集中在队列与模型进程中。
-
-启动层创建同一份 `TargetSearchGoal`，传给感知组件和导航循环；每次采集显式
-传入当前帧的 `CaptureContext`，读取评分时显式传入地图坐标系，避免依赖此前
-绑定的帧。搜索状态仍只由核心更新，异步任务状态仍只由感知队列维护。
-
-## 搜索方式
-
-| 模式 | 发现目标 | VLM 的作用 | 后续行为 |
-| --- | --- | --- | --- |
-| 物体搜索 | YOLOE 逐视频帧检测，扫描图及视频候选由 VLM 分析 | 单图评分、框选与置信度；与同帧 YOLOE 融合 | 历史 RGB-D 优先定位，失败后尝试障碍射线；得到位置后接近 |
-| 场景搜索 | 常用场景读取预生成物体清单，其余由 Qwen 生成，复用物体搜索 | 物体判别和方向评分；停靠后综合环视合图确认场景 | 确认通过才完成；否决后排除入镜线索并继续物体流程 |
-
-两种模式都在当前可达自由区内选择 Frontier，一次移动到选定位置，到位后
-再观察和选择下一目标。新出现的 Frontier 优先探索，未选方向暂存；新候选耗尽
-后，沿当前分支逐个返回父节点，直到到达仍有有效探索方向的节点，再继续寻找。
-启动与后续扫描共用同一规则，只观察局部可见且尚未检查的 Frontier 方向。
-返回父节点后直接检查剩余探索方向，不额外扫描。
-扫描使用移动筛选前的完整边界；边界过近、跨度不足或移动尝试被排除，都不影响
-原地观察该方向。观察范围、地图遮挡与已有视觉覆盖仍决定是否需要补查。
-地图已知与视觉已检查分别记录；两种模式没有待查方向时仍采集当前画面，不额外转向。
-返回节点未完成时保留实际位置，跳过该返回节点并重新检查有效方向，不直接结束搜索。
-
-命令行默认使用异步 FIFO 视觉队列。扫描每采集一张图片就提交分析，不等待整轮收齐。
-普通队列直接查看原图，返回图片评分、目标框和置信度；场景任务额外返回清单内的物体类别，不标注前沿点。
-同图视场内、地图视线可见的候选共用图片评分。YOLOE-26s 默认以 10 Hz 上限检测最新视频帧，
-包括移动和转向期间；中等分候选送同帧给 VLM 确认，高分可直接形成目标线索。
-初始门槛为 VLM ≥ 0.90 或 YOLOE ≥ 0.70；或 VLM ≥ 0.60、YOLOE ≥ 0.30 且同帧框 IoU ≥ 0.30。
-两路置信度不求平均，方向评分不参与命中判定；阈值尚未统计校准，可在 `config.json` 调整。
-缺少语义分时按几何分继续走，评分只在下一次决策生效。
-后台按结果可用顺序交付目标线索，当前动作完成后才处理。场景模式沿用物体接近，停靠后原地旋转一圈、分方向停稳拍照，组成带编号网格图交给 Qwen 确认。
-物体模式仅用通过门槛的目标框在同帧历史 RGB-D 上定位；优先复用同帧匹配的 YOLOE 掩码，
-没有对应掩码或掩码测距失败时使用框内深度。无法用深度定位时，沿框中心方向查询地图中的首个障碍，
-将障碍表面作为目标位置假设。
-得到位置后，在目标周围搜索可达自由格，从当前位置一次前往停靠点并对准目标，
-停靠命令执行成功后直接完成搜索。
-历史定位失败时留在当前位置，继续下一条线索，并处理已采集但尚未分析的画面。
-全部历史线索都无法定位时，才保底返回首条线索的拍摄位姿并停止，不再重采或继续探索。
-实际运动失败时可换点，每条已定位线索最多尝试三次停靠；均失败且历史队列耗尽后恢复探索。
-当前线索定位和接近期间暂停普通队列，迟到结果暂存；需要更多历史线索时
-只恢复已有队列的分析，不为此新增运动。
-有效探索方向耗尽后先等待队列，模型失败不冒充“已经检查”。
-RGB-D 快照在内存交接，最多 256 帧、图像预算 2 GiB；未命中或定位完成后释放。
-JSONL 保存判断与计时，启用 Rerun 时录制画面；运行时不再写入或回读快照文件。
-随车运行后下载到本机回放使用 `bash hardware/hermes/tunnel.sh --record <导航参数>`，
-不传输实时画面，具体命令见 [离线录制与回放](docs/hermes.md#随车录制结束后在本机回放)。
-
-Hermes 与 Habitat 执行 Frontier 移动时，还会按选点时的算法地图检查实际路径。路径经过
-未知区的累计长度超过 1.5 m 才取消动作，在本次运行中持续禁止向整个连通 Frontier 区域探索移动并转向其他候选，
-避免在同一片边界内换点反复取消。Hermes 还会在取消确认后按现有近深度／目标方向规则建墙，
-无需等待停滞复查；Habitat 行为不变。
-
-Hermes 的 `MoveToAction` 从首个运动帧开始积累 3 秒滑动窗口，只按净位移判断停滞，
-没有额外起步宽限。窗口内净位移不足 0.25 m，即使原地转向也判受阻。
-首次取消确认后重发原目标，不建墙或屏蔽 Frontier；重发后重新观察 3 秒，
-仍无有效平移才取消并建墙。重试位移达到 0.25 m 清除停滞记录，恢复普通检测。
-到位或动作结束清空检测；扫描、调整朝向的 `RotateToAction` 不启用建墙检测。
-可靠近深度只用于提高墙的位置精度。墙在本次运行中同时叠加到探索图和停靠规划使用的完整导航图，后续地图更新
-和再次到访都不会清除它；墙后的 Frontier 因不可达而退出候选。具体判定与墙的生成见
-Hermes 文档。
-
-两种环境只在 `environment.py` 中创建各自 Adapter；感知、日志、回调和导航循环
-统一在 `launch.py` 装配。只读预检独立运行，启动前移仅用于真机。
-
-内部模块直接使用 `NavigationFrame`、`SearchState` 等明确的数据契约，不逐层重复
-验证对象类型或尝试转换任意输入。通信、配置和模型响应在边界处理；深度缺测、
-未知地图与不可达目标仍是正常的算法分支。内部程序错误向上传播，后台感知错误
-在主循环取结果时重新抛出，不伪装成“未检出目标”。
-
-## 运行环境
-
-| 环境 | 用途 | 文档 |
-| --- | --- | --- |
-| `robot-nav` | 核心代码、Hermes + D435i | [Hermes + D435i](docs/hermes.md) |
-| `robot-nav-habitat` | Habitat-Sim 仿真 | [Habitat](docs/habitat.md) |
-
-核心环境的最小安装：
+Hermes 的基础 Python 环境：
 
 ```bash
-micromamba env create -f environment.yml
+micromamba env create -f deployment/environment.yml
 micromamba activate robot-nav
 python -m pip install -e .
 ```
 
-Rerun 是可选依赖：
-
-```bash
-python -m pip install -e '.[visualization]'
-```
-
-底盘手动操作面板：`python -m robot_nav.chassis_gui`，浏览器打开
-`http://127.0.0.1:8088`。支持状态查看、小步移动、转向、回桩和取消任务；
-连接方式与限制见 [Hermes 文档](docs/hermes.md#底盘操作面板)。
+随后按使用说明准备设备依赖、模型和相机标定。Habitat 使用独立环境，按其使用说明安装。
+`deployment/` 的环境文件管理 Python 环境，`pyproject.toml` 定义项目包与依赖。
 
 ## 统一运行配置
 
-项目根目录的 `config.json` 集中保存导航的常用参数，按 navigation、habitat、
-hermes、camera、perception、logging 分组。默认读取当前目录下的该文件；
-切换工作目录时通过 `--config /绝对路径/config.json` 指定，配置文件必须完整。
-每组的 `_comments` 保存参数中文说明，加载时忽略；文件保持标准 JSON 格式。
-命令行显式参数优先于文件，配置中的相对文件路径以配置文件所在目录为基准，
-命令行相对路径仍以当前工作目录为基准。
+在项目根目录运行，默认读取 `configs/navigation.json`；命令行参数覆盖配置文件。
+配置文件中的相对路径以该文件所在目录为基准，命令行路径以当前目录为基准。
 
-```bash
-python -m robot_nav habitat --target "chair"
-python -m robot_nav --config config.json hermes --preflight-only
-python -m robot_nav hermes --config config.json --target "chair" --enable-motion
-```
-
-随车笔记本方式将 `hermes.base_url` 改为 `http://127.0.0.1:11448`，
-`camera.camera_source` 改为 `remote`；相机 IPC 地址已在 camera 组中。
-远程主题为 `rgbd.pose`，接收随车发布器打包的 RGB-D 与同步底盘位姿。
-仓库默认仍保持本地 USB 与底盘直连，不因加载配置自动改变连接方式。
-
-`navigation.target` 的 null 表示本次需要指定目标；`perception.object_python` 的 null
-表示自动查找已有 robot-nav 模型环境。`hermes.startup_forward_m` 默认 1 米，设为 0
-可跳过真机启动前移。固定外参保存在 camera 组已有的六个高度、偏移和角度字段中；
-远程方式先用 `hardware/hermes/fetch_camera_extrinsics.py` 获取一次，导航启动时读取。
-本地 USB 未配置齐六项时仍可用 `camera.camera_calibration` 指定外参文件。
-VLM 默认使用随车 Ollama 的 `qwen3.5:4b`，接口为
-`http://127.0.0.1:11434/v1/chat/completions`；本机调用无需密钥。
-在开发机运行导航时，先按 [随车本地模型说明](docs/hermes.md#随车本地-qwen35-4b)
-转发 11434 端口。显式改用云端模型时，密钥通过环境变量或已有凭据读取。
-`navigation.max_unknown_path_m` 是两种环境共用的未知路径长度上限（默认 1.5 米），
-从原来的 `hermes.max_unknown_path_m` 移到此处；自定义配置文件也需同步移动该字段。
-`--enable-motion`、`--preflight-only`、`--base-only` 只接受命令行设置，不能写入配置。
-
-`logging.rerun_viewer` 选择网页 `web`、桌面 App `native` 或仅录制 `record`；可用
-`--rerun-viewer record` 临时覆盖，三种方式均保存 RRD。
-在开发机用 `bash hardware/hermes/tunnel.sh --run <hermes 导航参数...>` 启动随车导航，
-会默认开启 Rerun 网页并自动转发到本机；[命令与访问地址](docs/hermes.md#从开发机启动并自动转发)。
-若希望窗口直接显示在随车屏幕，改用 `tunnel.sh --desktop <hermes 导航参数...>`；
-也可登录 SSH 后执行 `bash hardware/hermes/run_desktop.sh <hermes 导航参数...>`，
-见 [随车桌面启动](docs/hermes.md#ssh-启动在随车屏幕查看)。
-
-配置布尔值可临时覆盖：`--rerun` / `--no-rerun`、`--debug-random-score` /
-`--no-debug-random-score`、`--debug-frontier` / `--no-debug-frontier`。
-未知字段、重复字段、缺少字段或非法值会在装配组件前报错，避免配置拼错后悄悄使用默认值。
-
-`config.py` 校验文件字段与类型，`cli.py` 合并命令行覆盖并集中检查参数组合；
-`__main__.py` 按需读取凭据和分派入口，`launch.py` 使用已校验参数装配公共组件。
-真机运动授权和设备准备条件由 `environment.py` 检查。
-各 Config 保留独立调用时的缺省值；算法内部常量、SSH 脚本环境变量与独立底盘 GUI
-参数不由这个运行配置文件接管。
-
-## 运行命令
-
-```bash
-# Habitat 仿真
-python -m robot_nav habitat --scene sim/habitat/scene.glb --target "chair"
-
-# Hermes + D435i 真机（本地 USB 相机）
-python -m robot_nav hermes --target "chair" --enable-motion
-
-# 随车笔记本转发（先启动相机服务和 SSH 隧道，见 Hermes 文档）
-python -m robot_nav hermes --camera-source remote \
-  --camera-endpoint ipc:///tmp/robot-nav-camera.sock --base-url http://127.0.0.1:11448 \
-  --target "chair" --enable-motion
-
-# 只读预检，不发送运动命令
-python -m robot_nav hermes --preflight-only
-```
-
-## 当前实现
-
-- Habitat：提供 RGB-D、二维位姿和逐步公开的占用图；相对目标由 navmesh 规划并
-  离散执行。
-- Hermes + D435i：正式导航每次先清空底盘地图并启用建图，项目地图与搜索状态从空状态重建；只读预检不清图。
-  Hermes 提供位姿、实时激光和自主规划；项目用有效激光射线直接更新自由格与命中障碍，
-  不等待底盘概率累积，重新扫描可清除历史激光障碍。D435i 提供 RGB-D，
-  探索地图只在当前理论水平 FOV 内刷新，视场外保留历史值，不考虑遮挡；
-  启动区域仅初始化一次。物体障碍定位和停靠使用全方向激光历史图，选点时保留 0.36 m 净空。
-  观测方向和覆盖使用同一 FOV 缓存的未膨胀视觉图，避免把导航净空带误判为遮挡。
-  该视觉图中的封闭小未知孔洞不产生探索与补查候选，地图本身仍保留未知状态。
-  实际位姿到达并稳定后交回决策，下一 Action 直接替换旧任务；无下一动作及退出时取消收尾。
-  本地直连与经随车笔记本转发共用同一套地图处理、运动监控与导航实现；
-  随车发布器完成 RGB-D 与底盘位姿的时间对齐；相机安装外参启动时从配置读取。
-  算法、地图处理和动作控制仍在开发机。地图和实时运动反馈继续读取 Hermes REST。
-- Rerun：显示 RGB、深度、地图、Frontier、机器人轨迹、算法目标、底盘目标和
-  规划路径，同时持续写入 `data/run_logs/rerun-*.rrd`。`--rerun-save <PATH>`
-  可指定新文件路径；`--no-rerun` 同时关闭界面和录制。
-  `VLM summary` 简要关联任务、请求与导航使用；`VLM full` 保留完整会话信息。
-  World 以机器人位置为中心跟随平移，保持地图方向，默认显示周围 12×12 m；
-  占用图、路径和任务标记共同显示，同次扫描只画一个点，邻近任务合并显示。
-  扫描期间显示本轮全部计划朝向，并用箭头突出当前待执行方向；扫描计划结束后清除。
-  右侧直接展示当前推理的 RGB 与评分；`Observations` 中点击 J 查看整组、V 查看
-  单图评分卡，原图通过 raw 链接查看。完整点位保留在 `World history`。
-- 导航 JSONL 日志（Hermes / Habitat）：记录每周期决策、候选评分和 Action 反馈，供事后复盘。
-- 视觉快照：`data/run_logs/semantic-*/job-*` 保存图片、位姿、候选和分析结果；
-  普通任务按 FIFO 处理。目录在退出后保留，当前不自动恢复上次队列。
-  同帧深度先临时压缩保存，分析后只保留命中画面的正式深度文件；检测失败或
-  未完成的任务保留临时深度，等待明确判断。
-
-## 主要目录
-
-| 路径（相对 `src/robot_nav/`） | 职责 |
-| --- | --- |
-| `__main__.py`、`cli.py`、`config.py` | 启动分派、参数与配置 |
-| `launch.py`、`environment.py` | 公共组件装配、设备准备与资源关闭 |
-| `app.py`、`core/navigator.py` | 取帧与执行编排；输入检查、感知归并、行为分派与反馈 |
-| `core/scan.py` | 扫描规划、转向采集推进、候选快照上下文与覆盖复用 |
-| `core/exploration.py` | 前沿提取与关联、评分选点、历史暂存、移动恢复与分支回退 |
-| `core/target.py` | 共用物体线索、接近与停靠；场景确认出口 |
-| `core/models.py` | 输入输出、搜索状态与结果构造 |
-| `core/geometry.py` | 坐标与角度计算、动作转换、路径未知长度 |
-| `core/timing.py` | 共用阶段计时，不读取或写入文件 |
-| `perception/semantic_queue.py` | 逐图提交、FIFO 推理、评分与线索交付 |
-| `perception/analyzer.py` | 模型协议、图像输入、短提示词与结果解析 |
-| `perception/snapshot_store.py` | 同帧 RGB-D 内存快照与历史帧恢复 |
-| `perception/object_localizer.py` | 复用同帧掩码，进行 RGB-D 与障碍射线定位 |
-| `adapters/` | Hermes / Habitat / RealSense、VLM 请求与本地模型进程 |
-| `run_log.py`、`visualization/` | JSONL 日志、终端和 Rerun 显示 |
-
-环境运行与设备准备脚本见 `sim/habitat/`、`hardware/hermes/`、`hardware/realsense/`。
-
-## 当前边界
-
-YOLOE 随导航启动预热，直接复用其分割结果；退出导航释放进程，默认使用已有
-`robot-nav` 模型环境。可用
-`--object-python` 指定已安装 PyTorch、ultralytics 的解释器，
-`--yolo-frequency-hz 10` 设置视频检测上限，`--object-class` 指定物体模式的简短类别，`--object-device` 选择设备。
-统一使用文本提示版 YOLOE，只编码本轮目标，不加载 PF 模型或编码整个词表。
-`src/robot_nav/adapters/yoloe_targets.json` 保存 PF 词表快照、常用目标固定提示词和 9 个场景预设。
-明确同义词使用固定名称，例如 `sofa → couch`、`refrigerator → fridge`、
-`trash can / waste bin → waste container`；鞋柜、落地式空调保留具体英文提示词。
-未收录的目标保留原文，不降级成宽泛类别。检测输出还原为任务类别，复用 Qwen 融合和导航。
-固定提示词尚未进行精度对比，不能保证优于原提示词。
-常用场景直接读取预设，其他场景由 Qwen 生成 3–5 类线索；具体清单见
-[场景模式说明](docs/scene-mode-design.md)。两种来源都保留停靠后的 Qwen 环视确认。
-JSONL 的 `yolo_model_selected` 记录文本权重路径与实际提示词映射，
-`scene_objects_generated.source` 区分 `predefined` 和 `qwen`。
-两种模式均只启动一个 YOLOE 进程；只有随机评分模式不启动本地模型。
-未收录场景的清单生成失败重试一次，仍失败则结束任务。详细流程与阈值见 [算法说明](docs/algorithm.md)。
-
-这是算法原型，不是功能安全系统。核心输出高层相对位姿，实际路径规划、避障和
-执行反馈由 Adapter 后面的仿真器或底盘负责。真机运行必须有人能够立即急停；
-动态障碍预测、通用模型重试和连续速度控制尚未实现。
+场景、模型和标定需自行准备，运行记录默认保存在 `data/run_logs/`。
+具体启动、停止和查看结果的方法见对应环境的使用说明。

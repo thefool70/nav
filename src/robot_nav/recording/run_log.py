@@ -1,0 +1,647 @@
+"""导航过程记录：JSONL 日志、终端摘要、可视化回调与周期计时汇总。
+
+只记录输入、决策和执行反馈，不参与导航决策。"""
+
+from __future__ import annotations
+
+import json
+import math
+import threading
+import time
+from dataclasses import asdict
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from time import monotonic
+from typing import Any, Mapping, Optional, TextIO, Tuple
+
+from robot_nav.interfaces.geometry import action_command, world_to_nearest_grid_cell
+from robot_nav.interfaces.types import (
+    NavigationResult,
+    NavigationStatus,
+    NavigationFrame,
+    ObservationNode,
+    ObservationView,
+    ObstacleMap,
+    Pose2D,
+    RelativePoseCommand,
+    SearchDirectionState,
+    SearchState,
+    TargetObservation,
+)
+from robot_nav.navigation.scan import camera_world_position
+from robot_nav.recording.timing import measure_stage
+
+
+DEFAULT_RUN_LOG_DIRECTORY = Path("data/run_logs")
+
+
+class NavigationRunLogger:
+    """逐行写入导航事件；每条写入后立即 flush，异常退出也尽量保留现场。"""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._stream: Optional[TextIO] = self.path.open(
+            "a", encoding="utf-8"
+        )
+        self._current_cycle: Optional[int] = None
+        self._write_lock = threading.Lock()
+
+    def log_run_start(
+        self,
+        adapter_name: str,
+        target_text: str,
+        max_cycles: int,
+        configuration: Mapping[str, Any],
+    ) -> None:
+        """记录本次入口、目标及已合并的配置，作为后续周期日志的运行上下文。"""
+        self._write(
+            "run_start",
+            adapter=adapter_name,
+            target=target_text,
+            max_cycles=max_cycles,
+            configuration=configuration,
+        )
+
+    def log_cycle_start(self, cycle_index: int) -> None:
+        """在取帧前标记周期，便于测量上一动作结束后的循环间隔。"""
+        self._current_cycle = cycle_index
+        self._write("cycle_start", cycle=cycle_index)
+
+    def log_cycle_timing(self, timing: Mapping[str, Any]) -> None:
+        """记录动作执行前各阶段；嵌套耗时与多次调用保留原始边界。"""
+        self._write("cycle_timing", cycle=self._current_cycle, **timing)
+
+    def log_callback_timing(self, spans) -> None:
+        self._write("callback_timing", cycle=self._current_cycle, spans=spans)
+
+    def log_cycle_decision(
+        self,
+        cycle_index: int,
+        frame: NavigationFrame,
+        observation: Optional[TargetObservation],
+        result: NavigationResult,
+    ) -> None:
+        """保存发送命令前的输入、算法决定和关键中间结果。"""
+        self._current_cycle = cycle_index
+        self._write(
+            "cycle_decision",
+            cycle=cycle_index,
+            frame_timestamp_s=frame.timestamp_s,
+            pose=_pose_summary(frame.pose),
+            obstacle_map=_map_summary(frame),
+            camera=_camera_summary(frame),
+            observation=_observation_summary(observation),
+            result=_result_summary(result, frame.pose),
+        )
+
+    def log_cycle_result(
+        self,
+        cycle_index: int,
+        result: NavigationResult,
+    ) -> None:
+        """保存命令执行或可恢复失败处理后的最终周期状态。"""
+        self._write(
+            "cycle_result",
+            cycle=cycle_index,
+            status=result.status.value,
+            phase=result.state.phase.value,
+            stage=result.debug.stage,
+            message=result.debug.message,
+            details=_compact_debug_details(result.debug.details),
+            state=_state_summary(result.state),
+        )
+        self._current_cycle = None
+
+    def log_action_progress(self, message: str) -> None:
+        self._write(
+            "hermes_action",
+            cycle=self._current_cycle,
+            message=str(message),
+        )
+
+    def log_semantic_queue_event(self, event: Mapping[str, Any]) -> None:
+        """记录任务 ID 与小型诊断数据；图像只交给 Rerun，不写入 JSONL。"""
+        details = {key: value for key, value in event.items()
+                   if key not in ("image", "observation_frame", "observation")}
+        self._write("semantic_queue", queue_event=event.get("event"), details=details)
+
+
+    def log_error(self, exc: BaseException) -> None:
+        self._write(
+            "run_error",
+            cycle=self._current_cycle,
+            error_type=type(exc).__name__,
+            message=str(exc),
+        )
+
+    def log_run_end(
+        self,
+        return_code: int,
+        error_message: Optional[str] = None,
+    ) -> None:
+        self._write(
+            "run_end",
+            return_code=return_code,
+            error=error_message,
+        )
+
+    def close(self) -> None:
+        with self._write_lock:
+            stream = self._stream
+            self._stream = None
+            if stream is not None:
+                stream.close()
+
+    def _write(self, event: str, **payload: Any) -> None:
+        """串行写入并刷新一条 JSONL；只有文件 I/O 故障会停用日志，序列化错误继续传播。"""
+        with self._write_lock:
+            stream = self._stream
+            if stream is None:
+                return
+            record = {
+                "event": event,
+                "wall_time": datetime.now().astimezone().isoformat(
+                    timespec="milliseconds"
+                ),
+                "monotonic_s": time.monotonic(),
+                **payload,
+            }
+            try:
+                stream.write(json.dumps(
+                    _jsonable(record), ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+                ) + "\n")
+                stream.flush()
+            except OSError as exc:
+                self._stream = None
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+                print(f"运行日志已停用，导航继续：{exc}", flush=True)
+
+
+def report_cycle_decision(frame, decision, started, timings, *, on_cycle, on_timing):
+    """执行运动前的决策回调并汇总本周期计时；不包含运动耗时。"""
+    with measure_stage(timings, "cycle.callbacks"):
+        if on_cycle is not None:
+            on_cycle(frame, None, decision)
+    if on_timing is not None:
+        ended = monotonic()
+        on_timing({
+            "started_monotonic_s": started,
+            "ended_monotonic_s": ended,
+            "duration_s": ended - started,
+            "stage": decision.debug.stage,
+            "has_command": decision.status is NavigationStatus.OK and decision.action is not None,
+            "spans": timings,
+        })
+
+
+def record_decision(frame, observation, result, *, on_cycle, debug_frontier,
+                    run_logger, cycle_index):
+    """按固定顺序记录决策、更新显示、输出候选，再保存各步骤耗时。"""
+    timings = [] if run_logger is not None else None
+    if run_logger is not None:
+        with measure_stage(timings, "callback.decision_log"):
+            run_logger.log_cycle_decision(cycle_index, frame, observation, result)
+    with measure_stage(timings, "callback.visualization_and_debug"):
+        if on_cycle is not None:
+            on_cycle(frame, observation, result)
+        if debug_frontier:
+            _print_frontier_debug(frame, result)
+    if run_logger is not None:
+        run_logger.log_callback_timing(timings)
+
+
+def optional_callback(callback, description):
+    """可视化 I/O 或运行库故障时停用回调；类型、字段等程序错误继续传播。"""
+    if callback is None:
+        return None
+    # 每个包装函数独立记住是否停用，避免一个显示故障影响其他回调。
+    enabled = True
+
+    def invoke(*args):
+        nonlocal enabled
+        if not enabled:
+            return
+        try:
+            callback(*args)
+        except (OSError, RuntimeError) as exc:
+            enabled = False
+            print(f"{description}已停用：{exc}", flush=True)
+
+    return invoke
+
+
+def print_cycle(cycle_index: int, result: NavigationResult) -> None:
+    """输出足以沿算法步骤排错的一行周期信息。"""
+    print(
+        f"[{cycle_index:03d}] status={result.status.value} "
+        f"phase={result.state.phase.value} stage={result.debug.stage} | "
+        f"{result.debug.message}"
+    )
+
+
+def default_run_log_path(adapter_name: str) -> Path:
+    """返回带本地时间和微秒的默认日志路径，避免不同运行互相覆盖。"""
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+    safe_adapter_name = adapter_name.replace("/", "-").replace(" ", "-")
+    return DEFAULT_RUN_LOG_DIRECTORY / f"{safe_adapter_name}-{timestamp}.jsonl"
+
+
+def _print_frontier_debug(frame, result: NavigationResult) -> None:
+    """打印父节点返回目标，或本轮 Frontier 候选的评分组成。"""
+    details = result.debug.details
+    stage = details.get("next_stage", result.debug.stage)
+    if stage == "backtrack.return":
+        print(
+            f"[Frontier] stage={stage}，逐级返回节点={details['parent_node_id']}，"
+            f"移动目标={details['destination_world_xy']}，"
+            f"分支深度={details['branch_depth']}，"
+            f"本节点暂存方向={details['pending_direction_count']}，到达后刷新并决策"
+        )
+        return
+    if stage not in ("explore.select", "backtrack.resume"):
+        return
+    candidates = result.debug.details.get("frontier_candidates")
+    if not candidates:
+        return
+
+    path_weight = result.debug.details["frontier_path_distance_weight"]
+    semantic_weight = result.debug.details["frontier_semantic_score_weight"]
+    print(
+        "[Frontier] "
+        f"stage={stage}，"
+        f"本轮候选={len(candidates)}，"
+        f"选择来源={result.debug.details['frontier_selection_source']}，"
+        f"新方向={result.debug.details['new_frontier_count']}，"
+        f"暂存旧方向={result.debug.details['deferred_frontier_count']}，"
+        f"robot=({frame.pose.x_m:.3f}, {frame.pose.y_m:.3f}) m"
+    )
+    if stage == "backtrack.resume":
+        print(f"[Frontier] 已到达父节点={details['parent_node_id']}，恢复该节点暂存方向。")
+    print(
+        "[Frontier] score = 前沿跨度 "
+        f"- {path_weight:.2f}×路径距离 + 语义奖励（仅用于新方向排序）；"
+        f"语义奖励 = {semantic_weight:.2f}×(2×VLM分数-1)"
+    )
+    for rank, candidate in enumerate(candidates, start=1):
+        selected = " selected" if rank == 1 else ""
+        semantic_score = candidate["semantic_score"]
+        semantic_text = "none" if semantic_score is None else f"{semantic_score:.3f}"
+        print(
+            f"[Frontier #{rank:02d}{selected}] "
+            f"id={candidate['candidate_id']} "
+            f"grid=({candidate['row']}, {candidate['col']}) "
+            f"world=({candidate['world_x_m']:.3f}, "
+            f"{candidate['world_y_m']:.3f}) m "
+            f"cells={candidate['frontier_cell_count']} "
+            f"span={candidate['frontier_span_m']:.3f} m "
+            f"path={candidate['path_distance_m']:.3f} m "
+            f"distance_penalty={candidate['distance_penalty']:.3f} "
+            f"vlm={semantic_text} "
+            f"semantic_bonus={candidate['semantic_bonus']:+.3f} "
+            f"deferred_order={candidate['deferred_order']} "
+            f"score={candidate['score']:.3f}"
+        )
+    print(f"[Frontier] 本次完整移动目标={result.debug.details['destination_world_xy']}")
+
+
+def _result_summary(
+    result: NavigationResult,
+    pose: Pose2D,
+) -> Mapping[str, Any]:
+    """汇总决策、动作和状态；命令使用决策帧位姿转换，便于与实际执行对照。"""
+    return {
+        "status": result.status.value,
+        "phase": result.state.phase.value,
+        "stage": result.debug.stage,
+        "message": result.debug.message,
+        "details": _compact_debug_details(result.debug.details, pose),
+        "action": ({"kind": result.action.action.value,
+                    "purpose": result.action.purpose.value,
+                    "constraint": result.action.constraint.value,
+                    "candidate_id": result.action.candidate_id,
+                    "node_id": result.action.node_id}
+                   if result.action is not None else None),
+        "command": _command_summary(action_command(result.action, pose), pose),
+        "state": _state_summary(result.state),
+    }
+
+
+def _command_summary(
+    command: Optional[RelativePoseCommand],
+    pose: Pose2D,
+) -> Optional[Mapping[str, Any]]:
+    """同时记录机器人系相对命令和对应世界目标点，距离为米、角度为弧度。"""
+    if command is None:
+        return None
+    cosine = math.cos(pose.yaw_rad)
+    sine = math.sin(pose.yaw_rad)
+    target_world_xy = (
+        pose.x_m + command.forward_m * cosine - command.left_m * sine,
+        pose.y_m + command.forward_m * sine + command.left_m * cosine,
+    )
+    return {
+        "forward_m": command.forward_m,
+        "left_m": command.left_m,
+        "yaw_rad": command.yaw_rad,
+        "translation_m": math.hypot(command.forward_m, command.left_m),
+        "target_world_xy": target_world_xy,
+    }
+
+
+def _map_summary(frame: NavigationFrame) -> Mapping[str, Any]:
+    """统计地图已知程度及机器人所在格的状态，不把整张地图写入每条日志。"""
+    obstacle_map = frame.obstacle_map
+    rows = obstacle_map.occupancy
+    height = len(rows)
+    width = len(rows[0]) if height else 0
+    free_count = 0
+    occupied_count = 0
+    unknown_count = 0
+    for row in rows:
+        for value in row:
+            if value is None:
+                unknown_count += 1
+            elif float(value) <= 0.5:
+                free_count += 1
+            else:
+                occupied_count += 1
+
+    robot_cell = world_to_nearest_grid_cell(
+        (frame.pose.x_m, frame.pose.y_m), obstacle_map
+    )
+    robot_cell_value: Optional[float] = None
+    robot_cell_state = "out_of_map"
+    robot_cell_in_map = (
+        0 <= robot_cell[0] < height
+        and 0 <= robot_cell[1] < width
+    )
+    if robot_cell_in_map:
+        value = rows[robot_cell[0]][robot_cell[1]]
+        robot_cell_value = None if value is None else float(value)
+        if value is None:
+            robot_cell_state = "unknown"
+        elif float(value) <= 0.5:
+            robot_cell_state = "free"
+        else:
+            robot_cell_state = "occupied"
+
+    return {
+        "frame_id": obstacle_map.frame_id,
+        "width": width,
+        "height": height,
+        "resolution_m": obstacle_map.resolution_m,
+        "origin": _pose_summary(obstacle_map.origin),
+        "free_cells": free_count,
+        "occupied_cells": occupied_count,
+        "unknown_cells": unknown_count,
+        "robot_cell": robot_cell,
+        "robot_cell_in_map": robot_cell_in_map,
+        "robot_cell_value": robot_cell_value,
+        "robot_cell_state": robot_cell_state,
+    }
+
+
+def _camera_summary(frame: NavigationFrame) -> Mapping[str, Any]:
+    """记录图像尺寸、标定及相机在两张地图中的位置，供投影与覆盖排错。"""
+    intrinsics = frame.camera_intrinsics
+    extrinsics = frame.camera_extrinsics_in_robot
+    return {
+        "rgb_size": _image_size(frame.rgb),
+        "depth_size": _image_size(frame.depth),
+        "visibility_map_source": "visibility_map" if frame.visibility_map is not None else "obstacle_map",
+        "origin_in_obstacle_map": _camera_origin_cell(frame, frame.obstacle_map),
+        "origin_in_visibility_map": _camera_origin_cell(
+            frame, frame.visibility_map if frame.visibility_map is not None else frame.obstacle_map,
+        ),
+        "intrinsics": None
+        if intrinsics is None
+        else {
+            "fx": intrinsics.fx,
+            "fy": intrinsics.fy,
+            "cx": intrinsics.cx,
+            "cy": intrinsics.cy,
+        },
+        "extrinsics_in_robot": {
+            "forward_m": extrinsics.forward_m,
+            "left_m": extrinsics.left_m,
+            "height_m": extrinsics.height_m,
+            "yaw_rad": extrinsics.yaw_rad,
+            "pitch_down_rad": extrinsics.pitch_down_rad,
+            "roll_rad": extrinsics.roll_rad,
+        },
+    }
+
+
+def _camera_origin_cell(frame: NavigationFrame, obstacle_map: ObstacleMap) -> Mapping[str, Any]:
+    """记录光心在两种地图中的占用值，用于区分净空膨胀和真实遮挡。"""
+    row, col = world_to_nearest_grid_cell(camera_world_position(frame), obstacle_map)
+    grid = obstacle_map.occupancy
+    if not (0 <= row < len(grid) and 0 <= col < len(grid[row])):
+        return {"cell": (row, col), "state": "out_of_map", "value": None}
+    value = grid[row][col]
+    state = "unknown" if value is None else "free" if float(value) <= 0.5 else "occupied"
+    return {"cell": (row, col), "state": state, "value": value}
+
+
+def _image_size(image: Any) -> Optional[Tuple[int, int]]:
+    if image is None:
+        return None
+    height = len(image)
+    width = len(image[0]) if height else 0
+    return (width, height)
+
+
+def _observation_summary(
+    observation: Optional[TargetObservation],
+) -> Optional[Mapping[str, Any]]:
+    """记录检测结论与框，并用掩码摘要替代完整像素矩阵。"""
+    if observation is None:
+        return None
+    return {
+        "visibility": observation.visibility.value,
+        "bbox_norm": observation.bbox_norm,
+        "target_mask": _mask_summary(observation.target_mask),
+        "reason": observation.reason,
+        "source": observation.source,
+        "confidence": observation.confidence,
+    }
+
+
+def _mask_summary(mask: Any) -> Optional[Mapping[str, Any]]:
+    """只记录掩码尺寸和前景数，避免把整张图写入 JSONL。"""
+    if mask is None:
+        return None
+    try:
+        height = len(mask)
+        width = len(mask[0]) if height else 0
+        foreground_pixels = sum(
+            1 for row in mask for selected in row if bool(selected)
+        )
+    except (TypeError, IndexError, ValueError):
+        return {"valid": False}
+    return {
+        "valid": height > 0 and width > 0,
+        "width_px": width,
+        "height_px": height,
+        "foreground_pixels": foreground_pixels,
+    }
+
+
+def _state_summary(state: SearchState) -> Mapping[str, Any]:
+    """汇总跨周期搜索状态，保留分支、暂存区域和线索的关联信息供复盘。"""
+    direction_counts = {item.value: 0 for item in SearchDirectionState}
+    for node in state.observation_history:
+        direction_counts[node.state.value] += 1
+
+    latest_node = (
+        state.observation_history[-1]
+        if state.observation_history
+        else None
+    )
+    deferred_regions = sorted(
+        (region for region in state.frontier_regions if region.deferred_order is not None),
+        key=lambda region: (
+            -region.deferred_order[0], region.deferred_order[1], region.region_id,
+        ),
+    )
+    return {
+        "phase": state.phase.value,
+        "scan_headings_world_rad": state.scan_headings_world_rad,
+        "scan_captured_count": len(state.scan_views),
+        "history_node_count": len(state.observation_history),
+        "history_direction_counts": direction_counts,
+        "active_frontier_id": state.active_frontier_id,
+        "backtrack_node_id": state.backtrack_node_id,
+        "branch_node_ids": state.branch_node_ids,
+        "asynchronous_perception": state.asynchronous_perception,
+        "pending_semantic_jobs": state.pending_semantic_jobs,
+        "failed_semantic_jobs": state.failed_semantic_jobs,
+        "pending_observation_view_count": len(state.pending_observation_views),
+        "active_target_clue": (
+            {"clue_id": state.active_target_clue.clue_id,
+             "pose": _pose_summary(state.active_target_clue.pose),
+             "timestamp_s": state.active_target_clue.timestamp_s,
+             "map_frame_id": state.active_target_clue.map_frame_id,
+             "job_id": state.active_target_clue.job_id, "view_id": state.active_target_clue.view_id}
+            if state.active_target_clue is not None else None
+        ),
+        "object_approach": asdict(state.object_approach),
+        "frontier_region_ids": tuple(region.region_id for region in state.frontier_regions),
+        "frontier_hole_filter": {
+            "applied": state.frontier_hole_filter_applied,
+            "ignored_hole_count": state.ignored_frontier_hole_count,
+            "ignored_hole_area_m2": state.ignored_frontier_hole_area_m2,
+            "ignored_frontier_cell_count": state.ignored_frontier_cell_count,
+        },
+        "blocked_frontier_regions": tuple(
+            {
+                "region_id": region.region_id,
+                "boundary_point_count": len(region.boundary_world_xy),
+            }
+            for region in state.blocked_frontier_regions
+        ),
+        "deferred_frontiers": tuple(
+            {"region_id": region.region_id, "deferred_order": region.deferred_order}
+            for region in deferred_regions
+        ),
+        "checked_view_count": len(state.observed_views),
+        "scan_observation_point_count": len(state.scan_observation_points),
+        "scan_local_point_count": state.scan_local_point_count,
+        "covered_point_count": len({
+            tuple(point) for view in state.observed_views for point in view.visible_world_xy
+        }),
+        "last_checked_view": (
+            _observation_view_summary(state.observed_views[-1])
+            if state.observed_views else None
+        ),
+        "scan_views": tuple(
+            _observation_view_summary(view) for view in state.scan_views
+        ),
+        "latest_node": _node_summary(latest_node),
+    }
+
+
+def _observation_view_summary(view: ObservationView) -> Mapping[str, Any]:
+    """记录覆盖所对应的真实相机位置与采集时刻，不重复写入全部采样点。"""
+    return {
+        "pose": _pose_summary(view.pose),
+        "camera_world_xy": view.camera_world_xy,
+        "camera_heading_world_rad": view.camera_heading_world_rad,
+        "horizontal_fov_rad": view.horizontal_fov_rad,
+        "timestamp_s": view.timestamp_s,
+        "visible_point_count": len(view.visible_world_xy),
+        "map_visible_point_count": len(view.map_visible_world_xy),
+        "depth_coverage_available": view.depth_coverage_available,
+    }
+
+
+def _node_summary(
+    node: Optional[ObservationNode],
+) -> Optional[Mapping[str, Any]]:
+    """记录一次探索移动；没有节点时返回 None。"""
+    if node is None:
+        return None
+    return {
+        "node_id": node.node_id,
+        "position_world_xy": node.position_world_xy,
+        "candidate_id": node.candidate_id,
+        "heading_world_rad": node.heading_world_rad,
+        "destination_world_xy": node.destination_world_xy,
+        "execution_reason": node.execution_reason,
+        "state": node.state.value,
+    }
+
+
+def _compact_debug_details(
+    details: Mapping[str, Any],
+    pose: Optional[Pose2D] = None,
+) -> Mapping[str, Any]:
+    """保留候选评分，但省略可由地图复现的大型 Frontier 格列表。"""
+    compact = dict(details)
+    candidates = compact.get("frontier_candidates")
+    if candidates is not None:
+        candidate_summaries = []
+        for candidate in candidates:
+            summary = {
+                key: value
+                for key, value in candidate.items()
+                if key != "frontier_cells"
+            }
+            if pose is not None:
+                summary["robot_distance_m"] = math.hypot(
+                    float(candidate["world_x_m"]) - pose.x_m,
+                    float(candidate["world_y_m"]) - pose.y_m,
+                )
+            candidate_summaries.append(summary)
+        compact["frontier_candidates"] = tuple(candidate_summaries)
+    return compact
+
+
+def _pose_summary(pose: Pose2D) -> Mapping[str, float]:
+    return {
+        "x_m": pose.x_m,
+        "y_m": pose.y_m,
+        "yaw_rad": pose.yaw_rad,
+    }
+
+
+def _jsonable(value: Any) -> Any:
+    """递归转为 JSON 可写值；枚举、路径和集合展开，其他对象保留文字表示。"""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, set):
+        return [_jsonable(item) for item in sorted(value)]
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)

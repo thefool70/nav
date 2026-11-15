@@ -1,7 +1,7 @@
 """robot-nav 启动入口：读取参数并分派仿真或真机导航。
 
-本模块只做三件事：读取参数、按需读取凭据、把控制权交给 :mod:`~robot_nav.launch`。
-参数定义在 ``cli.py``，运行装配在 ``launch.py``，导航循环在 ``app.py``。
+本模块只做三件事：读取参数、按需读取凭据、把控制权交给 :mod:`~robot_nav.pipeline.launch`。
+参数定义在 ``pipeline/cli.py``，装配在 ``pipeline/launch.py``，循环在 ``pipeline/navigation_loop.py``。
 """
 
 from __future__ import annotations
@@ -11,9 +11,9 @@ import os
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .cli import parse_arguments
-from .launch import run_entries
-from .adapters.ollama_warmup import is_local_qwen
+from robot_nav.pipeline.cli import parse_arguments
+from robot_nav.pipeline.launch import run_entries
+from robot_nav.perception.models.ollama_warmup import is_local_qwen
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

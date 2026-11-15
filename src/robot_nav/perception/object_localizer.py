@@ -1,7 +1,7 @@
 """历史物体定位：复用已通过融合判定的目标框与 YOLOE 分割，再由 RGB-D 或障碍射线求位置。
 
 localize_object 展示完整流程；下方是同一定位任务的深度与坐标计算。
-不选择底盘停靠点、不更新搜索状态；这些决策在 core/target.py。"""
+不选择底盘停靠点、不更新搜索状态；这些决策在 navigation/target_search.py。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from dataclasses import asdict
 from itertools import product
 from typing import Iterable, Tuple
 
-from ..core.geometry import world_point_to_robot
-from ..core.models import (
+from robot_nav.interfaces.geometry import world_point_to_robot
+from robot_nav.interfaces.types import (
     NavigationFrame,
     TargetEstimate,
     CameraExtrinsics,
